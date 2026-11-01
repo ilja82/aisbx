@@ -188,7 +188,7 @@ hook() {   # hook [VAR=value...]: the body as the startup dispatcher runs it, pl
   )
   rc=$?
 }
-runs() { cat "$C/count" 2>/dev/null || echo 0; }
+runs() { [ -e "$C/runs" ] && wc -l < "$C/runs" | tr -d ' ' || echo 0; }
 run_line() { sed -n "${1}p" "$C/runs" 2>/dev/null; }
 field() { run_line "$1" | cut -d'|' -f"$2"; }
 # Poll for up to <tenths> of a second until <command> succeeds.
