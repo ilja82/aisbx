@@ -133,16 +133,6 @@ platform on the GitHub release page.
 
 3. The workflow stops when the tag is not `v` plus the `Cargo.toml` version. Otherwise it makes a draft
    release, builds `aisbx` and `aisbx-ui` for each platform, uploads the archives and publishes the release.
-4. When the release is published, write the Homebrew formula from its checksums and open a pull request on
-   [ilja82/homebrew-tap](https://github.com/ilja82/homebrew-tap) with it:
-
-   ```console
-   $ gh release download v0.50.1.0 -p '*.sha256' -D dist/sums
-   $ python3 scripts/package.py formula --sums dist/sums --out ../homebrew-tap/Formula/aisbx.rb
-   ```
-
-   The formula installs the macOS and Linux archives. The command stops when a checksum file is missing or
-   names another version.
 
 Each archive holds `bin/` with both binaries, `kits/`, `docs/`, `README.md` and `LICENSE`.
 `scripts/package.py build --target <triple>` writes it from `target/<triple>/release/` and the files git tracks.

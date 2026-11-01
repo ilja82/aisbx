@@ -2,14 +2,12 @@
 
     python3 scripts/package.py version [TAG]
     python3 scripts/package.py build --target TRIPLE [--out DIR]
-    python3 scripts/package.py formula --sums DIR [--out FILE]
 """
 
 import argparse
 import gzip
 import hashlib
 import io
-import re
 import subprocess
 import sys
 import tarfile
@@ -21,35 +19,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 BINARIES = ("aisbx", "aisbx-ui")
 SHIPPED = ("kits", "docs", "README.md", "LICENSE")
-HOMEPAGE = "https://github.com/ilja82/aisbx"
-FORMULA_TARGETS = (
-    ("on_macos", "on_arm", "aarch64-apple-darwin"),
-    ("on_macos", "on_intel", "x86_64-apple-darwin"),
-    ("on_linux", "on_arm", "aarch64-unknown-linux-gnu"),
-    ("on_linux", "on_intel", "x86_64-unknown-linux-gnu"),
-)
-FORMULA = """class Aisbx < Formula
-  desc "Run coding agents in Docker Sandboxes on your own accounts and gateways"
-  homepage "{homepage}"
-  license "MIT"
-
-  livecheck do
-    url :stable
-    strategy :github_latest
-  end
-
-{platforms}
-  def install
-    libexec.install Dir["*"]
-    bin.write_exec_script libexec/"bin/aisbx", libexec/"bin/aisbx-ui"
-  end
-
-  test do
-    assert_match version.to_s, shell_output("#{{bin}}/aisbx --version")
-    assert_path_exists libexec/"kits"
-  end
-end
-"""
 
 
 def version(root=ROOT):
@@ -144,34 +113,6 @@ def build(target, out, root=ROOT):
     return archive, checksum
 
 
-def read_checksum(sums, archive):
-    path = sums / (archive + ".sha256")
-    if not path.is_file():
-        raise SystemExit(f"missing {path}: run gh release download v<version> -p '*.sha256'")
-    match = re.fullmatch(r"([0-9a-f]{64})  (\S+)\n?", path.read_text(encoding="utf-8"))
-    if not match or match.group(2) != archive:
-        raise SystemExit(f"{path}: expected '<sha256>  {archive}'")
-    return match.group(1)
-
-
-def formula(sums, root=ROOT):
-    ver = version(root)
-    blocks = []
-    for os_block in dict.fromkeys(o for o, _, _ in FORMULA_TARGETS):
-        lines = [f"  {os_block} do"]
-        for _, cpu_block, target in (t for t in FORMULA_TARGETS if t[0] == os_block):
-            archive = f"aisbx-{ver}-{target}.tar.gz"
-            lines += [
-                f"    {cpu_block} do",
-                f'      url "{HOMEPAGE}/releases/download/v{ver}/{archive}"',
-                f'      sha256 "{read_checksum(sums, archive)}"',
-                "    end",
-            ]
-        lines.append("  end")
-        blocks.append("\n".join(lines) + "\n")
-    return FORMULA.format(homepage=HOMEPAGE, platforms="\n".join(blocks))
-
-
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -180,19 +121,9 @@ def main(argv=None):
     b = sub.add_parser("build", help="write the archive and its .sha256 file")
     b.add_argument("--target", required=True)
     b.add_argument("--out", type=Path, default=ROOT / "dist")
-    f = sub.add_parser("formula", help="write the Homebrew formula from the release's .sha256 files")
-    f.add_argument("--sums", type=Path, required=True)
-    f.add_argument("--out", type=Path)
     args = parser.parse_args(argv)
     if args.command == "version":
         print(check_tag(args.tag) if args.tag else version())
-    elif args.command == "formula":
-        text = formula(args.sums)
-        if args.out:
-            args.out.parent.mkdir(parents=True, exist_ok=True)
-            args.out.write_text(text, encoding="utf-8", newline="\n")
-        else:
-            sys.stdout.write(text)
     else:
         for path in build(args.target, args.out):
             print(path)
