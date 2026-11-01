@@ -46,7 +46,17 @@ sandbox with your project folder in it.
 
 ## Install
 
-Install a release, or build from source. Then set the network policy of the host.
+Install with Homebrew, install a release, or build from source. Then set the network policy of the host.
+
+### With Homebrew
+
+On macOS and Linux, install both binaries from the tap:
+
+```console
+$ brew install ilja82/tap/aisbx
+```
+
+To update, run `brew upgrade aisbx`. Homebrew does not quarantine the binaries.
 
 ### From a release
 

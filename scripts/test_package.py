@@ -139,5 +139,57 @@ class BuildTest(unittest.TestCase):
                 package.build(target, c.root / "dist", c.root)
 
 
+def write_sums(folder, ver, targets):
+    folder.mkdir(parents=True, exist_ok=True)
+    digests = {}
+    for target in targets:
+        archive = f"aisbx-{ver}-{target}.tar.gz"
+        digests[target] = hashlib.sha256(target.encode()).hexdigest()
+        (folder / (archive + ".sha256")).write_text(
+            f"{digests[target]}  {archive}\n", encoding="utf-8"
+        )
+    return digests
+
+
+class FormulaTest(unittest.TestCase):
+    unix = [t for _, _, t in package.FORMULA_TARGETS]
+
+    def test_the_formula_names_each_unix_archive_with_its_checksum(self):
+        with Checkout("x86_64-unknown-linux-gnu") as c:
+            digests = write_sums(c.root / "sums", "0.50.1.3", self.unix)
+            text = package.formula(c.root / "sums", c.root)
+        base = "https://github.com/ilja82/aisbx/releases/download/v0.50.1.3"
+        for os_block, cpu_block, target in package.FORMULA_TARGETS:
+            block = text.split(f"  {os_block} do\n", 1)[1].split("\n  end\n", 1)[0]
+            cpu = block.split(f"    {cpu_block} do\n", 1)[1].split("    end\n", 1)[0]
+            self.assertIn(f'url "{base}/aisbx-0.50.1.3-{target}.tar.gz"', cpu)
+            self.assertIn(f'sha256 "{digests[target]}"', cpu)
+        self.assertNotIn("windows", text)
+        self.assertNotIn('  version "', text)
+        self.assertIn('bin.write_exec_script libexec/"bin/aisbx", libexec/"bin/aisbx-ui"', text)
+
+    def test_a_missing_checksum_stops_the_formula(self):
+        with Checkout("x86_64-unknown-linux-gnu") as c:
+            write_sums(c.root / "sums", "0.50.1.3", self.unix[1:])
+            with self.assertRaises(SystemExit):
+                package.formula(c.root / "sums", c.root)
+
+    def test_a_checksum_of_another_version_stops_the_formula(self):
+        with Checkout("x86_64-unknown-linux-gnu") as c:
+            write_sums(c.root / "sums", "0.50.1.3", self.unix)
+            sums = c.root / "sums"
+            first = sums / f"aisbx-0.50.1.3-{self.unix[0]}.tar.gz.sha256"
+            first.write_text(first.read_text(encoding="utf-8").replace("1.3", "1.2"), encoding="utf-8")
+            with self.assertRaises(SystemExit):
+                package.formula(sums, c.root)
+
+    def test_the_cli_writes_the_formula_to_a_file(self):
+        with Checkout("x86_64-unknown-linux-gnu") as c:
+            write_sums(c.root / "sums", package.version(), self.unix)
+            out = c.root / "tap" / "Formula" / "aisbx.rb"
+            package.main(["formula", "--sums", str(c.root / "sums"), "--out", str(out)])
+            self.assertTrue(out.read_bytes().startswith(b"class Aisbx < Formula\n"))
+
+
 if __name__ == "__main__":
     unittest.main()
