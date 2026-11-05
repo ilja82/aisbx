@@ -3909,6 +3909,10 @@ mod tests {
             .any(|l| l.trim_start().starts_with("--tmpfs-volumes ")));
     }
 
+    fn parse_up(raw: &[&str]) -> Args {
+        Args::parse(&strings(raw), &["no-mcp"], &[]).unwrap()
+    }
+
     fn create_argv_for(args: &Args) -> Vec<String> {
         let static_mcp = static_mcp_for(args);
         let kit = Path::new("/kits/claude-anthropic");
@@ -3932,44 +3936,40 @@ mod tests {
 
     #[test]
     fn no_mcp_passes_static_mcp_none_once() {
-        let args = Args::parse(&strings(&["--no-mcp"]), &["no-mcp"], &[]).unwrap();
+        let args = parse_up(&["--no-mcp"]);
         let argv = create_argv_for(&args);
         let at: Vec<usize> = (0..argv.len())
             .filter(|&i| argv[i] == "--static-mcp")
             .collect();
         assert_eq!(at.len(), 1, "{argv:?}");
         assert_eq!(argv[at[0] + 1], sbx::STATIC_MCP_NONE);
-        assert_eq!(argv.iter().filter(|a| *a == "none").count(), 1, "{argv:?}");
+        assert_eq!(argv.iter().filter(|a| a.as_str() == "none").count(), 1);
     }
 
     #[test]
     fn without_no_mcp_the_argv_has_no_static_mcp() {
-        let args = Args::parse(&strings(&[]), &["no-mcp"], &[]).unwrap();
+        let args = parse_up(&[]);
         assert!(static_mcp_for(&args).is_empty());
         let argv = create_argv_for(&args);
-        assert!(!argv.iter().any(|a| a.contains("static-mcp")), "{argv:?}");
+        let has_flag = argv.iter().any(|a| a == "--static-mcp");
+        assert!(!has_flag, "{argv:?}");
     }
 
     #[test]
     fn no_mcp_is_a_switch() {
-        let args = Args::parse(&strings(&["--no-mcp", "dir"]), &["no-mcp"], &[]).unwrap();
+        let args = parse_up(&["--no-mcp", "dir"]);
         assert!(args.has("no-mcp"));
         assert_eq!(args.positional, vec!["dir".to_string()]);
-        let fail = up(&strings(&["--backend", "claude-anthropic", "--no-mcp=x"]))
-            .expect_err("refused");
+        let raw = strings(&["--backend", "claude-anthropic", "--no-mcp=x"]);
+        let fail = up(&raw).expect_err("refused");
         assert_eq!(fail.code, EXIT_USAGE);
-        assert!(
-            fail.message.contains("--no-mcp takes no value"),
-            "{}",
-            fail.message
-        );
+        let message = &fail.message;
+        assert!(message.contains("--no-mcp takes no value"), "{message}");
     }
 
     #[test]
     fn no_mcp_is_documented() {
-        assert!(HELP
-            .lines()
-            .any(|l| l.trim_start().starts_with("--no-mcp ")));
+        assert!(HELP.contains("\n        --no-mcp "));
         let docs = include_str!("../../docs/headless.md");
         assert!(docs.contains("`--no-mcp`"));
     }
