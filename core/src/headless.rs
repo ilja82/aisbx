@@ -4981,7 +4981,12 @@ mod tests {
             "could not add jdk25 to box (sbx kit add failed (exit status: 1)); no kit was added"
         );
         assert_eq!(
-            add_failure("box", "statusline", &["jdk25", "rtk"], "could not run sbx: gone"),
+            add_failure(
+                "box",
+                "statusline",
+                &["jdk25", "rtk"],
+                "could not run sbx: gone"
+            ),
             "could not add statusline to box (could not run sbx: gone); added before it: jdk25, \
              rtk"
         );
