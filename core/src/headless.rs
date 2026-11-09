@@ -1446,35 +1446,34 @@ fn one_line(text: &str) -> String {
 
 fn render_ls(entries: &[sbx::LsEntry], registry: &state::Registry, json: bool) -> String {
     if json {
-        let rows: Vec<serde_json::Value> = entries
-            .iter()
-            .map(|e| {
-                serde_json::json!({
-                    "name": e.name,
-                    "status": e.status,
-                    "agent": e.agent,
-                    "workspaces": e.workspaces,
-                    "label": registry.display_name(&e.name),
-                })
-            })
-            .collect();
+        let mut rows = Vec::new();
+        for e in entries {
+            let label = registry.display_name(&e.name);
+            rows.push(serde_json::json!({
+                "name": e.name,
+                "status": e.status,
+                "agent": e.agent,
+                "workspaces": e.workspaces,
+                "label": label,
+            }));
+        }
         return serde_json::to_string_pretty(&rows).unwrap_or_default();
     }
-    let field = |text: &str| text.replace(['\t', '\n', '\r'], " ");
-    entries
-        .iter()
-        .map(|e| {
-            [
-                field(&e.name),
-                field(&e.status),
-                field(&e.agent),
-                field(e.workspaces.first().map_or("", String::as_str)),
-                field(registry.display_name(&e.name).unwrap_or("")),
-            ]
-            .join("\t")
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    let cell = |text: &str| text.replace(['\t', '\n', '\r'], " ");
+    let mut lines = Vec::new();
+    for e in entries {
+        let primary = e.workspaces.first().map_or("", String::as_str);
+        let label = registry.display_name(&e.name).unwrap_or("");
+        lines.push(format!(
+            "{}\t{}\t{}\t{}\t{}",
+            cell(&e.name),
+            cell(&e.status),
+            cell(&e.agent),
+            cell(primary),
+            cell(label)
+        ));
+    }
+    lines.join("\n")
 }
 
 fn status(raw: &[String]) -> Outcome {
@@ -3041,7 +3040,7 @@ mod tests {
             name: name.into(),
             agent: "claude".into(),
             status: "running".into(),
-            workspaces: workspaces.iter().map(|w| w.to_string()).collect(),
+            workspaces: workspaces.iter().map(|w| (*w).to_string()).collect(),
             ..Default::default()
         }
     }
