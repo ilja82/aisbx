@@ -3081,7 +3081,10 @@ mod tests {
             assert_eq!(keys, ["agent", "label", "name", "status", "workspaces"]);
         }
         assert_eq!(rows[0]["label"], "nightly");
-        assert_eq!(rows[0]["workspaces"], serde_json::json!(["/w/a", "/w/x:ro"]));
+        assert_eq!(
+            rows[0]["workspaces"],
+            serde_json::json!(["/w/a", "/w/x:ro"])
+        );
         assert!(rows[1]["label"].is_null());
         assert_eq!(rows[1]["workspaces"], serde_json::json!([]));
     }
