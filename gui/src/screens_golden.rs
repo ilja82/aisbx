@@ -300,6 +300,8 @@ fn the_settings_page_turns_each_setting_with_its_own_button() {
             Some(testkit::bool_setting(CLIPBOARD_TEXT_COPY, false)),
             Some(testkit::bool_setting(sbx::CLIPBOARD_IMAGE_PASTE, false)),
             Some(testkit::bool_setting(sbx::SANDBOX_FUSE, true)),
+            Some(testkit::bool_setting(sbx::CLAUDE_CHROME, false)),
+            Some(testkit::bool_setting(sbx::CLAUDE_REMOTE_CONTROL, false)),
         ];
         form.skills = Some(testkit::skills_default("readonly"));
         w.frame(Vec::new());
@@ -310,6 +312,8 @@ fn the_settings_page_turns_each_setting_with_its_own_button() {
             "Clipboard copy",
             "Image paste",
             "FUSE",
+            "Claude in Chrome",
+            "Remote Control",
             "Turn off",
             "Turn on",
             "Close",

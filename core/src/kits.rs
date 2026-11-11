@@ -38,6 +38,53 @@ pub struct Kit {
     /// The harnesses ([`Backend::harness`]) a mixin works with: the lines of its
     /// [`HARNESSES_FILE`]. Empty means every harness.
     pub harnesses: Vec<String>,
+    /// The features the descriptor's `requires:` names, without versions ([`feature_name`]).
+    pub requires: Vec<String>,
+    /// The features the descriptor's `provides:` names, without versions ([`feature_name`]).
+    pub provides: Vec<String>,
+}
+
+/// The feature an entry of `requires:` or `provides:` names, without its version or namespace:
+/// `claude@2.0.0`, `claude>=2` and `com.docker.kit/claude` all name `claude`.
+pub fn feature_name(entry: &str) -> String {
+    let name: String = entry
+        .trim()
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'))
+        .collect();
+    name.rsplit('/').next().unwrap_or_default().to_string()
+}
+
+/// The features a descriptor's `key` list names; entries that are not strings are skipped.
+fn features(doc: &Yaml, key: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for entry in doc[key].as_vec().into_iter().flatten() {
+        let name = entry.as_str().map(feature_name).unwrap_or_default();
+        if !name.is_empty() && !out.contains(&name) {
+            out.push(name);
+        }
+    }
+    out
+}
+
+/// The features a kit in `before` provides that a kit in `after` requires and no kit in `after`
+/// provides: a kit set `sbx create` refuses. Only declared `provides:` entries count.
+pub fn lost_features<'a>(
+    before: impl IntoIterator<Item = &'a Kit>,
+    after: impl IntoIterator<Item = &'a Kit>,
+) -> Vec<String> {
+    let after: Vec<&Kit> = after.into_iter().collect();
+    let provided = |f: &String| after.iter().any(|k| k.provides.contains(f));
+    let required = |f: &String| after.iter().any(|k| k.requires.contains(f));
+    let mut lost: Vec<String> = Vec::new();
+    for kit in before {
+        for f in &kit.provides {
+            if required(f) && !provided(f) && !lost.contains(f) {
+                lost.push(f.clone());
+            }
+        }
+    }
+    lost
 }
 
 /// A kit's list of changes, beside its descriptor: one line per change, newest first; blank lines
@@ -738,6 +785,8 @@ impl Kit {
             harnesses: read_lines(dir, HARNESSES_FILE),
             volumes: caps.iter().any(|c| c.kind == "volume@1"),
             skills: caps.iter().any(|c| c.kind == "agent-skills@1"),
+            requires: features(&doc, "requires"),
+            provides: features(&doc, "provides"),
         })
     }
 }
@@ -1037,6 +1086,40 @@ mod tests {
             .flatten()
             .filter_map(|s| s.as_str().map(str::to_string))
             .collect()
+    }
+
+    #[test]
+    fn reads_the_features_a_kit_requires_and_provides() {
+        let dir = scratch_kit(
+            "feature-probe",
+            "schemaVersion: \"3\"\nkind: mixin\n\
+             requires: [claude, \"gojq>=0.12\", com.docker.kit/claude, {agent: x}]\n\
+             provides: [\"jq@1.7\"]\n",
+        );
+        let kit = Kit::parse(&dir).unwrap();
+        assert_eq!(kit.requires, ["claude", "gojq"]);
+        assert_eq!(kit.provides, ["jq"]);
+        let plain = scratch_kit("plain-probe", "schemaVersion: \"3\"\nkind: mixin\n");
+        let kit = Kit::parse(&plain).unwrap();
+        assert!(kit.requires.is_empty() && kit.provides.is_empty());
+    }
+
+    #[test]
+    fn a_feature_is_lost_only_when_a_kept_kit_requires_it() {
+        let catalog = Catalog::load().unwrap();
+        let mut provider = catalog.addons[0].kit.clone();
+        provider.provides = vec!["claude".into()];
+        let mut needer = catalog.addons[1].kit.clone();
+        needer.requires = vec!["claude".into()];
+        let mut other = catalog.addons[2].kit.clone();
+        other.provides = vec!["claude".into()];
+        let backend = catalog.backends[0].kit.clone();
+        let before = [&backend, &provider, &needer];
+        assert_eq!(lost_features(before, [&backend, &needer]), ["claude"]);
+        assert!(lost_features(before, [&backend, &provider, &needer]).is_empty());
+        assert!(lost_features(before, [&backend]).is_empty());
+        assert!(lost_features(before, [&backend, &needer, &other]).is_empty());
+        assert!(lost_features([&backend, &needer], [&backend, &needer]).is_empty());
     }
 
     #[test]

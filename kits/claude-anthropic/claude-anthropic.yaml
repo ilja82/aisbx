@@ -23,7 +23,7 @@ capabilities:
           - platform.claude.com          # OAuth token endpoint (/v1/oauth/token)
           - claude.com                   # account pages /login hands off to
           - mcp-proxy.anthropic.com      # claude.ai connectors
-          - bridge.claudeusercontent.com # /remote-control (sbx settings set claude.remoteControl true)
+          - bridge.claudeusercontent.com # /remote-control and Claude in Chrome (claude.remoteControl, claude.chrome)
           - downloads.claude.ai          # the dashboard's `claude update` before a session
           - code.claude.com              # the Claude Code docs its bundled claude-code skill fetches
           - plugins.gradle.org

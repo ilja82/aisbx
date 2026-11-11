@@ -554,7 +554,22 @@ mod tests {
             }
         }
         copies.sort();
-        assert_eq!(copies.len(), 5, "{copies:?}");
+        let names: Vec<String> = (copies.iter())
+            .map(|c| c.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "claude-anthropic",
+                "claude-bare-local",
+                "claude-litellm",
+                "claude-local",
+                "claude-token",
+                "host-npm",
+                "host-pip",
+            ],
+            "{copies:?}"
+        );
         for copy in &copies {
             let out = std::process::Command::new("sbx")
                 .args(["kit", "validate", "--json"])

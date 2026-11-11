@@ -43,6 +43,9 @@ $ sbx policy allow network <host> --method GET --path '/v1/**'
 $ sbx policy deny network <host> --method GET --path '/v1/**' --query team=platform
 ```
 
+sbx matches the letters of a path and of query names and values without case: the first rule also allows
+`GET <host>/V1/items`. Do not rely on case to tell an allowed request from a denied one.
+
 ## Egress
 
 A kit's allow-list can only open hosts, never close one. Under `deny-all`, these lists are all a sandbox can reach.
@@ -51,7 +54,7 @@ A kit's allow-list can only open hosts, never close one. Under `deny-all`, these
 | Kit | Allows (at run time unless marked) |
 | --- | --- |
 | `claude-litellm` | `downloads.claude.ai` (updates; also at install), `code.claude.com` (docs), `api.anthropic.com` (WebFetch's domain check only); the gateway host |
-| `claude-anthropic` | `api.anthropic.com`, `claude.ai`, `platform.claude.com`, `claude.com`, `mcp-proxy.anthropic.com`, `bridge.claudeusercontent.com` (`/remote-control`), `downloads.claude.ai` (also at install), `code.claude.com` |
+| `claude-anthropic` | `api.anthropic.com`, `claude.ai`, `platform.claude.com`, `claude.com`, `mcp-proxy.anthropic.com`, `bridge.claudeusercontent.com` (`/remote-control`, Claude in Chrome), `downloads.claude.ai` (also at install), `code.claude.com` |
 | `claude-token` | `api.anthropic.com`, `downloads.claude.ai` (also at install), `code.claude.com` |
 | `opencode-litellm` | the npm registry (updates; also at install), `models.dev`, `github.com`, `*.github.com`, `*.githubusercontent.com`; the gateway host |
 | `codex-openai` | `api.openai.com`, `openai.com`, `auth.openai.com`, `chatgpt.com`, `files.openai.com`, the npm registry (also at install) ([Codex](agents.md#codex)) |

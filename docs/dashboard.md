@@ -101,7 +101,7 @@ This text version shows more row states: a setup token, a LiteLLM connection, an
 foreign kit.
 
 ```text
- aisbx  ~/my-project   ● 2 of 4 running                    ⚑ 1 approval waiting    sbx v0.51.0
+ aisbx  ~/my-project   ● 2 of 4 running                    ⚑ 1 approval waiting    sbx v0.53.0
  Sandboxes ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   This folder  ~/my-project   2 sandboxes ───────────────────────────────────────────────────
   ▌● My private Claude Code              Claude Code · token private  running · 1 session
@@ -186,7 +186,7 @@ Each sandbox is one row of three columns. The columns line up down the list.
 | `K` | [the shared agent-skills store](skills.md#shared-agent-skills); its *Repo skills for all sandboxes* row picks [repo skills](skills.md#skills-from-skill-repos-aisbx-skill) for every sandbox |
 | `i` | this sandbox's own [repo skills](skills.md#skills-from-skill-repos-aisbx-skill), and *Sync now* |
 | `F` | [the host folders every sandbox mounts](sandboxes.md#host-folders-f-and-companionjson): add, edit (`↵`) or delete (`d`) one |
-| `T` | sbx's settings for this host: [telemetry](network.md#sbxs-own-telemetry-t), [clipboard copy and image paste](sandboxes.md#the-host-clipboard-t) and [FUSE](sandboxes.md#fuse-filesystems-t), each turned on or off with `↵`, and the [skills default](skills.md#share-modes), which `↵`, `←` and `→` walk |
+| `T` | sbx's settings for this host: [telemetry](network.md#sbxs-own-telemetry-t), [clipboard copy and image paste](sandboxes.md#the-host-clipboard-t), [FUSE](sandboxes.md#fuse-filesystems-t), and [Claude in Chrome and Remote Control](sandboxes.md#claude-in-chrome-and-remote-control-t), each turned on or off with `↵`, and the [skills default](skills.md#share-modes), which `↵`, `←` and `→` walk |
 | `p` / `u` | [publish / unpublish a port](sandboxes.md#ports-p--u) |
 | `L` | LiteLLM sandboxes: fetch the connection's [model list](litellm.md#the-gateways-model-list) now |
 | `b` | [keep the sandbox running](sandboxes.md#keeping-a-sandbox-running-b) after its sessions end, or rebuild it back |
@@ -235,6 +235,12 @@ Long-running work (`sbx create`, `sbx kit add`, `sbx rm`, …) runs in the backg
 - A session you end with `ctrl-c` reads as *interrupted*, not as an error.
 - `kill` (SIGTERM) or a closed terminal (SIGHUP) ends the dashboard as `q` does, once a running session has ended.
   The terminal is restored and the labels are saved.
+- If the terminal goes away while the dashboard waits for a key, the dashboard ends within about five seconds, with
+  exit code 129. Changes made before are already saved.
+- Over SSH, the terminal goes away only when the SSH server notices the lost connection. An idle dashboard sends
+  nothing, so after a silent network loss the server notices only if it checks its clients: set
+  `ClientAliveInterval` (for example `ClientAliveInterval 30`) in its `sshd_config`. Without it, the session can stay
+  for hours.
 - `^z` hands the terminal back to the shell, and `fg` takes it again, redrawn. A running job carries on.
 - A crash turns mouse reporting off on its way out, so the shell does not print an escape sequence for each mouse
   move.
@@ -415,7 +421,7 @@ The details pane shows the selected sandbox in seven tabs. Press `tab` or `1`…
 
 | Tab | Shows | From |
 | --- | --- | --- |
-| `1 Overview` | what needs you first: status (and an unresponsive guest), where the requests waiting for approval go, a missing secret, keep-running. Then agent, account, pinned models and kits, folder, start folder and skills mode, names and SSH host, created / last used and CPU/memory limits, image, injected secrets, MCP servers. On a wide terminal, the names and everything after them are in a second column | `sbx ls --json`, `sbx inspect --json`, `sbx policy approval ls --json` |
+| `1 Overview` | what needs you first: status (and an unresponsive guest), where the requests waiting for approval go, a missing secret, keep-running. Then agent, account, pinned models and kits, folder, start folder and skills mode, names and SSH host, created / last used and CPU/memory limits, the size of the container's own files, image, injected secrets, MCP servers. On a wide terminal, the names and everything after them are in a second column | `sbx ls --json`, `sbx inspect --json`, `sbx policy approval ls --json`, `sbx df --json` |
 | `2 Resources` | vCPUs and load, memory, disk, uptime (the sandbox's own, not the host's). From the second reading on, CPU and memory also show as sparklines of the readings taken while the tab is open, beside their meters where the terminal is wide enough | `sbx exec` of a `/proc` + `df` probe |
 | `3 Mounts` | every folder sbx mounts from the host: the workspace, extra folders, the skills store, folders added later with `sbx mount`. Each with its path in the sandbox where that differs, read-write or read-only, and a warning when the host folder is gone | `sbx inspect --json`, `sbx ls --json` |
 | `4 Ports` | port forwards, as URLs | `sbx ports <name> --json` |

@@ -229,6 +229,30 @@ fn the_port_and_host_prompts_give_the_same_job() {
     }
 }
 
+/// `box` right after a job changed its kits, before a snapshot shows them.
+fn kits_just_changed() -> App {
+    let mut app = on_box();
+    app.kits_unsettled.insert("box".into());
+    app
+}
+
+#[test]
+fn rebuild_and_edit_kits_wait_for_the_kits_a_job_changed() {
+    let app = kits_just_changed();
+    for action in [Action::Rebuild, Action::EditKits] {
+        let why = actions::enabled(&app, action, false).unwrap_err();
+        assert!(why.contains("its kits just changed"), "{action:?}: {why}");
+    }
+    for key in ['R', 'e'] {
+        let (outcome, _, _) = same(&kits_just_changed, &|d| d.press(KeyCode::Char(key)));
+        assert!(outcome.starts_with("none"), "{key}: {outcome}");
+        assert!(
+            outcome.contains("its kits just changed"),
+            "{key}: {outcome}"
+        );
+    }
+}
+
 #[test]
 fn keep_running_rebuild_and_prune_confirm_the_same_job() {
     for (key, setup) in [

@@ -171,6 +171,17 @@ EOF
   check "statusline: a file that is not JSON is left as it is" same "$(cat "$H/.claude/settings.json")" "not json"
   run seed.sh
   check "seed: so is the seed's" same "$(cat "$H/.claude/settings.json")" "not json"
+  check "seed: and says so" grep -q "settings.json is not valid JSON - left unchanged" "$scratch/out"
+  printf '{"model":"opus"}\n' > "$H/.claude/settings.json"
+  printf '#!/bin/sh\nkill -9 $$\n' > "$stub/jq"
+  chmod +x "$stub/jq"
+  run seed.sh
+  status=$?
+  rm "$stub/jq"
+  check "seed: a jq killed by a signal never fails the create" same "$status" 0
+  check "seed: and leaves the file as it is" same "$(cat "$H/.claude/settings.json")" '{"model":"opus"}'
+  check "seed: and names the signal, not invalid JSON" sh -c \
+    'grep -q "jq was stopped by signal 9" "$1" && ! grep -q "not valid JSON" "$1"' sh "$scratch/out"
 
   run update.sh
   check "update: exits 0 and asks claude to update" sh -c '[ "$1" = 0 ] && grep -qx update "$2"' sh "$?" "$scratch/claude.log"
@@ -179,6 +190,37 @@ EOF
   chmod +x "$stub/claude"
   run update.sh
   check "update: a failed update never fails the create" same "$?" 0
+  check "update: and says so" grep -q "could not update Claude Code" "$scratch/out"
+
+  printf '#!/bin/sh\necho "$*" >> "%s"\n' "$scratch/claude.log" > "$stub/claude"
+  if command -v timeout >/dev/null 2>&1; then
+    mkdir -p "$scratch/bin"
+    for tool in sh sleep; do ln -sf "$(command -v "$tool")" "$scratch/bin/$tool"; done
+    : > "$scratch/claude.log"
+    env -i PATH="$stub:$scratch/bin" AISBX_CLAUDE_HOME="$H" \
+      "$scratch/bin/sh" "$first/files/claude/update.sh" > "$scratch/out" 2>&1
+    check "update: without timeout, still updates" sh -c '[ "$1" = 0 ] && grep -qx update "$2"' sh "$?" \
+      "$scratch/claude.log"
+
+    printf '#!/bin/sh\nexec sleep 30\n' > "$stub/claude"
+    started=$(date +%s)
+    run update.sh AISBX_CLAUDE_UPDATE_TIMEOUT=1
+    status=$?
+    took=$(($(date +%s) - started))
+    check "update: a hanging update never fails the create" same "$status" 0
+    check "update: and ends at the time limit" test "$took" -lt 10
+    check "update: and says so" grep -q "took longer than 1s" "$scratch/out"
+
+    started=$(date +%s)
+    run seed.sh MCP_GATEWAY_URL=http://mcp-gateway.docker.internal/mcp AISBX_CLAUDE_MCP_TIMEOUT=1
+    status=$?
+    took=$(($(date +%s) - started))
+    check "seed: a hanging claude mcp add never fails the create" same "$status" 0
+    check "seed: and ends at the time limit" test "$took" -lt 10
+    check "seed: and says so" grep -q "claude mcp add took longer than 1s" "$scratch/out"
+  else
+    echo "skip update: no timeout on this host, the time limit is not checked"
+  fi
 }
 
 case ${1-} in

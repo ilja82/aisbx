@@ -757,12 +757,14 @@ pub(crate) mod tests_support {
                 Some(setting(crate::sbx::CLIPBOARD_TEXT_COPY, false)),
                 Some(setting(crate::sbx::CLIPBOARD_IMAGE_PASTE, false)),
                 Some(setting(crate::sbx::SANDBOX_FUSE, true)),
+                Some(setting(crate::sbx::CLAUDE_CHROME, false)),
+                Some(setting(crate::sbx::CLAUDE_REMOTE_CONTROL, false)),
             ],
             skills: Some(aisbx_core::testkit::skills_default("readonly")),
             ..Default::default()
         });
         out.push((
-            "Settings — telemetry, clipboard copy and image paste off".to_string(),
+            "Settings — telemetry, clipboard, Chrome and Remote Control off".to_string(),
             render(&mut app),
         ));
         app.screen = Screen::List;
@@ -1336,10 +1338,12 @@ mod tests {
             Some(setting(crate::sbx::CLIPBOARD_TEXT_COPY, false)),
             Some(setting(crate::sbx::CLIPBOARD_IMAGE_PASTE, false)),
             Some(setting(crate::sbx::SANDBOX_FUSE, true)),
+            Some(setting(crate::sbx::CLAUDE_CHROME, false)),
+            Some(setting(crate::sbx::CLAUDE_REMOTE_CONTROL, true)),
         ];
         form.skills = Some(aisbx_core::testkit::skills_default("readonly"));
         let screen = super::tests_support::render_at(&mut app, 110, 30);
-        let [telemetry, copy, paste, fuse] = crate::app::SETTINGS;
+        let [telemetry, copy, paste, fuse, chrome, remote] = crate::app::SETTINGS;
         for text in [
             "Settings",
             telemetry.label,
@@ -1350,11 +1354,29 @@ mod tests {
             paste.meaning(false),
             fuse.label,
             fuse.meaning(true),
+            chrome.label,
+            chrome.meaning(false),
+            remote.label,
+            remote.meaning(true),
             crate::app::SKILLS_DEFAULT_LABEL,
             "read-only",
             "Close",
         ] {
             assert!(screen.contains(text), "{text:?}: {screen}");
+        }
+        for (label, state) in [
+            (chrome.label, "off"),
+            (remote.label, "on"),
+            (fuse.label, "on"),
+        ] {
+            let line = (screen.lines())
+                .find(|l| l.contains(label))
+                .unwrap_or_else(|| panic!("no {label:?} row: {screen}"));
+            let after = &line[line.find(label).unwrap() + label.len()..];
+            assert!(
+                after.starts_with(' ') && after.trim_start().starts_with(state),
+                "a gap between {label:?} and its state: {line:?}"
+            );
         }
         assert!(
             screen.contains("takes effect after `sbx daemon"),

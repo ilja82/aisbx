@@ -90,7 +90,7 @@ check "…the build fails on the first error" sh -c 'sed -n "/^  build)/,/;;/p" 
 check "…installs $PACKAGE, unpinned, into $PREFIX" grep -q "npm install -g --prefix \"\$prefix\" \"\$pkg\"" "$update"
 check "…the prefix and the package" sh -c 'grep -qx "prefix=$2" "$1" && grep -qx "pkg=$3" "$1"' sh "$update" "$PREFIX" "$PACKAGE"
 check "…then runs pi --version" grep -q '"$prefix/bin/pi" --version' "$update"
-check "…the create run is never fatal" sh -c 'sed -n "/^  create)/,/;;/p" "$1" | grep -q "|| echo"' sh "$update"
+check "…the create run ends in exit 0" sh -c 'grep -vE "^ *#" "$1" | tail -1 | grep -qx "exit 0"' sh "$update"
 check "…never fetches Node" not sh -c 'grep -vE "^ *#" "$1" | grep -Eq "nodejs.org|nvm|n install|apt-get|curl|wget"' sh "$update"
 
 # The script's Node check, run for real against stub binaries: its check_node function alone.
@@ -160,6 +160,40 @@ check "…install telemetry off" same "$(jq -r .enableInstallTelemetry "$templat
 check "…no provider and no model (the connection kit adds both)" jqe \
   '(has("defaultProvider") or has("defaultModel") or has("providers")) | not' "$template"
 check "no secret-looking key anywhere in the kit" not grep -rEq 'sk-[A-Za-z0-9]{8,}|"apiKey": "' "$kit"
+
+
+# --- the install hook, run for real against a stub npm ------------------------------------------------
+
+stubs=$(mktemp -d "${TMPDIR:-/tmp}/pi-update.XXXXXX") || exit 2
+mkdir -p "$stubs/bin" "$stubs/home" "$stubs/plain"
+printf '#!/bin/sh\necho "$*" >> "%s"\nexit "${STUB_EXIT:-0}"\n' "$stubs/log" > "$stubs/bin/npm"
+chmod +x "$stubs/bin/npm"
+hook() {   # hook [VAR=value...]: the update hook as the sandbox runs it
+  env -i PATH="$stubs/bin:/usr/bin:/bin" HOME="$stubs/home" "$@" sh "$update" create > "$stubs/out" 2>&1
+}
+hook
+check "update: exits 0 and runs npm install of Pi" sh -c '[ "$1" = 0 ] && grep -q "install -g --prefix /home/agent/.local @earendil-works/pi-coding-agent" "$2"' sh "$?" "$stubs/log"
+hook STUB_EXIT=3
+check "update: a failed update never fails the create" same "$?" 0
+check "update: and says so" grep -q "could not update" "$stubs/out"
+if command -v timeout >/dev/null 2>&1; then
+  printf '#!/bin/sh\nexec sleep 30\n' > "$stubs/bin/npm"
+  started=$(date +%s)
+  hook AISBX_PI_UPDATE_TIMEOUT=1
+  status=$?
+  took=$(($(date +%s) - started))
+  check "update: a hanging update never fails the create" same "$status" 0
+  check "update: and ends at the time limit" test "$took" -lt 10
+  check "update: and says so" grep -q "took longer than 1s" "$stubs/out"
+  printf '#!/bin/sh\necho "$*" >> "%s"\n' "$stubs/log" > "$stubs/bin/npm"
+  for tool in sh sleep; do ln -sf "$(command -v "$tool")" "$stubs/plain/$tool"; done
+  : > "$stubs/log"
+  env -i PATH="$stubs/bin:$stubs/plain" HOME="$stubs/home" "$stubs/plain/sh" "$update" create > "$stubs/out" 2>&1
+  check "update: without timeout, still updates" sh -c '[ "$1" = 0 ] && grep -q "install -g --prefix /home/agent/.local @earendil-works/pi-coding-agent" "$2"' sh "$?" "$stubs/log"
+else
+  echo "skip update: no timeout on this host, the time limit is not checked"
+fi
+rm -rf "$stubs"
 
 if [ "$failures" -gt 0 ]; then
   echo "$failures check(s) failed"

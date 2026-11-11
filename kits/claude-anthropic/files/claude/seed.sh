@@ -13,8 +13,12 @@ merge() { # merge <file> <jq program> [jq args...]: rewrite <file> in place, or 
   shift 2
   [ -s "$f" ] || printf '{}\n' > "$f"
   tmp=$(mktemp) || return 0
-  if jq "$@" "$prog" "$f" > "$tmp" 2>/dev/null; then
+  jq "$@" "$prog" "$f" > "$tmp" 2>/dev/null
+  status=$?
+  if [ "$status" -eq 0 ]; then
     cat "$tmp" > "$f"
+  elif [ "$status" -gt 128 ]; then
+    echo "aisbx: jq was stopped by signal $((status - 128)) while it merged $f (out of memory?) - left unchanged" >&2
   else
     echo "aisbx: $f is not valid JSON - left unchanged" >&2
   fi
@@ -44,7 +48,16 @@ merge "$home/.claude/settings.json" \
 
 if [ -n "${MCP_GATEWAY_URL:-}" ] && command -v claude >/dev/null 2>&1; then
   # `claude mcp add` exits 1 when the name is taken, as on a re-run: fine.
-  claude mcp add mcp-gateway "$MCP_GATEWAY_URL" --transport http --scope user \
-    --header "Authorization: Bearer ${MCP_SENTINEL_TOKEN_NAME:-proxy-managed}" >/dev/null 2>&1 || true
+  limit=${AISBX_CLAUDE_MCP_TIMEOUT:-30}
+  set -- claude mcp add mcp-gateway "$MCP_GATEWAY_URL" --transport http --scope user \
+    --header "Authorization: Bearer ${MCP_SENTINEL_TOKEN_NAME:-proxy-managed}"
+  if command -v timeout >/dev/null 2>&1; then
+    timeout -k 10 "$limit" "$@" >/dev/null 2>&1
+  else
+    "$@" >/dev/null 2>&1
+  fi
+  case $? in
+    124 | 137) echo "aisbx: claude mcp add took longer than ${limit}s - the MCP gateway is not registered" ;;
+  esac
 fi
 exit 0

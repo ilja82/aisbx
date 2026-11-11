@@ -10,7 +10,7 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 
 /// The oldest sbx release the dashboard accepts. docs/development.md, *sbx version*, says why.
-pub const REQUIRED_VERSION: &str = "0.51.0";
+pub const REQUIRED_VERSION: &str = "0.53.0";
 
 /// How a sandbox mounts the host's shared agent-skills store (`--skills`). sbx reports the mode
 /// nowhere, so a rebuild repeats it from the registry; see [`crate::state::Entry`].
@@ -656,7 +656,7 @@ struct VersionClient {
     version: String,
 }
 
-/// The CLI's own version, `v0.51.0`, from `sbx version --json`.
+/// The CLI's own version, `v0.53.0`, from `sbx version --json`.
 pub fn version() -> Result<String> {
     let out = Command::new("sbx")
         .args(["version", "--json"])
@@ -1857,6 +1857,88 @@ pub fn prune_argv() -> Vec<String> {
     vec!["sbx".into(), "prune".into(), "--force".into()]
 }
 
+// --- disk usage ----------------------------------------------------------------------------------
+
+/// `sbx df --json`: the disk sbx's images, containers and volumes take on this host.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct DiskUsage {
+    /// One row per kind of resource, with sbx's estimate of what removing the unused ones frees.
+    #[serde(default)]
+    pub summaries: Vec<DiskSummary>,
+    #[serde(default)]
+    pub containers: Vec<DiskContainer>,
+}
+
+/// One kind of resource in [`DiskUsage::summaries`]. Sizes are bytes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct DiskSummary {
+    /// [`DISK_IMAGES`], [`DISK_CONTAINERS`] or [`DISK_VOLUMES`].
+    #[serde(default, rename = "type")]
+    pub kind: String,
+    #[serde(default)]
+    pub total_count: u64,
+    #[serde(default)]
+    pub active: u64,
+    #[serde(default)]
+    pub size: u64,
+    /// What removing this kind's unused resources would free, as sbx estimates it: more than
+    /// `sbx prune` alone removes.
+    #[serde(default)]
+    pub reclaimable: u64,
+}
+
+/// One container in [`DiskUsage::containers`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct DiskContainer {
+    #[serde(default)]
+    pub name: String,
+    /// Bytes of the container's own files.
+    #[serde(default)]
+    pub size: u64,
+    #[serde(default)]
+    pub state: String,
+}
+
+/// The kinds `sbx df --json` sums up, as it spells them.
+pub const DISK_IMAGES: &str = "Images";
+pub const DISK_CONTAINERS: &str = "Containers";
+pub const DISK_VOLUMES: &str = "Local Volumes";
+
+impl DiskUsage {
+    /// The container of sandbox `name`: the one of that name, else the one `sbx kit add` swapped
+    /// in, `<name>-swap-<8 hex digits>`.
+    pub fn container_of(&self, name: &str) -> Option<&DiskContainer> {
+        let swapped = |c: &&DiskContainer| {
+            c.name
+                .strip_prefix(name)
+                .and_then(|rest| rest.strip_prefix("-swap-"))
+                .is_some_and(|hex| hex.len() == 8 && hex.chars().all(|ch| ch.is_ascii_hexdigit()))
+        };
+        (self.containers.iter().find(|c| c.name == name))
+            .or_else(|| self.containers.iter().find(swapped))
+    }
+
+    /// The summary of one kind, such as [`DISK_IMAGES`].
+    pub fn summary(&self, kind: &str) -> Option<&DiskSummary> {
+        self.summaries.iter().find(|s| s.kind == kind)
+    }
+}
+
+/// The host's disk usage by sbx. Read-only and quick; a failure is an error, never zero bytes.
+pub fn disk_usage() -> Result<DiskUsage> {
+    let out = Command::new("sbx")
+        .args(["df", "--json"])
+        .output()
+        .context("running `sbx df --json`")?;
+    if !out.status.success() {
+        return Err(anyhow!(
+            "sbx df failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    parse_json(&out.stdout).context("parsing `sbx df --json`")
+}
+
 /// Forward a host port into a sandbox that already exists; a stopped one is started first.
 /// `spec` is sbx's port grammar, `[[HOST_IP:]HOST_PORT:]SANDBOX_PORT[/PROTOCOL]` - a bare `3000`
 /// takes an ephemeral host port, no protocol means `tcp4`, IPv4 only, and `/tcp` binds both
@@ -2073,6 +2155,13 @@ pub const CLIPBOARD_IMAGE_PASTE: &str = "clipboard.imagePaste";
 
 /// The setting that gives new local sandboxes `/dev/fuse` and `SYS_ADMIN`.
 pub const SANDBOX_FUSE: &str = "sandbox.fuse";
+
+/// The setting that lets Claude Code in a sandbox use Claude in Chrome, the host browser's tabs.
+pub const CLAUDE_CHROME: &str = "claude.chrome";
+
+/// The setting that lets Claude Code's Remote Control in a sandbox sign in with the credentials the
+/// proxy keeps on the host.
+pub const CLAUDE_REMOTE_CONTROL: &str = "claude.remoteControl";
 
 /// The skills mode a create without `--skills` gets: `off`, `readonly` or `readwrite`.
 pub const SKILLS_DEFAULT_MODE: &str = "skills.defaultMode";
@@ -2677,12 +2766,7 @@ mod live {
         // sbx renamed or dropped answers nothing and reads as `readonly`.
         println!("skills.defaultMode: {:?}", skills_default_mode().flag());
         // The settings screen's rows: booleans, read as sbx prints them.
-        for key in [
-            TELEMETRY_DISABLED,
-            CLIPBOARD_TEXT_COPY,
-            CLIPBOARD_IMAGE_PASTE,
-            SANDBOX_FUSE,
-        ] {
+        for key in crate::app::SETTINGS.map(|spec| spec.key) {
             let setting = setting(key).expect("sbx settings get --json");
             println!(
                 "{key}: {:?} ({}, restart {})",
@@ -2703,23 +2787,43 @@ mod live {
             mode.is_some(),
             "skills.defaultMode is no longer one of the three modes"
         );
-        // What `sbx prune` would sweep — read-only, and it never starts a sandbox. Every candidate
-        // is a stopped sandbox from the list above.
+        // What `sbx prune` would sweep, judged on the sandboxes listed before and after it.
         let prune = prune_preview().expect("sbx prune --dry-run --json");
+        let after = list().expect("sbx ls --json");
+        let stopped = |list: &[LsEntry], name: &str| {
+            list.iter()
+                .any(|s| s.name == name && !s.status.eq_ignore_ascii_case("running"))
+        };
+        let known = |name: &str| {
+            sandboxes.iter().any(|s| s.name == name) && after.iter().any(|s| s.name == name)
+        };
         println!(
             "prune --dry-run: {} candidate(s), {} skipped",
             prune.would_remove.len(),
             prune.skipped().len()
         );
+        let skipped = prune.skipped();
+        for s in sandboxes
+            .iter()
+            .filter(|s| stopped(&sandboxes, &s.name) && stopped(&after, &s.name))
+        {
+            assert!(
+                prune.would_remove.iter().any(|c| c.name == s.name) || skipped.contains(&s.name),
+                "{} is stopped, but prune --dry-run neither lists nor skips it",
+                s.name
+            );
+        }
         for c in &prune.would_remove {
             println!(
                 "  {} ({}) stopped {:?} {:?}",
                 c.name, c.agent, c.stopped_at, c.workspaces
             );
             assert!(
-                sandboxes
-                    .iter()
-                    .any(|s| s.name == c.name && !s.status.eq_ignore_ascii_case("running")),
+                !c.name.is_empty(),
+                "a prune candidate without a name: {c:?}"
+            );
+            assert!(
+                !known(&c.name) || stopped(&after, &c.name),
                 "{} is a prune candidate but not a stopped sandbox",
                 c.name
             );
@@ -2729,6 +2833,26 @@ mod live {
                     .and_then(crate::state::parse_rfc3339)
                     .is_some(),
                 "{c:?}: stopped_at no longer parses"
+            );
+        }
+        // The disk sbx's resources take, and a container for every sandbox.
+        let disk = disk_usage().expect("sbx df --json");
+        for kind in [DISK_IMAGES, DISK_CONTAINERS, DISK_VOLUMES] {
+            let summary = disk
+                .summary(kind)
+                .unwrap_or_else(|| panic!("sbx df --json has no {kind:?} row: {disk:?}"));
+            println!(
+                "df {kind}: {} of {} active, {} bytes, {} reclaimable",
+                summary.active, summary.total_count, summary.size, summary.reclaimable
+            );
+        }
+        for s in &sandboxes {
+            let container = disk.container_of(&s.name);
+            println!("  {}: container {container:?}", s.name);
+            assert!(
+                container.is_some(),
+                "{}: no container in sbx df --json",
+                s.name
             );
         }
         println!("ssh configured: {}", ssh_configured());
@@ -3012,22 +3136,28 @@ mod tests {
 
     #[test]
     fn the_gate_names_the_version_it_refuses() {
-        assert_eq!(gate("v0.51.0".into()).unwrap(), "v0.51.0");
-        assert!(gate("v0.50.1".into()).is_err());
-        let err = gate("v0.50.1".into()).unwrap_err().to_string();
+        assert_eq!(gate("v0.53.0".into()).unwrap(), "v0.53.0");
+        assert!(gate("v0.51.0".into()).is_err());
+        let err = gate("v0.51.0".into()).unwrap_err().to_string();
         assert!(
-            err.starts_with("this sbx is v0.50.1, but this dashboard needs 0.51.0+ — "),
+            err.starts_with("this sbx is v0.51.0, but this dashboard needs 0.53.0+ — "),
             "{err}"
         );
     }
 
     #[test]
-    fn version_gate_accepts_0510_and_newer() {
-        assert!(meets_required_version("v0.51.0"));
-        assert!(meets_required_version("0.51.0"));
-        assert!(meets_required_version("v0.51.1"));
-        assert!(meets_required_version("v0.52.0"));
+    fn version_gate_accepts_0530_and_newer() {
+        assert!(meets_required_version("v0.53.0"));
+        assert!(meets_required_version("0.53.0"));
+        assert!(meets_required_version("v0.53.1"));
+        assert!(meets_required_version("v0.54.0"));
         assert!(meets_required_version("v1.0.0"));
+        assert!(!meets_required_version("v0.52.0-rc1"));
+        assert!(!meets_required_version("v0.52.9"));
+        assert!(!meets_required_version("v0.52.0"));
+        assert!(!meets_required_version("v0.51.1"));
+        assert!(!meets_required_version("v0.51.0"));
+        assert!(!meets_required_version("v0.51"));
         assert!(!meets_required_version("v0.50.1"));
         assert!(!meets_required_version("v0.50.0"));
         assert!(!meets_required_version("v0.50"));
@@ -3712,6 +3842,48 @@ mod tests {
             parse_json(br#"{"would_remove": [], "skipped_unknown_stop": ["a", {"name": "b"}, 7]}"#)
                 .unwrap();
         assert_eq!(skipped.skipped(), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn disk_usage_is_read_as_sbx_df_prints_it() {
+        let raw = br#"{
+  "containers": [
+    {"created_at": "2026-10-09T19:43:53.790701Z", "id": "99cc", "local_volumes": 6,
+     "image": "docker/sandbox-templates:claude-code-docker", "name": "claude-anthropic-shop",
+     "size": 3218194432, "state": "stopped"},
+    {"name": "probe-swap-nothex12", "size": 1, "state": "stopped"},
+    {"created_at": "2026-11-11T09:20:55.49976Z", "id": "86bc", "local_volumes": 1,
+     "image": "sandboxes-swap/probe:8659b8d7", "name": "probe-swap-dc5b1b77",
+     "size": 5816320, "state": "running"}
+  ],
+  "images": [{"containers": 0, "id": "sha256:4a94", "names": [], "size": 3020708731}],
+  "summaries": [
+    {"active": 7, "reclaimable": 21390205840, "size": 36852279300, "total_count": 125,
+     "type": "Images"},
+    {"active": 0, "reclaimable": 4896145408, "size": 4896145408, "total_count": 9,
+     "type": "Containers"},
+    {"active": 19, "reclaimable": 243466240, "size": 520339456, "total_count": 53,
+     "type": "Local Volumes"}
+  ],
+  "volumes": [{"links": 1, "name": "probe-docker", "size": 7077888}]
+}"#;
+        let disk: DiskUsage = parse_json(raw).unwrap();
+        assert_eq!(
+            disk.summary(DISK_IMAGES).unwrap().reclaimable,
+            21_390_205_840
+        );
+        assert_eq!(disk.summary(DISK_CONTAINERS).unwrap().size, 4_896_145_408);
+        assert_eq!(disk.summary(DISK_VOLUMES).unwrap().total_count, 53);
+        assert_eq!(disk.summary("Build cache"), None);
+        let size = |name: &str| disk.container_of(name).map(|c| c.size);
+        assert_eq!(size("claude-anthropic-shop"), Some(3_218_194_432));
+        assert_eq!(
+            size("probe"),
+            Some(5_816_320),
+            "the container kit add swapped in"
+        );
+        assert_eq!(size("claude-anthropic"), None, "a prefix is not a name");
+        assert_eq!(size("other"), None);
     }
 
     #[test]
