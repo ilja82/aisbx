@@ -1677,6 +1677,12 @@ pub(super) fn render_settings(frame: &mut Frame, app: &App, area: Rect) -> Hits 
     let focus = form.focus.min(rows.len() - 1);
     let mut out = Lines::new(area);
     out.section("sbx on this computer");
+    let label_w = (crate::app::SETTINGS.iter())
+        .map(|spec| spec.label)
+        .chain([crate::app::SKILLS_DEFAULT_LABEL])
+        .map(|label| label.chars().count() + 2)
+        .max()
+        .unwrap_or(0);
     for (i, row) in rows.iter().enumerate() {
         match *row {
             SettingsRow::Setting(n) => {
@@ -1690,7 +1696,7 @@ pub(super) fn render_settings(frame: &mut Frame, app: &App, area: Rect) -> Hits 
                 };
                 out.row(
                     vec![
-                        Span::raw(format!("  {:<16}", spec.label)),
+                        Span::raw(format!("  {:<label_w$}", spec.label)),
                         Span::styled(format!("{state:<11}"), style),
                         Span::styled(meaning, theme::muted()),
                     ],
@@ -1716,7 +1722,7 @@ pub(super) fn render_settings(frame: &mut Frame, app: &App, area: Rect) -> Hits 
                 };
                 out.row(
                     vec![
-                        Span::raw(format!("  {:<16}", crate::app::SKILLS_DEFAULT_LABEL)),
+                        Span::raw(format!("  {:<label_w$}", crate::app::SKILLS_DEFAULT_LABEL)),
                         Span::styled(format!("{state:<11}"), style),
                         Span::styled(meaning, theme::muted()),
                     ],

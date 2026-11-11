@@ -39,6 +39,9 @@ Claude Code shows the account.
 **To switch accounts:** in `S`, delete the `/login` row (or run `sbx secret rm anthropic`), then run `/login` again.
 This signs out every `/login` sandbox on the host.
 
+Only a `/login` sandbox can use Claude in Chrome and Claude Code's `/remote-control`. Each needs a setting first
+([Claude in Chrome and Remote Control](sandboxes.md#claude-in-chrome-and-remote-control-t)).
+
 ### Setup tokens: a second account
 
 A [setup token](https://code.claude.com/docs/en/cli-reference) is a long-lived credential for one account.

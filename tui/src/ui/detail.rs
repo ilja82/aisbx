@@ -584,6 +584,16 @@ fn overview_parts(sb: &Sandbox, app: &App) -> (Vec<Line<'static>>, Vec<Line<'sta
         ));
     }
 
+    if let Some((value, gloss)) = sb.disk_note() {
+        lines.push(field(
+            "disk",
+            vec![
+                Span::raw(value),
+                Span::styled(format!("   {gloss}"), theme::muted()),
+            ],
+        ));
+    }
+
     if !sb.image.is_empty() {
         let mut spans = vec![Span::styled(sb.image.clone(), theme::muted())];
         if let Some(short) = sb.short_digest() {
@@ -1382,6 +1392,7 @@ mod tests {
         let mut sb = crate::model::sample("claude-litellm-api", Some("claude-litellm"), &["jdk25"]);
         sb.running = true;
         sb.sessions = 1;
+        sb.disk = Some(3_218_194_432);
         let mut app = App::for_test(crate::kits::Catalog::load().unwrap(), vec![sb]);
         app.approvals = vec![crate::ui::tests_support::held(
             "claude-litellm-api",
@@ -1414,6 +1425,7 @@ mod tests {
             "sbx name",
             "ssh",
             "created",
+            "disk",
             "image",
         ];
         assert_eq!(at("status"), 0, "{labels:?}");
@@ -1425,6 +1437,11 @@ mod tests {
         for row in ["status  ● running", "kits  jdk25"] {
             assert!(screen.contains(row), "{row} at 80×24:\n{screen}");
         }
+        let wide = crate::ui::tests_support::render_at(&mut app, 160, 40);
+        assert!(
+            wide.contains("disk  3.2 GB   the container's own files"),
+            "{wide}"
+        );
     }
 
     #[test]

@@ -59,7 +59,7 @@ check "…and the template's npm prefix (without it npm installs into /usr/local
   has "$hook_env" NPM_CONFIG_PREFIX
 check "the install hook runs as the agent (owner of the npm-global tree)" \
   sh -c 'grep -A2 "opencode/update.sh" "$1" | grep -q "user: agent"' sh "$spec"
-check "the install hook is never fatal" grep -q '|| echo' "$update"
+check "the install hook always exits 0" sh -c 'code() { grep -vE "^ *#" "$1"; }; code "$1" | tail -1 | grep -qx "exit 0"' sh "$update"
 check "nothing still runs \`opencode upgrade\`" not sh -c 'cat "$@" | grep -vE "^ *#" | grep -q "opencode upgrade"' sh "$spec" "$recipe" "$update"
 check "no unpinned OpenCode install (@latest, a bare package name)" \
   not sh -c 'cat "$@" | grep -vE "^ *#" | grep -Eq "(opencode-ai|@opencode/cli)(@latest)?([\"'"'"' ]|$)"' sh "$recipe" "$update"
@@ -110,6 +110,40 @@ check "seed: the gateway under mcp.servers" qs \
   '.mcp.servers["mcp-gateway"] == {type: "remote", url: "http://gw/mcp", headers: {Authorization: "Bearer proxy-managed"}}'
 check "seed: a key of its own stays" qs '.theme == "mine"' 
 rm -rf "$home"
+
+
+# --- the install hook, run for real against a stub npm ------------------------------------------------
+
+stubs=$(mktemp -d "${TMPDIR:-/tmp}/opencode-update.XXXXXX") || exit 2
+mkdir -p "$stubs/bin" "$stubs/home" "$stubs/plain"
+printf '#!/bin/sh\necho "$*" >> "%s"\nexit "${STUB_EXIT:-0}"\n' "$stubs/log" > "$stubs/bin/npm"
+chmod +x "$stubs/bin/npm"
+hook() {   # hook [VAR=value...]: the update hook as the sandbox runs it
+  env -i PATH="$stubs/bin:/usr/bin:/bin" AISBX_OPENCODE_HOME="$stubs/home" "$@" sh "$update" > "$stubs/out" 2>&1
+}
+hook
+check "update: exits 0 and runs npm install of 2.x" sh -c '[ "$1" = 0 ] && grep -q "install -g --force @opencode/cli@" "$2"' sh "$?" "$stubs/log"
+hook STUB_EXIT=3
+check "update: a failed update never fails the create" same "$?" 0
+check "update: and says so" grep -q "could not update" "$stubs/out"
+if command -v timeout >/dev/null 2>&1; then
+  printf '#!/bin/sh\nexec sleep 30\n' > "$stubs/bin/npm"
+  started=$(date +%s)
+  hook AISBX_OPENCODE_UPDATE_TIMEOUT=1
+  status=$?
+  took=$(($(date +%s) - started))
+  check "update: a hanging update never fails the create" same "$status" 0
+  check "update: and ends at the time limit" test "$took" -lt 10
+  check "update: and says so" grep -q "took longer than 1s" "$stubs/out"
+  printf '#!/bin/sh\necho "$*" >> "%s"\n' "$stubs/log" > "$stubs/bin/npm"
+  for tool in sh sleep; do ln -sf "$(command -v "$tool")" "$stubs/plain/$tool"; done
+  : > "$stubs/log"
+  env -i PATH="$stubs/bin:$stubs/plain" AISBX_OPENCODE_HOME="$stubs/home" "$stubs/plain/sh" "$update" > "$stubs/out" 2>&1
+  check "update: without timeout, still updates" sh -c '[ "$1" = 0 ] && grep -q "install -g --force @opencode/cli@" "$2"' sh "$?" "$stubs/log"
+else
+  echo "skip update: no timeout on this host, the time limit is not checked"
+fi
+rm -rf "$stubs"
 
 [ "$failures" -eq 0 ] || { echo "$failures failed"; exit 1; }
 echo "all passed"

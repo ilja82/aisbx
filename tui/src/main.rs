@@ -13,8 +13,10 @@ use aisbx_core::tokens;
 #[cfg(test)]
 mod create_wizard_golden;
 mod keys;
+mod quiet;
 mod theme;
 mod ui;
+mod watchdog;
 
 use std::io;
 use std::process::{Command, ExitCode, ExitStatus};
@@ -111,11 +113,15 @@ fn run() -> Result<()> {
 
     let mut app = App::new(catalog, show_other, version, mouse, auto_update)?;
     app.disable_telemetry_by_default();
-    let mut terminal = ratatui::init();
+    let mut terminal = quiet::init();
     mouse_off_on_panic();
     let mut mouse_on = false;
+    let input = watchdog::InputWatch::new();
+    watchdog::spawn(Arc::clone(&input), watchdog::LIMIT, || {
+        std::process::exit(watchdog::EXIT_CODE)
+    });
 
-    let result = event_loop(&mut terminal, &mut app, &mut mouse_on, &stop);
+    let result = event_loop(&mut terminal, &mut app, &mut mouse_on, &stop, &input);
     if mouse_on {
         let _ = execute!(io::stdout(), DisableMouseCapture);
     }
@@ -158,21 +164,22 @@ fn sync_mouse(want: bool, on: &mut bool) -> io::Result<()> {
 }
 
 fn event_loop(
-    terminal: &mut ratatui::DefaultTerminal,
+    terminal: &mut quiet::Term,
     app: &mut App,
     mouse_on: &mut bool,
     stop: &AtomicBool,
+    input: &watchdog::InputWatch,
 ) -> Result<()> {
     while !app.quit && !stop.load(Ordering::Relaxed) {
         sync_mouse(app.mouse, mouse_on)?;
         terminal.draw(|frame| ui::draw(frame, app))?;
 
-        if event::poll(Duration::from_millis(120))? {
+        if input.read(|| event::poll(Duration::from_millis(120)))? {
             // Drain the queue before a redraw: a paste arrives as one key event per character.
             // The budget stops a stuck key from starving the refresh.
             let mut budget = 512;
             loop {
-                match event::read()? {
+                match input.read(event::read)? {
                     Event::Key(key) if suspends(&key) => suspend(terminal, app.mouse, mouse_on)?,
                     Event::Key(key) => app.on_key(keys::key(key)),
                     Event::Mouse(mouse) => app.on_mouse(keys::mouse(mouse)),
@@ -180,7 +187,7 @@ fn event_loop(
                     _ => {}
                 }
                 budget -= 1;
-                if budget == 0 || !event::poll(Duration::ZERO)? {
+                if budget == 0 || !input.read(|| event::poll(Duration::ZERO))? {
                     break;
                 }
             }
@@ -205,29 +212,25 @@ fn suspends(key: &event::KeyEvent) -> bool {
 /// Stop the dashboard until the shell's `fg` continues it. The terminal goes back to the shell
 /// as `q` leaves it, and is taken again and redrawn on the way back.
 #[cfg(unix)]
-fn suspend(
-    terminal: &mut ratatui::DefaultTerminal,
-    mouse: bool,
-    mouse_on: &mut bool,
-) -> Result<()> {
+fn suspend(terminal: &mut quiet::Term, mouse: bool, mouse_on: &mut bool) -> Result<()> {
     sync_mouse(false, mouse_on)?;
     ratatui::restore();
     signal_hook::low_level::raise(signal_hook::consts::SIGTSTP)?;
     // Here once the process is continued.
-    *terminal = ratatui::init();
+    *terminal = quiet::init();
     terminal.clear()?;
     sync_mouse(mouse, mouse_on)?;
     Ok(())
 }
 
 #[cfg(not(unix))]
-fn suspend(_: &mut ratatui::DefaultTerminal, _: bool, _: &mut bool) -> Result<()> {
+fn suspend(_: &mut quiet::Term, _: bool, _: &mut bool) -> Result<()> {
     Ok(())
 }
 
 /// Give the terminal to another program for the length of a session, then take it back.
 fn handoff(
-    terminal: &mut ratatui::DefaultTerminal,
+    terminal: &mut quiet::Term,
     app: &mut App,
     request: &Handoff,
     mouse_on: &mut bool,
@@ -243,7 +246,7 @@ fn handoff(
     println!("\n→ {}\n", argv.join(" "));
     let status = spawn_inherited(&argv);
 
-    *terminal = ratatui::init();
+    *terminal = quiet::init();
     terminal.clear()?;
 
     match status {
