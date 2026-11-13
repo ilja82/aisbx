@@ -35,7 +35,7 @@ aisbx — Docker Sandboxes dashboard for the aisbx kits
 
 USAGE:
     aisbx [OPTIONS]                        the dashboard
-    aisbx up|run|status|stop|rm …          headless, for scripts (below)
+    aisbx up|run|step|status|stop|rm …     headless, for scripts (below)
     aisbx skill-repo add|rm|ls|fetch …     the configured skill repositories (below)
 
 OPTIONS:

@@ -73,7 +73,18 @@ HEADLESS USE — the same kits and names as the dashboard, for scripts:
         --ssh-agent            forward the host SSH agent (off by default)
         Agents: Claude Code, Codex, Antigravity (agy), Pi and OpenCode.
 
+    aisbx step --spec FILE --dir DIR [--prewarm]
+        One unit of work in a fresh sandbox, in one process: create, close the network, prove
+        it, run the agent or the checks, read the proxy log, remove the sandbox, report.
+        NDJSON events on stdout, the artefacts in DIR; docs/step-protocol.md is the contract.
+        --prewarm              create and prove only; a later step with the same spec continues
+    aisbx step --protocol          print the step protocol version
+    aisbx doctor [--json]          versions, sign-in, the policy fallback, the kit folders
+
     aisbx ls [--json]              every sandbox: name, status, agent, workspace, label
+    aisbx kits [--json]            every kit --kit takes: name, kind, source (aisbx or user),
+                                   folder; then the user kit folders searched and the ones
+                                   skipped, with why (AISBX_KITS_PATH, else ~/.config/aisbx/kits)
     aisbx status NAME [--json]     state, agent, kits, held requests (exit 1 if unknown)
     aisbx stop NAME                stop it
     aisbx rm NAME                  remove it (the workspace is never touched)
@@ -152,7 +163,10 @@ pub fn is_subcommand(arg: &str) -> bool {
     matches!(
         arg,
         "up" | "run"
+            | "step"
+            | "doctor"
             | "ls"
+            | "kits"
             | "status"
             | "stop"
             | "rm"
@@ -203,7 +217,10 @@ pub fn main(args: &[String]) -> u8 {
     let result = match cmd.as_str() {
         "up" => up(rest),
         "run" => run(rest),
+        "step" => crate::step::main(rest),
+        "doctor" => doctor(rest),
         "ls" => ls(rest),
+        "kits" => kits_cmd(rest),
         "status" => status(rest),
         "stop" => stop(rest),
         "rm" => rm(rest),
@@ -230,7 +247,7 @@ pub fn main(args: &[String]) -> u8 {
 /// The subcommands that drive sandboxes, before which sbx's telemetry is turned off where nobody
 /// chose a value.
 fn runs_sandboxes(cmd: &str) -> bool {
-    matches!(cmd, "up" | "run" | "ls" | "status" | "stop" | "rm")
+    matches!(cmd, "up" | "run" | "step" | "ls" | "status" | "stop" | "rm")
 }
 
 /// [`sbx::disable_telemetry_by_default`], said on stderr; a failure only warns.
@@ -243,20 +260,20 @@ fn telemetry_off_by_default() {
 }
 
 #[derive(Debug)]
-struct Fail {
-    code: u8,
-    message: String,
+pub(crate) struct Fail {
+    pub(crate) code: u8,
+    pub(crate) message: String,
 }
 
 impl Fail {
-    fn usage(message: impl Into<String>) -> Self {
+    pub(crate) fn usage(message: impl Into<String>) -> Self {
         Self {
             code: EXIT_USAGE,
             message: message.into(),
         }
     }
 
-    fn sandbox(message: impl Into<String>) -> Self {
+    pub(crate) fn sandbox(message: impl Into<String>) -> Self {
         Self {
             code: EXIT_SANDBOX,
             message: message.into(),
@@ -264,7 +281,7 @@ impl Fail {
     }
 
     /// Exit 1: the command ran and did not work out.
-    fn failed(message: impl Into<String>) -> Self {
+    pub(crate) fn failed(message: impl Into<String>) -> Self {
         Self {
             code: 1,
             message: message.into(),
@@ -272,21 +289,21 @@ impl Fail {
     }
 }
 
-type Outcome = Result<u8, Fail>;
+pub(crate) type Outcome = Result<u8, Fail>;
 
 // --- argument parsing ------------------------------------------------------------------------------
 
 /// A minimal `--flag value` / `--flag=value` / positional parser; `--` ends the options, and what
 /// follows is kept verbatim (for `run`, the agent's own arguments).
 #[derive(Debug, Default)]
-struct Args {
+pub(crate) struct Args {
     flags: Vec<(String, Option<String>)>,
-    positional: Vec<String>,
-    trailing: Vec<String>,
+    pub(crate) positional: Vec<String>,
+    pub(crate) trailing: Vec<String>,
 }
 
 impl Args {
-    fn parse(raw: &[String], switches: &[&str], valued: &[&str]) -> Result<Self, Fail> {
+    pub(crate) fn parse(raw: &[String], switches: &[&str], valued: &[&str]) -> Result<Self, Fail> {
         let mut out = Self::default();
         let mut it = raw.iter();
         while let Some(arg) = it.next() {
@@ -326,11 +343,11 @@ impl Args {
         Ok(out)
     }
 
-    fn has(&self, key: &str) -> bool {
+    pub(crate) fn has(&self, key: &str) -> bool {
         self.flags.iter().any(|(k, _)| k == key)
     }
 
-    fn one(&self, key: &str) -> Result<Option<String>, Fail> {
+    pub(crate) fn one(&self, key: &str) -> Result<Option<String>, Fail> {
         let mut values = self.all(key);
         match values.len() {
             0 => Ok(None),
@@ -363,7 +380,7 @@ impl Args {
 /// `sbx` that never asks ([`sbx::no_input`]: no person answers a headless run), without the host
 /// SSH agent unless `ssh_agent`: sbx forwards the agent of every client that creates, starts or
 /// joins a sandbox.
-fn sbx_command(argv: &[String], ssh_agent: bool) -> Command {
+pub(crate) fn sbx_command(argv: &[String], ssh_agent: bool) -> Command {
     let argv = sbx::no_input(argv);
     let (program, args) = argv.split_first().expect("an argv names its program");
     let mut cmd = Command::new(program);
@@ -406,7 +423,7 @@ fn stderr_stdio() -> Stdio {
 }
 
 /// Run an sbx step whose output belongs on stderr, and say whether it succeeded.
-fn step(argv: &[String], ssh_agent: bool) -> std::io::Result<ExitStatus> {
+pub(crate) fn step(argv: &[String], ssh_agent: bool) -> std::io::Result<ExitStatus> {
     sbx_command(argv, ssh_agent)
         .stdin(Stdio::null())
         .stdout(stderr_stdio())
@@ -415,7 +432,7 @@ fn step(argv: &[String], ssh_agent: bool) -> std::io::Result<ExitStatus> {
 }
 
 /// Run an sbx step quietly; `true` when it exited 0.
-fn quiet(argv: &[String]) -> bool {
+pub(crate) fn quiet(argv: &[String]) -> bool {
     sbx_command(argv, false)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -426,7 +443,11 @@ fn quiet(argv: &[String]) -> bool {
 
 /// The agent's headless command line for `run`, or the usage error that stops `run` before it
 /// starts anything.
-fn agent_argv(name: &str, agent: &str, run: &HeadlessRun<'_>) -> Result<Vec<String>, Fail> {
+pub(crate) fn agent_argv(
+    name: &str,
+    agent: &str,
+    run: &HeadlessRun<'_>,
+) -> Result<Vec<String>, Fail> {
     if run.effort.is_some() && !kits::accepts_effort(agent) {
         return Err(Fail::usage(format!(
             "{name} runs {agent:?}; OpenCode has no effort flag: drop --effort"
@@ -439,7 +460,7 @@ fn agent_argv(name: &str, agent: &str, run: &HeadlessRun<'_>) -> Result<Vec<Stri
     })
 }
 
-fn find(name: &str) -> Result<Option<sbx::LsEntry>, Fail> {
+pub(crate) fn find(name: &str) -> Result<Option<sbx::LsEntry>, Fail> {
     let list = sbx::list().map_err(|e| Fail::sandbox(format!("{e:#}")))?;
     Ok(list.into_iter().find(|e| e.name == name))
 }
@@ -447,6 +468,14 @@ fn find(name: &str) -> Result<Option<sbx::LsEntry>, Fail> {
 // --- up --------------------------------------------------------------------------------------------
 
 fn up(raw: &[String]) -> Outcome {
+    let name = up_inner(raw)?;
+    println!("{name}");
+    Ok(0)
+}
+
+/// `up` without its one line of stdout: the sandbox's name, created or reused. `aisbx step`
+/// creates its sandbox through it, so both commands make the same sandbox from the same flags.
+pub(crate) fn up_inner(raw: &[String]) -> Result<String, Fail> {
     let args = Args::parse(
         raw,
         &[
@@ -573,6 +602,7 @@ fn up(raw: &[String]) -> Outcome {
     };
     let workspace = workspace
         .canonicalize()
+        .map(sbx::plain_path)
         .map_err(|e| Fail::usage(format!("workspace {}: {e}", workspace.display())))?;
 
     let wanted = match args.one("name")? {
@@ -690,8 +720,7 @@ fn up(raw: &[String]) -> Outcome {
             warn_all(&notes);
             sync_after_up(&name);
         }
-        println!("{name}");
-        return Ok(0);
+        return Ok(name);
     }
     // Checked before anything is created; recorded once the sandbox exists.
     let (skill_picks, skill_notes) =
@@ -849,8 +878,7 @@ fn up(raw: &[String]) -> Outcome {
         }
         Err(e) => eprintln!("aisbx: warning: the skill selection was not recorded ({e:#})"),
     }
-    println!("{name}");
-    Ok(0)
+    Ok(name)
 }
 
 /// The fixed MCP set `up` asks sbx for: none at all with `--no-mcp`, else sbx's default (no flag).
@@ -947,11 +975,12 @@ fn mount_arg(raw: &str, home: Option<&Path>) -> Result<String, Fail> {
     }
     let real = given
         .canonicalize()
+        .map(sbx::plain_path)
         .map_err(|e| Fail::usage(format!("--mount {raw:?}: {e}")))?;
     if !real.is_dir() {
         return Err(Fail::usage(format!("--mount {raw:?}: not a directory")));
     }
-    if let Some(home) = home.and_then(|h| h.canonicalize().ok()) {
+    if let Some(home) = home.and_then(|h| h.canonicalize().ok().map(sbx::plain_path)) {
         if let Some(why) = model::mount_refusal(&real, &home) {
             return Err(Fail::usage(format!("--mount {raw:?}: {why}")));
         }
@@ -959,7 +988,9 @@ fn mount_arg(raw: &str, home: Option<&Path>) -> Result<String, Fail> {
     let text = real
         .to_str()
         .ok_or_else(|| Fail::usage(format!("--mount {raw:?}: not UTF-8")))?;
-    if text.contains(':') || text.contains(',') {
+    // sbx reads `PATH[:TARGET][:ro]` and keeps a drive letter (`C:\data`) as part of the path
+    let body = sbx::without_drive(text);
+    if body.contains(':') || body.contains(',') {
         return Err(Fail::usage(format!(
             "--mount {raw:?}: sbx cannot take a path with ':' or ','"
         )));
@@ -1200,7 +1231,7 @@ fn template_reuse(name: &str, template: Option<&str>) -> Result<(), Fail> {
 
 /// sbx's naming rule, as `model::unique_sandbox_name` produces it: `^[a-zA-Z0-9][a-zA-Z0-9.-]+$`,
 /// at most 63 characters, ending in a letter or digit, never `default`.
-fn valid_sandbox_name(name: &str) -> bool {
+pub(crate) fn valid_sandbox_name(name: &str) -> bool {
     let bytes = name.as_bytes();
     (2..=63).contains(&bytes.len())
         && name != "default"
@@ -1443,7 +1474,12 @@ fn approve_credentials<P: AsRef<Path>>(dirs: &[P]) {
 }
 
 /// Copy the prompt into the sandbox's run dir, through `sbx exec -i`'s stdin.
-fn upload_prompt(name: &str, run_dir: &str, prompt: &str, ssh_agent: bool) -> Result<(), Fail> {
+pub(crate) fn upload_prompt(
+    name: &str,
+    run_dir: &str,
+    prompt: &str,
+    ssh_agent: bool,
+) -> Result<(), Fail> {
     let mut child = sbx_command(&sbx::prompt_upload_argv(name, run_dir), ssh_agent)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -1485,21 +1521,28 @@ fn watch(
         if timed_out || stop {
             report.timed_out = timed_out && !stop;
             report.interrupted = stop;
-            quiet(&sbx::headless_kill_argv(name, run_dir));
-            let grace = Instant::now() + Duration::from_secs(15);
-            while Instant::now() < grace {
-                if let Ok(Some(status)) = child.try_wait() {
-                    return Some(status);
-                }
-                std::thread::sleep(Duration::from_millis(200));
-            }
-            eprintln!("aisbx: {name}: the agent did not stop — stopping the sandbox");
-            let _ = child.kill();
-            quiet(&sbx::stop_argv(name));
-            return child.wait().ok();
+            return stop_agent(child, name, run_dir);
         }
         std::thread::sleep(Duration::from_millis(200));
     }
+}
+
+/// Stop the agent inside the sandbox (its whole process tree, by the PID its launch recorded),
+/// wait up to fifteen seconds for the `sbx exec` client to end, and stop the sandbox itself if
+/// the agent stays. `aisbx run` and `aisbx step` share it.
+pub(crate) fn stop_agent(child: &mut Child, name: &str, run_dir: &str) -> Option<ExitStatus> {
+    quiet(&sbx::headless_kill_argv(name, run_dir));
+    let grace = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < grace {
+        if let Ok(Some(status)) = child.try_wait() {
+            return Some(status);
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    eprintln!("aisbx: {name}: the agent did not stop — stopping the sandbox");
+    let _ = child.kill();
+    quiet(&sbx::stop_argv(name));
+    child.wait().ok()
 }
 
 /// The requests `name` holds, out of one read of every pending request, or the warning to print
@@ -1518,7 +1561,7 @@ fn held_by(
 
 /// The requests this sandbox is holding for approval, reported on stderr — and dismissed unless
 /// the caller asked to keep them for the dashboard.
-fn held_requests(name: &str, dismiss: bool) -> Vec<String> {
+pub(crate) fn held_requests(name: &str, dismiss: bool) -> Vec<String> {
     let mine = match held_by(name, sbx::approvals()) {
         Ok(mine) => mine,
         Err(warning) => {
@@ -1611,6 +1654,57 @@ fn ls(raw: &[String]) -> Outcome {
         println!("{out}");
     }
     Ok(0)
+}
+
+fn kits_cmd(raw: &[String]) -> Outcome {
+    let args = Args::parse(raw, &["json"], &[])?;
+    if let Some(extra) = args.positional.first().or(args.trailing.first()) {
+        return Err(Fail::usage(format!("kits takes no argument: {extra}")));
+    }
+    let catalog = Catalog::load().map_err(|e| Fail::sandbox(one_line(&format!("{e:#}"))))?;
+    println!("{}", render_kits(&catalog, args.has("json")));
+    Ok(0)
+}
+
+fn render_kits(catalog: &Catalog, json: bool) -> String {
+    let kits = catalog
+        .backends
+        .iter()
+        .map(|b| (&b.kit, "backend"))
+        .chain(catalog.all_addons().map(|a| (&a.kit, "addon")));
+    if json {
+        let rows: Vec<serde_json::Value> = kits
+            .map(|(kit, kind)| {
+                serde_json::json!({
+                    "name": kit.name,
+                    "kind": kind,
+                    "source": if kit.user { "user" } else { "aisbx" },
+                    "dir": kit.dir,
+                    "description": kit.description,
+                })
+            })
+            .collect();
+        let doc = serde_json::json!({
+            "kits": rows,
+            "user_dirs": catalog.user_dirs,
+            "skipped": catalog.user_problems,
+        });
+        return serde_json::to_string_pretty(&doc).unwrap_or_default();
+    }
+    let mut lines: Vec<String> = kits
+        .map(|(kit, kind)| {
+            let source = if kit.user { "user" } else { "aisbx" };
+            format!("{}\t{kind}\t{source}\t{}", kit.name, kit.dir.display())
+        })
+        .collect();
+    for dir in &catalog.user_dirs {
+        let state = if dir.is_dir() { "" } else { " (missing)" };
+        lines.push(format!("# user kits: {}{state}", dir.display()));
+    }
+    for problem in &catalog.user_problems {
+        lines.push(format!("# skipped: {problem}"));
+    }
+    lines.join("\n")
 }
 
 fn one_line(text: &str) -> String {
@@ -1714,21 +1808,42 @@ fn stop(raw: &[String]) -> Outcome {
 
 fn rm(raw: &[String]) -> Outcome {
     let args = Args::parse(raw, &[], &[])?;
-    let name = args.name()?;
-    match step(&sbx::rm_argv(&name), false) {
+    rm_inner(&args.name()?)?;
+    Ok(0)
+}
+
+/// `rm` for one name: the sandbox, then what aisbx remembers about it. `aisbx step` removes its
+/// sandbox through it.
+pub(crate) fn rm_inner(name: &str) -> Result<(), Fail> {
+    match step(&sbx::rm_argv(name), false) {
         Ok(s) if s.success() => {}
         Ok(s) => return Err(Fail::sandbox(format!("sbx rm {name} failed ({s})"))),
         Err(e) => return Err(Fail::sandbox(format!("could not run sbx: {e}"))),
     }
     // As the dashboard's delete. A named token stays: other sandboxes may use it.
     let mut registry = state::Registry::load();
-    registry.forget(&name);
+    registry.forget(name);
     let _ = registry.save();
-    let _ = models::remove_kit(&name);
-    let _ = folders::remove_kit(&name);
+    let _ = models::remove_kit(name);
+    let _ = folders::remove_kit(name);
     // Its skill selection too: a later sandbox of this name starts with none.
-    if let Err(e) = skill_select::forget(&state::state_dir(), &name) {
+    if let Err(e) = skill_select::forget(&state::state_dir(), name) {
         eprintln!("aisbx: warning: the skill selection of {name} was not dropped ({e:#})");
+    }
+    Ok(())
+}
+
+/// `aisbx doctor [--json]`: what a script needs to know before its first `up` or `step`.
+fn doctor(raw: &[String]) -> Outcome {
+    let args = Args::parse(raw, &["json"], &[])?;
+    if let Some(extra) = args.positional.first().or(args.trailing.first()) {
+        return Err(Fail::usage(format!("doctor takes no argument: {extra}")));
+    }
+    let doc = crate::step::doctor_json();
+    if args.has("json") {
+        println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+    } else {
+        println!("{}", crate::step::doctor_text(&doc));
     }
     Ok(0)
 }
@@ -3264,6 +3379,41 @@ mod tests {
         );
         assert!(rows[1]["label"].is_null());
         assert_eq!(rows[1]["workspaces"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn kits_lists_every_kit_with_its_source_and_the_skipped_user_kits() {
+        assert!(is_subcommand("kits"));
+        assert!(!runs_sandboxes("kits"));
+        assert!(HELP.contains("aisbx kits [--json]"));
+        assert_eq!(kits_cmd(&strings(&["x"])).unwrap_err().code, EXIT_USAGE);
+        let mut catalog = Catalog::load().unwrap();
+        catalog.user_dirs = vec![PathBuf::from("/nowhere/kits")];
+        catalog.user_problems = vec!["/nowhere/kits/x: no descriptor x.yaml".into()];
+
+        let text = render_kits(&catalog, false);
+        let rust = catalog.kits_dir.join("rust");
+        assert!(
+            text.contains(&format!("rust\taddon\taisbx\t{}", rust.display())),
+            "{text}"
+        );
+        assert!(text.contains("\tbackend\taisbx\t"), "{text}");
+        assert!(
+            text.contains("# user kits: /nowhere/kits (missing)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("# skipped: /nowhere/kits/x: no descriptor x.yaml"),
+            "{text}"
+        );
+
+        let doc: serde_json::Value = serde_json::from_str(&render_kits(&catalog, true)).unwrap();
+        let rows = doc["kits"].as_array().unwrap();
+        let rust_row = rows.iter().find(|r| r["name"] == "rust").unwrap();
+        assert_eq!(rust_row["source"], "aisbx");
+        assert_eq!(rust_row["kind"], "addon");
+        assert_eq!(doc["user_dirs"], serde_json::json!(["/nowhere/kits"]));
+        assert_eq!(doc["skipped"].as_array().unwrap().len(), 1);
     }
 
     #[test]

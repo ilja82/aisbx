@@ -799,16 +799,18 @@ pub fn ports(name: &str) -> Result<Vec<Port>> {
 /// Ask the daemon whether the policy in force for `sandbox` would allow reaching `target`.
 /// Read-only: it opens no connection and creates no approval request.
 pub fn check_host(sandbox: &str, target: &str) -> Result<Reachability> {
+    check_target(sandbox, target, None)
+}
+
+/// [`check_host`] for one protocol (`tcp` or `udp`); `None` is the daemon's default, TCP.
+pub fn check_target(sandbox: &str, target: &str, protocol: Option<&str>) -> Result<Reachability> {
+    let mut args = vec!["policy", "check", "network", "--json", "--sandbox", sandbox];
+    if let Some(protocol) = protocol {
+        args.extend(["--protocol", protocol]);
+    }
+    args.push(target);
     let out = Command::new("sbx")
-        .args([
-            "policy",
-            "check",
-            "network",
-            "--json",
-            "--sandbox",
-            sandbox,
-            target,
-        ])
+        .args(&args)
         .output()
         .with_context(|| format!("running `sbx policy check network {target}`"))?;
     // A deny exits 1 with the answer on stdout, so the status alone decides nothing.
@@ -1620,6 +1622,12 @@ pub const POLICY_INIT_HINT: &str = "the network policy is not initialized — ru
 /// allow-lists are the whole egress story; under `balanced` this is GitHub, npm, Maven Central and
 /// the rest of its rule sets. Read from `sbx policy ls --json` (no sandbox: the global rules).
 pub fn global_network_allows() -> Result<Vec<String>> {
+    Ok(global_allows(&global_policy_rules()?))
+}
+
+/// Every rule of the host's local policy, `sbx policy ls --json` without a sandbox: the presets,
+/// the fallback and what `sbx policy allow|deny` added globally.
+pub fn global_policy_rules() -> Result<Vec<PolicyRule>> {
     let out = Command::new("sbx")
         .args(["policy", "ls", "--json"])
         .output()
@@ -1632,7 +1640,7 @@ pub fn global_network_allows() -> Result<Vec<String>> {
     }
     let parsed: PolicyLsOutput =
         parse_json(&out.stdout).context("parsing `sbx policy ls --json`")?;
-    Ok(global_allows(&parsed.rules))
+    Ok(parsed.rules)
 }
 
 fn global_allows(rules: &[PolicyRule]) -> Vec<String> {
@@ -2673,6 +2681,64 @@ pub fn kit_add_argv(name: &str, kit_dir: &Path) -> Vec<String> {
 /// `sbx kit add` rejects as not canonical.
 fn kit_ref(dir: &Path) -> String {
     dir.display().to_string()
+}
+
+/// The text after a Windows drive letter (`\data` of `C:\data`); any other text as it is.
+pub fn without_drive(text: &str) -> &str {
+    let bytes = text.as_bytes();
+    match bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        true => &text[2..],
+        false => text,
+    }
+}
+
+/// A host path as sbx expects it. On Windows `std::fs::canonicalize` returns a verbatim path
+/// (`\\?\C:\data`), which sbx mounts at `/?/C:/data` instead of `/c/data`; this drops the prefix of a
+/// verbatim drive path and keeps every other path as it is.
+pub fn plain_path(path: std::path::PathBuf) -> std::path::PathBuf {
+    let text = path.to_string_lossy().into_owned();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if without_drive(rest).starts_with('\\') && rest.len() > 2 => {
+            std::path::PathBuf::from(rest)
+        }
+        _ => path,
+    }
+}
+
+/// Where a sandbox sees a host path that sbx mounted: the path itself on Unix, and for a Windows
+/// drive path the drive letter in lower case as the first folder, with `/` (`C:\data` is `/c/data`).
+/// `sbx exec -w` takes this form only.
+pub fn sandbox_path(host: &Path) -> String {
+    let text = plain_path(host.to_path_buf()).display().to_string();
+    let rest = without_drive(&text);
+    if rest.len() == text.len() {
+        return text;
+    }
+    let drive = text[..1].to_ascii_lowercase();
+    format!("/{drive}{}", rest.replace('\\', "/"))
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn windows_paths_map_to_their_sandbox_folders() {
+        assert_eq!(sandbox_path(Path::new("/w/app")), "/w/app");
+        assert_eq!(sandbox_path(Path::new(r"C:\Users\me")), "/c/Users/me");
+        assert_eq!(sandbox_path(Path::new(r"\\?\D:\data\x")), "/d/data/x");
+        assert_eq!(
+            plain_path(PathBuf::from(r"\\?\C:\data")),
+            PathBuf::from(r"C:\data")
+        );
+        assert_eq!(
+            plain_path(PathBuf::from(r"\\?\UNC\server\share")),
+            PathBuf::from(r"\\?\UNC\server\share")
+        );
+        assert_eq!(without_drive(r"C:\data"), r"\data");
+        assert_eq!(without_drive("/w:x"), "/w:x");
+    }
 }
 
 #[cfg(test)]

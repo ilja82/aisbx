@@ -2487,6 +2487,7 @@ impl CreateForm {
                 if only_now {
                     text.push(ONLY_NOW_NOTE.to_string());
                 }
+                text.extend(addon.kit.user_note());
                 text.push(addon.kit.first_sentence().to_string());
                 Help::new(addon.kit.name.clone(), text.join(" ").trim().to_string())
             }
@@ -3349,7 +3350,7 @@ mod tests {
         for d in ["proj/sub", "data"] {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
-        let root = std::fs::canonicalize(&root).unwrap();
+        let root = crate::sbx::plain_path(std::fs::canonicalize(&root).unwrap());
         let mut app = App::for_test(Catalog::load().unwrap(), Vec::new());
         app.cwd = root.join("proj");
         app.open_create();

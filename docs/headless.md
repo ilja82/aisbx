@@ -1,4 +1,4 @@
-# Headless use (`aisbx up`, `aisbx run`, …)
+# Headless use (`aisbx up`, `aisbx run`, `aisbx step`, …)
 
 [← Back to the README](../README.md)
 
@@ -33,8 +33,11 @@ They use the same kits, sandbox names, LiteLLM connections and setup tokens, and
 | `aisbx up` | writes the connection's generated kit on a LiteLLM backend, then `sbx create` with the backend and addon kits |
 | `aisbx run` | `sbx exec`: the agent update, the prompt upload, then the agent in print mode; after the run, `sbx policy approval respond` dismisses held requests |
 | `aisbx ls` | `sbx ls --json` |
+| `aisbx kits` | nothing: it reads the kit folders on this computer |
 | `aisbx status` | `sbx ls --json`, `sbx inspect --json` and `sbx policy approval ls --json` |
 | `aisbx stop` / `rm` | `sbx stop` / `sbx rm --force` |
+| `aisbx step` | `up` with `--deny-network`, `sbx policy ls`, `sbx policy check network` (in parallel), `sbx policy log`, the agent or checks through `sbx exec`, then `rm` and `sbx ls` to prove the removal ([The step protocol](step-protocol.md)) |
+| `aisbx doctor` | `sbx version --json`, `sbx ls --json`, `sbx policy ls --json`; the kit folders on this computer |
 
 ![A script runs aisbx up, which runs sbx create and prints the sandbox name. aisbx run NAME runs sbx exec for the agent update and the prompt upload, then the agent in print mode, whose output reaches the script on stdout, then dismisses held network requests. aisbx rm runs sbx rm --force.](images/headless-run.png)
 
@@ -208,6 +211,23 @@ The agent's output comes through untouched:
   its default output. `--model` takes OpenCode's `provider/model` form, e.g. `litellm-<connection>/<model>`
   (`local-<engine>/<model>` on a local engine).
 
+### `aisbx step`
+
+`step --spec FILE --dir DIR` runs one unit of work in a fresh sandbox and removes the sandbox again, all in one
+process: create with every unwanted host denied, prove the network, run the agent or a list of check commands,
+read the proxy log, remove, report. A script calls it once per pipeline step, reads NDJSON events from stdout while
+it runs, and finds the artefacts (`stream.ndjson` or `checks.json`, `policy.json`, the proxy logs, `report.json`) in
+`DIR` afterwards. `--prewarm` creates and proves only, for a later step with the same spec. `step --protocol`
+prints the protocol version a script pins. [The step protocol](step-protocol.md) is the contract, with the spec
+file, every event, the report and the exit codes.
+
+### `aisbx doctor`
+
+`doctor [--json]` says what a script needs before its first `up` or `step`: the aisbx version and its step
+protocol, the sbx version and whether it is new enough, whether sbx is signed in, whether the policy has its
+deny-all fallback, the user kit folders searched, and every kit found or skipped. It exits 0 whatever it finds; the
+`problems` list and `ok` say what is wrong.
+
 ### `aisbx ls`, `status`, `stop` and `rm`
 
 - `ls [--json]` lists every local sandbox in sbx's order and changes nothing. A line has five tab-separated fields:
@@ -285,6 +305,7 @@ These commands manage what the dashboard manages on its own screens. Each page d
 | --- | --- | --- |
 | `aisbx litellm ls \| add \| fetch \| rm` | **Secrets** (`S`), **Refresh models** (`L`) | [LiteLLM connections](litellm.md#adding-a-connection) |
 | `aisbx local discover \| add \| ls \| fetch \| rm` | the create wizard's Engine step, **Refresh models** (`L`) | [Local inference engines](local.md#in-scripts) |
+| `aisbx kits` | the create wizard's kit list | [Your own kits](kits.md#your-own-kits) |
 | `aisbx folders ls \| add \| rm` | **Host folders** (`F`) | [Host folders](sandboxes.md#host-folders-f-and-companionjson) |
 | `aisbx skill-repo add \| rm \| ls \| fetch \| auto-update` | **Skills** (`K`) | [Skill repositories](skills.md#skill-repositories-aisbx-skill-repo) |
 | `aisbx skill add \| rm \| ls \| sync` | **Repo skills** (`i`) | [Skills from skill repos](skills.md#skills-from-skill-repos-aisbx-skill) |

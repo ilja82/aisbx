@@ -29,11 +29,13 @@ Under `balanced`, both hosts are reachable.
 
 ### Add another JDK version
 
-The dashboard shows every `kits/jdk<ver>/`. To add a version:
+A project that needs another JDK keeps it as [one of your own kits](kits.md#your-own-kits):
 
-1. Copy `kits/jdk25/` to `kits/jdk<ver>/`.
+1. Copy `kits/jdk25/` into your kit folder as `jdk<ver>/`.
 2. Rename its two files.
 3. Update the tag, the SHA256s, the `/opt/jdk-<ver>` and `JAVA_HOME` paths and the marker.
+
+Use one JDK per sandbox: sbx refuses two kits that set `JAVA_HOME` to different values.
 
 ## Rust projects
 
