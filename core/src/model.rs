@@ -41,6 +41,8 @@ pub struct Snapshot {
     /// The model fetchers on this host ([`crate::model_fetch`]), by sandbox name. Never in
     /// `sandboxes`: the list does not show them.
     pub fetchers: Vec<String>,
+    /// What `sbx df --json` reports, or `None` when it failed: then no sandbox shows a size.
+    pub disk: Option<sbx::DiskUsage>,
 }
 
 /// How a sandbox mounts the host's shared agent-skills store, as far as this dashboard can tell.
@@ -198,6 +200,9 @@ pub struct Sandbox {
     pub cpus: Option<u32>,
     pub memory: Option<String>,
     pub memory_spec: Option<String>,
+    /// Bytes of the container's own files, its `size` in `sbx df --json`
+    /// ([`sbx::DiskUsage::container_of`]); `None` when the read failed or found no container.
+    pub disk: Option<u64>,
     /// The guest has stopped responding (sbx's recovery state). The row says so first.
     pub unresponsive: bool,
     /// Host folders added after creation with `sbx mount` (`runtime_mounts`), restored on every
@@ -239,6 +244,13 @@ impl Sandbox {
     pub fn volumes_note(&self) -> Option<(&'static str, &'static str)> {
         self.tmpfs_volumes
             .then_some(("in RAM", "emptied at every stop"))
+    }
+
+    /// The overview's `disk` row - value and gloss - from `sbx df`; `None` while sbx reports no
+    /// container for it.
+    pub fn disk_note(&self) -> Option<(String, &'static str)> {
+        self.disk
+            .map(|bytes| (crate::stats::disk_size(bytes), "the container's own files"))
     }
 
     /// Managed by this repo — the only sandboxes whose kits the TUI may edit.
@@ -848,6 +860,9 @@ pub fn resolve(snapshot: &Snapshot, catalog: &Catalog, registry: &mut Registry) 
             cpus: raw.ls.cpus,
             memory: raw.ls.memory.clone().filter(|m| !m.trim().is_empty()),
             memory_spec: raw.ls.memory_spec(),
+            disk: (snapshot.disk.as_ref())
+                .and_then(|d| d.container_of(&name))
+                .map(|c| c.size),
             unresponsive: raw.ls.guest_unresponsive || inspect.guest_unresponsive,
             runtime_mounts: inspect.dynamic_mounts(),
             host_mounts,
@@ -1062,6 +1077,8 @@ pub fn gather(catalog: &Catalog) -> anyhow::Result<Snapshot> {
         // A failed read keeps the last answer.
         let approvals = s.spawn(|| sbx::approvals().ok());
         let policy_needs_init = s.spawn(sbx::network_policy_needs_init);
+        // A failed read shows no sizes.
+        let disk = s.spawn(|| sbx::disk_usage().ok());
         let mut fetchers = Vec::new();
         let sandboxes = sbx::list().map(|entries| {
             let (found, entries): (Vec<_>, Vec<_>) =
@@ -1085,6 +1102,7 @@ pub fn gather(catalog: &Catalog) -> anyhow::Result<Snapshot> {
             approvals: joined(approvals),
             policy_needs_init: joined(policy_needs_init),
             fetchers,
+            disk: joined(disk),
         })
     })
 }
@@ -1143,8 +1161,40 @@ pub fn sanitize(component: &str) -> String {
 const NAME_MAX: usize = 63;
 
 /// `<prefix>-<folder>`, with `-2`, `-3`, ... appended when a folder already has a sandbox of that
-/// backend. The folder half is trimmed to fit [`NAME_MAX`] and to end in a letter or digit.
+/// backend, in any case ([`names_clash`]). The folder half is trimmed to fit [`NAME_MAX`] and to
+/// end in a letter or digit.
 pub fn unique_sandbox_name(prefix: &str, folder: &Path, taken: &[String]) -> String {
+    name_candidates(prefix, folder)
+        .find(|c| !taken.iter().any(|t| names_clash(t, c)))
+        .expect("an unused suffix always exists")
+}
+
+/// The name `aisbx up` gives a sandbox without `--name`: the first of [`unique_sandbox_name`]'s
+/// candidates that is the exact name of a sandbox in `existing`, or that no sandbox there holds in
+/// another case.
+pub fn reusable_sandbox_name(prefix: &str, folder: &Path, existing: &[String]) -> String {
+    name_candidates(prefix, folder)
+        .find(|c| existing.iter().any(|t| t == c) || case_twin(c, existing).is_none())
+        .expect("an unused suffix always exists")
+}
+
+/// Is `a` the same sandbox name as `b` to `sbx create`? It compares names without case, while a
+/// lookup by name (`inspect`, `exec`, `rm`) needs the exact spelling.
+pub fn names_clash(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b)
+}
+
+/// The name in `names` that differs from `name` only in case: while that sandbox exists,
+/// `sbx create` refuses `name`.
+pub fn case_twin<'a>(name: &str, names: &'a [String]) -> Option<&'a str> {
+    names
+        .iter()
+        .find(|n| n.as_str() != name && names_clash(n, name))
+        .map(String::as_str)
+}
+
+/// `<prefix>-<folder>`, then the same with `-2`, `-3`, ...
+fn name_candidates(prefix: &str, folder: &Path) -> impl Iterator<Item = String> {
     let base_folder = folder
         .file_name()
         .map(|s| sanitize(&s.to_string_lossy()))
@@ -1155,18 +1205,12 @@ pub fn unique_sandbox_name(prefix: &str, folder: &Path, taken: &[String]) -> Str
     let folder_part = trim_name(&base_folder, budget.max(1));
 
     let base = trim_name(&format!("{prefix}-{folder_part}"), NAME_MAX);
-    if !taken.iter().any(|t| t == &base) {
-        return base;
-    }
-    (2..)
-        .map(|n| {
-            format!(
-                "{}-{n}",
-                trim_name(&base, NAME_MAX - 1 - n.to_string().len())
-            )
-        })
-        .find(|c| !taken.iter().any(|t| t == c))
-        .expect("an unused suffix always exists")
+    std::iter::once(base.clone()).chain((2..).map(move |n: u32| {
+        format!(
+            "{}-{n}",
+            trim_name(&base, NAME_MAX - 1 - n.to_string().len())
+        )
+    }))
 }
 
 /// Cut a name to `max` characters and drop any trailing `-` or `.`, which sbx refuses. Falls
@@ -1207,6 +1251,32 @@ pub fn auto_label(
         .map(|a| a.short())
         .collect();
     format!("{base} ({})", list.join(", "))
+}
+
+/// What a generated label is made of: the backend kit, how it signs in ([`label_account`]) and
+/// the addons.
+#[derive(Debug, Clone, Copy)]
+pub struct LabelParts<'a> {
+    pub backend: &'a str,
+    pub account: Option<&'a str>,
+    pub addons: &'a [String],
+}
+
+/// The label generated for `after`, when `current` is still the label generated for `before`
+/// and the two differ. `None` keeps `current`: a typed label, no label, or no change.
+pub fn regenerated_label(
+    catalog: &Catalog,
+    current: Option<&str>,
+    before: LabelParts,
+    after: LabelParts,
+) -> Option<String> {
+    let generate = |p: LabelParts| auto_label(catalog, p.backend, p.account, p.addons);
+    let was = generate(before);
+    if current != Some(was.as_str()) {
+        return None;
+    }
+    let next = generate(after);
+    (next != was).then_some(next)
 }
 
 /// How a sandbox on `backend` signs in, as its generated label names it after the provider: the
@@ -1588,6 +1658,7 @@ pub fn sample(name: &str, backend: Option<&str>, addons: &[&str]) -> Sandbox {
         cpus: None,
         memory: None,
         memory_spec: None,
+        disk: None,
         unresponsive: false,
         runtime_mounts: Vec::new(),
         host_mounts: None,
@@ -1630,6 +1701,37 @@ pub fn sample(name: &str, backend: Option<&str>, addons: &[&str]) -> Sandbox {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A kit or sign-in change renames only a sandbox whose label is still the generated one.
+    #[test]
+    fn a_generated_label_follows_a_kit_change_and_a_typed_one_stays() {
+        let catalog = Catalog::load().unwrap();
+        let addons = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        let (before, after) = (addons(&["rtk"]), addons(&["rtk", "web"]));
+        let parts = |account, addons| LabelParts {
+            backend: "claude-anthropic",
+            account,
+            addons,
+        };
+        let was = auto_label(&catalog, "claude-anthropic", Some("/login"), &before);
+        let next = auto_label(&catalog, "claude-anthropic", Some("/login"), &after);
+        assert_ne!(was, next);
+        let regen = |current: Option<&str>, a, b| regenerated_label(&catalog, current, a, b);
+        let (b, a) = (
+            parts(Some("/login"), &before),
+            parts(Some("/login"), &after),
+        );
+        assert_eq!(regen(Some(&was), b, a), Some(next));
+        assert_eq!(regen(Some("My box"), b, a), None);
+        assert_eq!(regen(None, b, a), None);
+        assert_eq!(regen(Some(&was), b, b), None);
+        let other = parts(Some("token work"), &before);
+        assert_eq!(
+            regen(Some(&was), other, a),
+            None,
+            "a label of another sign-in stays"
+        );
+    }
 
     /// The label a new sandbox gets names its agent, its provider and how it signs in there, so
     /// the list tells two sandboxes of one agent apart; the kits follow in brackets.
@@ -1746,6 +1848,7 @@ mod tests {
             approvals: None,
             policy_needs_init: None,
             fetchers: Vec::new(),
+            disk: None,
         };
         let catalog = Catalog::load().unwrap();
         let sb = resolve(&snap, &catalog, &mut Registry::empty()).remove(0);
@@ -1868,6 +1971,59 @@ mod tests {
         assert_eq!(
             unique_sandbox_name("claude-anthropic", &folder, &taken),
             "claude-anthropic-aisbx-3"
+        );
+    }
+
+    #[test]
+    fn a_name_taken_in_another_case_is_taken() {
+        let folder = PathBuf::from("/home/u/Proj");
+        let names = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let taken = names(&["claude-litellm-proj"]);
+        assert_eq!(
+            unique_sandbox_name("claude-litellm", &folder, &taken),
+            "claude-litellm-Proj-2"
+        );
+        let taken = names(&["claude-litellm-proj", "CLAUDE-LITELLM-PROJ-2"]);
+        assert_eq!(
+            unique_sandbox_name("claude-litellm", &folder, &taken),
+            "claude-litellm-Proj-3"
+        );
+
+        assert_eq!(
+            case_twin("a-Proj", &names(&["b", "a-proj"])),
+            Some("a-proj")
+        );
+        assert_eq!(case_twin("a-proj", &names(&["a-proj"])), None);
+        assert_eq!(case_twin("a-proj", &names(&["a-proj2"])), None);
+    }
+
+    #[test]
+    fn up_reuses_the_exact_name_and_skips_one_taken_in_another_case() {
+        let folder = PathBuf::from("/home/u/Proj");
+        let names = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let name = |existing: &[&str]| {
+            reusable_sandbox_name("claude-anthropic", &folder, &names(existing))
+        };
+        assert_eq!(name(&[]), "claude-anthropic-Proj");
+        assert_eq!(
+            name(&["claude-anthropic-Proj", "claude-anthropic-proj-2"]),
+            "claude-anthropic-Proj",
+            "the exact name is the sandbox to reuse"
+        );
+        assert_eq!(
+            name(&["claude-anthropic-proj", "claude-anthropic-Proj"]),
+            "claude-anthropic-Proj",
+            "twins an older sbx made: the exact one is reused"
+        );
+        assert_eq!(name(&["claude-anthropic-proj"]), "claude-anthropic-Proj-2");
+        assert_eq!(
+            name(&["claude-anthropic-proj", "claude-anthropic-Proj-2"]),
+            "claude-anthropic-Proj-2",
+            "the next up finds the sandbox the last one made"
+        );
+        assert_eq!(
+            name(&["claude-anthropic-proj", "CLAUDE-ANTHROPIC-PROJ-2"]),
+            "claude-anthropic-Proj-3"
         );
     }
 
@@ -2559,6 +2715,7 @@ mod checkout_tests {
             approvals: None,
             policy_needs_init: None,
             fetchers: Vec::new(),
+            disk: None,
             sandboxes: vec![Raw {
                 ls: LsEntry {
                     name: "s".into(),

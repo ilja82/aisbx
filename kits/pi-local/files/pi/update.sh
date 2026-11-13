@@ -23,8 +23,18 @@ case ${1:-} in
     "$prefix/bin/pi" --version
     ;;
   create)
-    npm install -g --prefix "$prefix" "$pkg" >/dev/null 2>&1 \
-      || echo "aisbx: could not update Pi - keeping the image's version"
+    limit=${AISBX_PI_UPDATE_TIMEOUT:-180}
+    set -- npm install -g --prefix "$prefix" "$pkg"
+    if command -v timeout >/dev/null 2>&1; then
+      timeout -k 10 "$limit" "$@" >/dev/null 2>&1
+    else
+      "$@" >/dev/null 2>&1
+    fi
+    case $? in
+      0) ;;
+      124 | 137) echo "aisbx: the Pi update took longer than ${limit}s - keeping the image's version" ;;
+      *) echo "aisbx: could not update Pi - keeping the image's version" ;;
+    esac
     ;;
   *) echo "usage: update.sh build|create" >&2; exit 2 ;;
 esac

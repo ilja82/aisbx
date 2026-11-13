@@ -11,10 +11,15 @@ Each sandbox has a name, a set of kits, and a container that sbx builds from tho
 
 ### Names
 
-- The **label** is the text you type, or a generated one such as `OpenCode (RTK, JDK25)`. Press `r` to change it. The
-  [status line](addons.md#status-line-inside-the-sandbox) prints it.
+- The **label** is the text you type, or a generated one such as `OpenCode · LiteLLM acme (RTK, JDK25)`. Press `r` to
+  change it. The [status line](addons.md#status-line-inside-the-sandbox) prints it.
+- A generated label follows the sandbox: when you add or remove kits, or change its account, the dashboard and
+  `aisbx up` make the label again. A label you typed stays as it is.
 - The **sbx name** is `<backend>-<folder>`, with `-2`, `-3` for repeats.
   The dashboard sets it. It allows only letters, digits, dots and hyphens, so put free text into the label.
+- sbx does not tell sbx names apart by upper and lower case when it creates a sandbox. So a name that another
+  sandbox has in other case counts as a repeat: next to `claude-anthropic-proj`, the folder `Proj` gets
+  `claude-anthropic-Proj-2`. Every other `sbx` command needs the exact name.
 
 ### Adding and removing kits (`e`)
 
@@ -42,6 +47,14 @@ sandbox's own network rules and detached mode. The confirmation names each one.
 #### Limits
 
 - **A sandbox whose folder is gone is not rebuilt.** Restore the folder, or delete the sandbox.
+- **A sandbox whose name another sandbox has in other upper and lower case is not rebuilt.** sbx would refuse to create
+  it again ([Names](#names)). Delete the other sandbox first.
+- **A kit change that removes a feature another kit needs is not rebuilt.** A kit can name the features it needs in
+  `requires:` and the features it gives in `provides:`. When you remove the only kit that provides what a kept kit
+  requires, sbx would refuse to create the sandbox again. Keep that kit, or remove both.
+- **Right after a kit change, `R` and `e` wait a moment.** The dashboard rebuilds from the kits sbx reports, and sbx
+  reports a new kit only at the next refresh. Until then, both keys say so and do nothing. Try again after a few
+  seconds.
 
 ### Update detection (`⟳`)
 
@@ -97,7 +110,8 @@ shows `⚑ N approvals waiting`.
 ## Prune stopped sandboxes (`P`)
 
 Press `P` to delete **every stopped sandbox on the host**. A running sandbox is never deleted. The confirmation lists
-each sandbox that will go.
+each sandbox that will go, with the size of its container's own files. It then gives what `sbx df` counts in unused
+images, containers and volumes on the host. That count is sbx's estimate: `sbx prune` alone frees less.
 
 | Deleted | Kept |
 | --- | --- |
@@ -195,6 +209,30 @@ mount no package cache.
 The setting reaches only sandboxes created after the change. An existing sandbox keeps what it was created with, also
 after a restart; a rebuild (`R`) creates it again with the current setting. Without the dashboard:
 `sbx settings set sandbox.fuse false`.
+
+## Claude in Chrome and Remote Control (`T`)
+
+Two settings let Claude Code in a sandbox reach past it, for every sandbox on this host. Both are off by default.
+Press `T` (or *Settings* in the window's header) to turn one on:
+
+- **Claude in Chrome** lets Claude Code read and act in the tabs of Chrome on this computer. Install the Claude in
+  Chrome extension in Chrome and sign in to it with the account of the `/login`. Your organization must allow the
+  extension. In the session, run `/chrome` and turn on *Enabled by default*: the sessions you start after that use
+  Chrome. To start one session with it, run `sbx run --name <sandbox> -- --chrome`.
+  Turning the setting off blocks new browser connections, also from running sandboxes. A connection that is already
+  open stays: end its Claude browser session to take that access back.
+- **Remote Control** lets you drive a session from claude.ai or the Claude app with Claude Code's `/remote-control`.
+  The proxy signs the connection in with the credentials it keeps on this computer. Environment variables and MCP
+  configuration sent from the remote side do not reach the sandbox. A change reaches running sandboxes.
+
+Only a `claude-anthropic` sandbox can use them. Claude Code turns Chrome off without the `/login` sign-in, and only
+that kit allows `bridge.claudeusercontent.com`, the relay of both ([Egress](network.md#egress)). Without the
+dashboard:
+
+```console
+$ sbx settings set claude.chrome true          # false blocks new browser connections
+$ sbx settings set claude.remoteControl true
+```
 
 ## MCP servers
 
@@ -305,6 +343,7 @@ build and a Gradle build ran as fast at 4 CPUs and 4 GiB.
 | Keep running | `sbx run --detach --name <sandbox>` |
 | Answer a request | `sbx policy approval respond <id> --option allow` (or `dismiss`) |
 | Prune | `sbx prune --dry-run`, then `sbx prune`; add `--filter until=168h` to keep what stopped in the last week |
+| Disk use | `sbx df`; `--verbose` lists each image, container and volume |
 | Connect over SSH | `sbx setup ssh` once, then `ssh <name>.sbx` |
 | Detach an MCP server | `sbx mcp unload notion --sandbox my-sandbox` |
 | Create without MCP servers | `sbx create --static-mcp none …` |

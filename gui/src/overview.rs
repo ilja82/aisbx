@@ -300,8 +300,8 @@ fn lifecycle_rows(sb: &Sandbox) -> Vec<Row> {
     out
 }
 
-/// The name sbx knows it by, its kits — and whether they changed since — its limits and
-/// volumes, its image and how sbx signs it in.
+/// The name sbx knows it by, its kits — and whether they changed since — its limits, volumes and
+/// disk, its image and how sbx signs it in.
 fn build_rows(app: &App, sb: &Sandbox) -> Vec<Row> {
     let mut out = vec![row("sbx name", vec![plain(&sb.name)]), kits(app, sb)];
     if let Some(dir) = &sb.other_checkout {
@@ -326,6 +326,9 @@ fn build_rows(app: &App, sb: &Sandbox) -> Vec<Row> {
     }
     if let Some((value, gloss)) = sb.volumes_note() {
         out.push(glossed("Volumes", vec![plain(value)], weak(gloss)));
+    }
+    if let Some((value, gloss)) = sb.disk_note() {
+        out.push(glossed("Disk", vec![plain(value)], weak(gloss)));
     }
     if !sb.image.is_empty() {
         let mut value = vec![weak(&sb.image)];
@@ -493,6 +496,7 @@ mod tests {
         sb.keep_running = true;
         sb.cpus = Some(2);
         sb.tmpfs_volumes = true;
+        sb.disk = Some(3_218_194_432);
         sb.drift = Some(aisbx_core::model::Drift::Changed(vec!["Statusline".into()]));
         sb.other_checkout = Some("/other/kits".into());
         sb.models.set(Slot::Opus, Some("big-1".into()));
@@ -524,12 +528,14 @@ mod tests {
                 "Agent: Harness, Connection, Models, Skills, Secrets, MCP",
                 "Workspace: Folder, Starts in, SSH",
                 "Lifecycle: Lifecycle, Created, Last used",
-                "Build: sbx name, Kits, ⚠ Kits, ⟳ Update, Limits, Volumes, Image",
+                "Build: sbx name, Kits, ⚠ Kits, ⟳ Update, Limits, Volumes, Disk, Image",
             ]
         );
         let rows = rows(&app, &sb);
         let folder = rows.iter().find(|r| r.label == "Folder").unwrap();
         assert_eq!(folder.gloss, Some(warn("another folder")));
+        let disk = rows.iter().find(|r| r.label == "Disk").unwrap();
+        assert_eq!(disk.value[0].text, "3.2 GB");
         let secrets = rows.iter().find(|r| r.label == "Secrets").unwrap();
         assert_eq!(secrets.value[0].text, "placeholder only (custom)");
     }

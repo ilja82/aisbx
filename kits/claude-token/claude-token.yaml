@@ -20,7 +20,7 @@ capabilities:
           - downloads.claude.ai          # `claude update` (files/claude/update.sh)
       runtime:
         allow:
-          # Not allowed on purpose: bridge.claudeusercontent.com (/remote-control).
+          # Not allowed on purpose: bridge.claudeusercontent.com (/remote-control, Claude in Chrome).
           - api.anthropic.com            # Messages API - the one host the token is swapped in for
           - downloads.claude.ai          # the dashboard's `claude update` before a session
           - code.claude.com              # the Claude Code docs its bundled claude-code skill fetches

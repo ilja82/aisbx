@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/ilja82/aisbx/actions/workflows/ci.yml/badge.svg)](https://github.com/ilja82/aisbx/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![sbx 0.51.0 or later](https://img.shields.io/badge/sbx-0.51.0%2B-2496ED)](https://docs.docker.com/ai/sandboxes/)
+[![sbx 0.53.0 or later](https://img.shields.io/badge/sbx-0.53.0%2B-2496ED)](https://docs.docker.com/ai/sandboxes/)
 ![Platforms: macOS, Linux, Windows](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
 
 aisbx is a wrapper around [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/) (`sbx`). sbx runs AI
@@ -75,7 +75,7 @@ aisbx builds on these sbx features. It does not replace them.
 
 ## Requirements
 
-- [sbx](https://docs.docker.com/ai/sandboxes/) **0.51.0** or later, signed in to Docker
+- [sbx](https://docs.docker.com/ai/sandboxes/) **0.53.0** or later, signed in to Docker
   ([Install](#1-install-sbx)). The dashboard refuses an older version ([why](docs/development.md#sbx-version)).
 - Docker with Buildx on the host. sbx uses it to build the image of each kit.
 - To build from source only: a Rust toolchain. The launcher builds aisbx with it. `aisbx-ui` needs Rust 1.95 or
@@ -87,7 +87,7 @@ Install sbx, sign in to Docker, set the network policy, then install aisbx.
 
 ### 1. Install sbx
 
-Install the `sbx` CLI from Docker. Check it with `sbx version`: aisbx needs 0.51.0 or later.
+Install the `sbx` CLI from Docker. Check it with `sbx version`: aisbx needs 0.53.0 or later.
 
 | Platform      | Command                                                         |
 |---------------|-----------------------------------------------------------------|
@@ -324,6 +324,7 @@ token ([LiteLLM connections](docs/litellm.md#the-generated-kit),
 | [The step protocol](docs/step-protocol.md)             | drive one sandboxed step per process from a pipeline: spec, events, report, exit codes |
 | [Kits](docs/kits.md)                                   | see every kit, write a kit, use your own kits                      |
 | [Development](docs/development.md)                     | build and test the dashboard, upgrade sbx                          |
+| [Deprecations and breaking changes](docs/deprecations.md) | find what changed and the step it needs from you                |
 
 ## Help and contributing
 

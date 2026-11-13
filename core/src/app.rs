@@ -71,6 +71,16 @@ fn host_home() -> Option<PathBuf> {
 const WORKSPACE_GONE: &str = "its folder no longer exists on this computer, so it cannot be \
      rebuilt: restore the folder, or delete the sandbox with d";
 
+/// Why a sandbox with a case twin is not rebuilt — see [`App::rebuild_blocker`].
+const CASE_TWIN: &str = "another sandbox has this name in other upper and lower case, so it \
+     cannot be rebuilt: sbx refuses the name while that sandbox exists. Delete the other one \
+     with d first";
+
+/// Why a sandbox whose kits just changed is not rebuilt or edited yet — see
+/// [`App::rebuild_blocker`].
+const KITS_UNSETTLED: &str = "its kits just changed and sbx has not reported the new set yet: \
+     try again in a moment";
+
 const AUTO_REFRESH: Duration = Duration::from_secs(5);
 /// How long the poll runs before the header shows it as a refresh: longer than its interval.
 const SLOW_REFRESH: Duration = Duration::from_secs(5);
@@ -1688,7 +1698,7 @@ pub enum SettingTone {
 }
 
 /// The settings the screen offers, in its order.
-pub const SETTINGS: [SettingSpec; 4] = [
+pub const SETTINGS: [SettingSpec; 6] = [
     SettingSpec {
         key: sbx::TELEMETRY_DISABLED,
         label: "telemetry",
@@ -1740,6 +1750,35 @@ pub const SETTINGS: [SettingSpec; 4] = [
                host-npm and host-pip kits cannot use your package caches. It applies to sandboxes \
                created after the change.",
         cautious: None,
+    },
+    SettingSpec {
+        key: sbx::CLAUDE_CHROME,
+        label: "Claude in Chrome",
+        words: ["on", "off"],
+        meanings: [
+            "Claude Code signed in with /login can use your Chrome tabs",
+            "no sandbox can open a connection to your Chrome; sbx's default",
+        ],
+        note: "When on, Claude Code signed in with /login can use Claude in Chrome: it reads and \
+               acts in the tabs of Chrome on this computer. It also needs the Claude in Chrome \
+               extension, signed in with the same account, and `/chrome` in the session. \
+               Otherwise, no sandbox can open a new browser connection. A connection that is \
+               already open stays until you end its Claude browser session.",
+        cautious: Some(false),
+    },
+    SettingSpec {
+        key: sbx::CLAUDE_REMOTE_CONTROL,
+        label: "Remote Control",
+        words: ["on", "off"],
+        meanings: [
+            "Claude Code's /remote-control can sign in from a sandbox",
+            "/remote-control cannot sign in from a sandbox; sbx's default",
+        ],
+        note: "When on, Claude Code's /remote-control signs in with the credentials the proxy \
+               keeps on this computer, so you can drive a /login sandbox's session from claude.ai \
+               or the Claude app. Otherwise, /remote-control cannot sign in. A change reaches \
+               running sandboxes.",
+        cautious: Some(false),
     },
 ];
 
@@ -2628,6 +2667,9 @@ pub struct PostJob {
     pub register: Option<Registered>,
     /// Its kit set changed — re-adopt the current kit hash instead of reporting drift.
     pub rebaseline: Option<String>,
+    /// Its kits or its sign-in changed and its label is still the generated one: `(sandbox, the
+    /// label generated for the new state)`.
+    pub relabel: Option<(String, String)>,
     /// Which Anthropic account it is on now.
     pub auth: Option<AuthRecord>,
     /// A job using this LiteLLM connection succeeded — the create form opens on it next time.
@@ -2877,6 +2919,11 @@ pub struct App {
     /// A change landed while a snapshot was in flight — that snapshot is stale.
     refresh_pending: bool,
     last_refresh: Instant,
+    /// Sandboxes whose kits a finished job changed, until a snapshot taken after it lands.
+    #[cfg(any(test, feature = "test-support"))]
+    pub kits_unsettled: std::collections::BTreeSet<String>,
+    #[cfg(not(any(test, feature = "test-support")))]
+    kits_unsettled: std::collections::BTreeSet<String>,
 }
 
 impl App {
@@ -2948,6 +2995,7 @@ impl App {
             background_fetches: Vec::new(),
             refreshing: false,
             refresh_pending: false,
+            kits_unsettled: Default::default(),
             last_refresh: Instant::now(),
         };
         app.refresh();
@@ -3255,6 +3303,9 @@ impl App {
                     }
                     self.fetchers = std::mem::take(&mut snapshot.fetchers);
                     self.sandboxes = model::resolve(&snapshot, &self.catalog, &mut self.registry);
+                    if !stale {
+                        self.kits_unsettled.clear();
+                    }
                     self.histories.retain_running(&self.sandboxes);
                     // A stale snapshot would drop the label of a sandbox created just now.
                     if !stale {
@@ -3436,6 +3487,9 @@ impl App {
         if let Some(defaults) = &post.defaults {
             self.registry.set_create_defaults(defaults.clone());
         }
+        if let Some((name, label)) = &post.relabel {
+            self.registry.set_display_name(name, Some(label.clone()));
+        }
         if let Some(name) = &post.forget {
             self.registry.forget(name);
             if let Err(e) = models::remove_kit(name).and_then(|()| folders::remove_kit(name)) {
@@ -3470,6 +3524,7 @@ impl App {
         }
         if let Some(name) = &post.rebaseline {
             self.registry.clear_kit_hash(name);
+            self.kits_unsettled.insert(name.clone());
         }
         if let Some(name) = &post.attach {
             // No update step: the install hook fetched the current release seconds ago.
@@ -5828,12 +5883,18 @@ impl App {
                     "Nothing to prune — every sandbox on this host is running".into(),
                 )),
             },
-            Action::EditKits => match selected.ok_or(Refusal::Silent)?.is_managed() {
-                true => Ok(()),
-                false => Err(Refusal::Error(
-                    "kits can only be edited on sandboxes created from this repo's kits".into(),
-                )),
-            },
+            Action::EditKits => {
+                let sb = selected.ok_or(Refusal::Silent)?;
+                if !sb.is_managed() {
+                    return Err(Refusal::Error(
+                        "kits can only be edited on sandboxes created from this repo's kits".into(),
+                    ));
+                }
+                match self.kits_unsettled.contains(&sb.name) {
+                    true => Err(Refusal::Info(KITS_UNSETTLED.into())),
+                    false => Ok(()),
+                }
+            }
             // Nothing to say: the footer does not offer `A` where there is no account to edit.
             Action::Auth => match self.can_edit_auth() {
                 true => Ok(()),
@@ -5841,11 +5902,14 @@ impl App {
             },
             Action::Rebuild => {
                 let sb = selected.ok_or(Refusal::Silent)?;
-                match sb.is_managed() {
-                    true => Ok(()),
-                    false => Err(Refusal::Error(
+                if !sb.is_managed() {
+                    return Err(Refusal::Error(
                         "only sandboxes created from this repo's kits can be rebuilt".into(),
-                    )),
+                    ));
+                }
+                match self.kits_unsettled.contains(&sb.name) {
+                    true => Err(Refusal::Info(KITS_UNSETTLED.into())),
+                    false => Ok(()),
                 }
             }
             Action::SandboxFolders => {
@@ -7866,13 +7930,15 @@ impl App {
     /// as `sbx prune --dry-run` answers.
     fn action_prune(&mut self) {
         // No preview (a failure, or under test): name the stopped sandboxes from the snapshot.
-        let preview = if cfg!(any(test, feature = "test-support")) {
-            None
+        let (preview, disk) = if cfg!(any(test, feature = "test-support")) {
+            (None, None)
         } else {
-            sbx::prune_preview().ok()
+            (sbx::prune_preview().ok(), sbx::disk_usage().ok())
         };
         let mut body: Vec<String> = match preview.as_ref().filter(|p| !p.would_remove.is_empty()) {
-            Some(p) => p.would_remove.iter().map(|c| self.prune_line(c)).collect(),
+            Some(p) => (p.would_remove.iter())
+                .map(|c| self.prune_line(c, disk.as_ref()))
+                .collect(),
             None => self
                 .sandboxes
                 .iter()
@@ -7884,7 +7950,10 @@ impl App {
                 })
                 .collect(),
         };
-        if let Some(skipped) = preview.map(|p| p.skipped()).filter(|s| !s.is_empty()) {
+        if let Some(skipped) = (preview.as_ref())
+            .map(|p| p.skipped())
+            .filter(|s| !s.is_empty())
+        {
             body.push(String::new());
             body.push(format!(
                 "sbx leaves {} alone: it cannot tell how long {} been stopped.",
@@ -7895,6 +7964,16 @@ impl App {
                     "they have"
                 }
             ));
+        }
+        if let (Some(preview), Some(disk)) = (&preview, &disk) {
+            let names: Vec<&str> = (preview.would_remove.iter())
+                .map(|c| c.name.as_str())
+                .collect();
+            let lines = prune_disk_lines(disk, &names);
+            if !lines.is_empty() {
+                body.push(String::new());
+                body.extend(lines);
+            }
         }
         body.push(String::new());
         body.push(
@@ -7925,8 +8004,8 @@ impl App {
     }
 
     /// One sandbox in the prune confirmation, rebuilt from the dry run's JSON, with the label
-    /// from the registry, which sbx does not know.
-    fn prune_line(&self, c: &sbx::PruneCandidate) -> String {
+    /// from the registry, which sbx does not know, and its container's size from `sbx df`.
+    fn prune_line(&self, c: &sbx::PruneCandidate, disk: Option<&sbx::DiskUsage>) -> String {
         let label = self
             .sandboxes
             .iter()
@@ -7953,6 +8032,9 @@ impl App {
             if !path.is_dir() {
                 line.push_str(" (missing)");
             }
+        }
+        if let Some(container) = disk.and_then(|d| d.container_of(&c.name)) {
+            line.push_str(&format!(" · {}", crate::stats::disk_size(container.size)));
         }
         line
     }
@@ -9714,11 +9796,21 @@ impl App {
             (false, true) => format!("{} and the model pins", join_labels(&added)),
             (false, false) => join_labels(&added),
         };
+        let relabel = self
+            .sandboxes
+            .iter()
+            .find(|s| s.name == name)
+            .and_then(|sb| {
+                let backend = sb.backend.as_deref()?;
+                let token = sb.auth.as_ref().and_then(|a| a.token_name());
+                self.relabel(sb, backend, &wanted, token, sb.litellm.as_deref())
+            });
         self.start_job(PendingJob {
             title: format!("Adding {what} to {name}"),
             steps,
             post: PostJob {
                 rebaseline: Some(name.clone()),
+                relabel,
                 ..Default::default()
             },
             fallback_hint: Some("sbx refuses to add a kit that ships files.".into()),
@@ -9914,10 +10006,97 @@ impl App {
     }
 
     /// Why a rebuild of this sandbox must not start, if it must not: its workspace folder is gone
-    /// from the host. A mountless sandbox has no folder to lose.
+    /// from the host (a mountless sandbox has no folder to lose), or another sandbox has its name
+    /// in another case, which `sbx create` refuses after the rebuild's `sbx rm`.
     pub fn rebuild_blocker(&self, name: &str) -> Option<&'static str> {
         let sb = self.sandboxes.iter().find(|s| s.name == name)?;
-        (sb.workspace_missing && !sb.mountless()).then_some(WORKSPACE_GONE)
+        if sb.workspace_missing && !sb.mountless() {
+            return Some(WORKSPACE_GONE);
+        }
+        if self.kits_unsettled.contains(name) {
+            return Some(KITS_UNSETTLED);
+        }
+        self.sandboxes
+            .iter()
+            .any(|s| s.name != name && model::names_clash(&s.name, name))
+            .then_some(CASE_TWIN)
+    }
+
+    /// `(sandbox, new label)` when `sb` still carries the label generated for it and the change to
+    /// `backend`, `addons`, `token` and `connection` generates another one
+    /// ([`model::regenerated_label`]). A typed label stays.
+    fn relabel(
+        &self,
+        sb: &Sandbox,
+        backend: &str,
+        addons: &[String],
+        token: Option<&str>,
+        connection: Option<&str>,
+    ) -> Option<(String, String)> {
+        let was = self.catalog.backend(sb.backend.as_deref()?)?;
+        let was_account = model::label_account(
+            was,
+            sb.auth.as_ref().and_then(|a| a.token_name()),
+            sb.litellm.as_deref(),
+        );
+        let account = model::label_account(self.catalog.backend(backend)?, token, connection);
+        model::regenerated_label(
+            &self.catalog,
+            self.registry.display_name(&sb.name),
+            model::LabelParts {
+                backend: &was.kit.name,
+                account: was_account.as_deref(),
+                addons: &sb.addons,
+            },
+            model::LabelParts {
+                backend,
+                account: account.as_deref(),
+                addons,
+            },
+        )
+        .map(|label| (sb.name.clone(), label))
+    }
+
+    /// Why `sbx create` would refuse the kits a rebuild of `sb` builds from, if it would: a kit
+    /// that stays requires a feature only a dropped kit provides.
+    fn kit_set_blocker(
+        &self,
+        sb: &Sandbox,
+        backend: &crate::kits::Kit,
+        addons: &[String],
+    ) -> Option<String> {
+        let addon_kits = |names: &[String]| -> Vec<&crate::kits::Kit> {
+            self.catalog
+                .all_addons()
+                .filter(|a| names.contains(&a.kit.name))
+                .map(|a| &a.kit)
+                .collect()
+        };
+        let mut before = addon_kits(&sb.addons);
+        before.extend(
+            sb.backend
+                .as_deref()
+                .and_then(|b| self.catalog.backend(b))
+                .map(|b| &b.kit),
+        );
+        let mut after = addon_kits(addons);
+        after.push(backend);
+        let lost = crate::kits::lost_features(before, after.iter().copied());
+        let feature = lost.first()?;
+        let needs: Vec<&str> = after
+            .iter()
+            .filter(|k| k.requires.contains(feature))
+            .map(|k| k.display_name.as_str())
+            .collect();
+        Some(format!(
+            "not rebuilt: {} requires {feature}, and only a kit this change removes provides it \
+             — keep that kit, or remove {} too",
+            needs.join(", "),
+            match needs.len() {
+                1 => "it",
+                _ => "them",
+            }
+        ))
     }
 
     /// Every reason a rebuild is refused, worded for the status line: the folder is gone, or the
@@ -9988,6 +10167,10 @@ impl App {
         }
         let sb = self.sandboxes.iter().find(|s| s.name == name)?;
         let backend_kit = self.catalog.backend(backend)?;
+        if let Some(reason) = self.kit_set_blocker(sb, &backend_kit.kit, addons) {
+            let _ = self.notice_tx.send((true, reason));
+            return None;
+        }
         let agent = backend_kit.agent.clone();
         // A workload backend is the agent positional (see `sbx::Create`).
         let agent_kit = backend_kit
@@ -10113,6 +10296,13 @@ impl App {
                 steps,
                 post: PostJob {
                     rebaseline: Some(name.to_string()),
+                    relabel: self.relabel(
+                        sb,
+                        backend,
+                        addons,
+                        token,
+                        conn.as_ref().map(|c| c.name.as_str()),
+                    ),
                     ..Default::default()
                 },
                 fallback: None,
@@ -10354,7 +10544,7 @@ impl App {
             loading: false,
             quit: false,
             handoff: None,
-            sbx_version: "v0.51.0".into(),
+            sbx_version: "v0.53.0".into(),
             // The production default, so the tests exercise the path a real start takes.
             auto_update: true,
             // One connection, `acme`, in a scratch folder: never the user's.
@@ -10399,6 +10589,7 @@ impl App {
             background_fetches: Vec::new(),
             refreshing: false,
             refresh_pending: false,
+            kits_unsettled: Default::default(),
             last_refresh: Instant::now(),
         };
         app.recompute_cells(None);
@@ -10575,6 +10766,42 @@ fn on_token(sb: &Sandbox, token: &str) -> bool {
 }
 
 /// "a", "a and b", "a, b and c" — for prose about the other sandboxes a shared token reaches.
+/// The prune confirmation's disk lines, from `sbx df`: what the containers of the sandboxes
+/// `names` hold, then what sbx estimates the host's unused images, containers and volumes hold.
+fn prune_disk_lines(disk: &sbx::DiskUsage, names: &[&str]) -> Vec<String> {
+    let mut out = Vec::new();
+    let sizes: Vec<u64> = (names.iter())
+        .filter_map(|n| disk.container_of(n))
+        .map(|c| c.size)
+        .collect();
+    if !sizes.is_empty() {
+        out.push(format!(
+            "The containers of these sandboxes hold {}.",
+            crate::stats::disk_size(sizes.iter().sum())
+        ));
+    }
+    let parts: Vec<String> = [
+        (sbx::DISK_IMAGES, "images"),
+        (sbx::DISK_CONTAINERS, "containers"),
+        (sbx::DISK_VOLUMES, "volumes"),
+    ]
+    .into_iter()
+    .filter_map(|(kind, what)| {
+        let size = crate::stats::disk_size(disk.summary(kind)?.reclaimable);
+        Some(format!("{size} in unused {what}"))
+    })
+    .collect();
+    let listed = match parts.as_slice() {
+        [] => return out,
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    };
+    out.push(format!(
+        "sbx df estimates {listed} on this computer. sbx prune alone frees less."
+    ));
+    out
+}
+
 fn join_names(names: &[String]) -> String {
     match names.len() {
         0 => String::new(),
@@ -12918,6 +13145,61 @@ mod tests {
     }
 
     #[test]
+    fn the_prune_list_says_what_the_containers_hold() {
+        let container = |name: &str, size| sbx::DiskContainer {
+            name: name.into(),
+            size,
+            state: "stopped".into(),
+        };
+        let summary = |kind: &str, reclaimable| sbx::DiskSummary {
+            kind: kind.into(),
+            reclaimable,
+            ..Default::default()
+        };
+        let disk = sbx::DiskUsage {
+            summaries: vec![
+                summary(sbx::DISK_IMAGES, 21_390_205_840),
+                summary(sbx::DISK_CONTAINERS, 4_896_145_408),
+                summary(sbx::DISK_VOLUMES, 243_466_240),
+            ],
+            containers: vec![
+                container("old", 3_218_194_432),
+                container("swapped-swap-dc5b1b77", 900_000_000),
+                container("running", 9),
+            ],
+        };
+        assert_eq!(
+            prune_disk_lines(&disk, &["old", "swapped", "gone"]),
+            [
+                "The containers of these sandboxes hold 4.1 GB.",
+                "sbx df estimates 21.4 GB in unused images, 4.9 GB in unused containers and \
+                 243.5 MB in unused volumes on this computer. sbx prune alone frees less.",
+            ]
+        );
+        let no_summaries = sbx::DiskUsage {
+            containers: disk.containers.clone(),
+            ..Default::default()
+        };
+        assert_eq!(
+            prune_disk_lines(&no_summaries, &["gone"]),
+            Vec::<String>::new(),
+            "nothing sbx did not report"
+        );
+
+        let app = App::for_test(Catalog::load().unwrap(), Vec::new());
+        let candidate = sbx::PruneCandidate {
+            name: "old".into(),
+            agent: "claude".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            app.prune_line(&candidate, Some(&disk)),
+            "old · claude · 3.2 GB"
+        );
+        assert_eq!(app.prune_line(&candidate, None), "old · claude");
+    }
+
+    #[test]
     fn a_request_is_answered_by_its_id_without_the_approvals_screen() {
         for (allow, option) in [(true, "allow"), (false, "dismiss")] {
             let mut app = App::for_test(
@@ -13856,6 +14138,206 @@ mod tests {
         sb.workspace_missing = false;
         let app = App::for_test(Catalog::load().unwrap(), vec![sb]);
         assert!(app.recreate_job(&name, &[], None).is_some());
+    }
+
+    #[test]
+    fn a_kit_change_renames_a_sandbox_with_the_generated_label_only() {
+        let catalog = Catalog::load().unwrap();
+        let kits = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        let generated = |addons: &[&str]| {
+            model::auto_label(&catalog, "claude-anthropic", Some("/login"), &kits(addons))
+        };
+        let (was, next) = (generated(&["rtk", "web"]), generated(&["rtk"]));
+        let sb = model::sample(
+            "claude-anthropic-proj",
+            Some("claude-anthropic"),
+            &["rtk", "web"],
+        );
+        let name = sb.name.clone();
+        let mut app = App::for_test(catalog.clone(), vec![sb]);
+        app.registry.set_display_name(&name, Some(was.clone()));
+        let job = app.recreate_job(&name, &kits(&["rtk"]), None).unwrap();
+        assert_eq!(job.post.relabel, Some((name.clone(), next.clone())));
+        app.apply_post(&job.post);
+        assert_eq!(app.registry.display_name(&name), Some(next.as_str()));
+        // A snapshot taken after the rebuild has landed.
+        app.kits_unsettled.clear();
+        let same = app
+            .recreate_job(&name, &kits(&["rtk", "web"]), None)
+            .unwrap();
+        assert_eq!(
+            same.post.relabel, None,
+            "the label is no longer the generated one"
+        );
+        app.registry.set_display_name(&name, Some("My box".into()));
+        let typed = app.recreate_job(&name, &kits(&["rtk"]), None).unwrap();
+        assert_eq!(typed.post.relabel, None);
+        app.apply_post(&typed.post);
+        assert_eq!(app.registry.display_name(&name), Some("My box"));
+    }
+
+    #[test]
+    fn a_kit_added_live_renames_a_sandbox_with_the_generated_label() {
+        let catalog = Catalog::load().unwrap();
+        let rtk = catalog
+            .addons
+            .iter()
+            .position(|a| a.kit.name == "rtk")
+            .unwrap();
+        let generated = |addons: &[String]| {
+            model::auto_label(&catalog, "claude-anthropic", Some("/login"), addons)
+        };
+        let sb = model::sample("claude-anthropic-proj", Some("claude-anthropic"), &[]);
+        let name = sb.name.clone();
+        let mut app = App::for_test(catalog.clone(), vec![sb]);
+        app.registry.set_display_name(&name, Some(generated(&[])));
+        app.open_kits(&name);
+        if let Screen::Kits(form) = &mut app.screen {
+            form.addons[rtk] = true;
+        }
+        app.submit_kits();
+        let Some(Modal::Running(_, pending)) = &app.modal else {
+            panic!("rtk is added live: {:?}", app.modal)
+        };
+        assert!(pending.steps[0].argv.join(" ").starts_with("sbx kit add"));
+        assert_eq!(
+            pending.post.relabel,
+            Some((name.clone(), generated(&["rtk".to_string()])))
+        );
+    }
+
+    #[test]
+    fn a_rebuild_and_the_kits_editor_wait_for_the_kits_a_job_changed() {
+        let sb = model::sample("claude-anthropic-proj", Some("claude-anthropic"), &[]);
+        let name = sb.name.clone();
+        let mut app = App::for_test(Catalog::load().unwrap(), vec![sb]);
+        assert_eq!(app.rebuild_blocker(&name), None);
+        app.apply_post(&PostJob {
+            rebaseline: Some(name.clone()),
+            ..Default::default()
+        });
+        assert_eq!(app.rebuild_blocker(&name), Some(KITS_UNSETTLED));
+        app.perform(Action::Rebuild);
+        assert!(app.modal.is_none(), "no confirmation: {:?}", app.modal);
+        assert!(
+            status_text(&app).contains(KITS_UNSETTLED),
+            "{}",
+            status_text(&app)
+        );
+        app.status = None;
+        app.perform(Action::EditKits);
+        assert!(
+            matches!(app.screen, Screen::List),
+            "the editor stays closed"
+        );
+        assert!(
+            status_text(&app).contains(KITS_UNSETTLED),
+            "{}",
+            status_text(&app)
+        );
+
+        let empty = || Snapshot {
+            sandboxes: Vec::new(),
+            kit_hashes: Default::default(),
+            secrets: None,
+            mcp: Vec::new(),
+            skills: None,
+            skills_default: sbx::SkillsMode::default(),
+            approvals: None,
+            policy_needs_init: None,
+            fetchers: Vec::new(),
+            disk: None,
+        };
+        let (tx, _held) = channel();
+        let answer = std::mem::replace(&mut app.tx, tx);
+        app.refreshing = true;
+        app.refresh_pending = true;
+        answer.send(Ok(empty())).unwrap();
+        app.tick();
+        assert!(
+            app.kits_unsettled.contains(&name),
+            "a snapshot started before the change settles nothing"
+        );
+        app.refreshing = true;
+        answer.send(Ok(empty())).unwrap();
+        app.tick();
+        assert!(
+            app.kits_unsettled.is_empty(),
+            "a snapshot started after it does"
+        );
+    }
+
+    #[test]
+    fn a_rebuild_never_drops_a_feature_a_kept_kit_requires() {
+        let mut catalog = Catalog::load().unwrap();
+        for addon in catalog.addons.iter_mut() {
+            match addon.kit.name.as_str() {
+                "web" => addon.kit.provides = vec!["claude".into()],
+                "statusline" => addon.kit.requires = vec!["claude".into()],
+                _ => {}
+            }
+        }
+        let sb = model::sample(
+            "claude-anthropic-proj",
+            Some("claude-anthropic"),
+            &["statusline", "web"],
+        );
+        let name = sb.name.clone();
+        let mut app = App::for_test(catalog, vec![sb]);
+        let kits = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        assert!(app
+            .recreate_job(&name, &kits(&["statusline"]), None)
+            .is_none());
+        app.tick();
+        assert!(
+            app.status
+                .as_ref()
+                .is_some_and(|(m, err, _)| *err && m.contains("requires claude")),
+            "{:?}",
+            app.status
+        );
+        assert!(app
+            .recreate_job(&name, &kits(&["statusline", "web"]), None)
+            .is_some());
+        assert!(app.recreate_job(&name, &[], None).is_some());
+        assert!(app.recreate_job(&name, &kits(&["web"]), None).is_some());
+    }
+
+    #[test]
+    fn a_sandbox_with_a_twin_in_another_case_is_never_rebuilt() {
+        let sample = |name: &str| model::sample(name, Some("claude-litellm"), &[]);
+        let sandboxes = vec![
+            sample("claude-litellm-proj"),
+            sample("claude-litellm-Proj"),
+            sample("claude-litellm-other"),
+        ];
+        let mut app = App::for_test(Catalog::load().unwrap(), sandboxes);
+        for name in ["claude-litellm-proj", "claude-litellm-Proj"] {
+            assert_eq!(app.rebuild_blocker(name), Some(CASE_TWIN), "{name}");
+            assert!(app.recreate_job(name, &[], None).is_none(), "{name}");
+        }
+        assert_eq!(app.rebuild_blocker("claude-litellm-other"), None);
+        assert!(app
+            .recreate_job("claude-litellm-other", &[], None)
+            .is_some());
+
+        let cell = app
+            .cell_of("claude-litellm-proj")
+            .expect("a row of this folder");
+        app.select(cell);
+        app.on_key(KeyEvent::from(KeyCode::Char('R')));
+        assert!(
+            app.modal.is_none(),
+            "no rebuild is offered: {:?}",
+            app.modal
+        );
+        assert!(
+            app.status
+                .as_ref()
+                .is_some_and(|(m, err, _)| *err && m.contains("other upper and lower case")),
+            "{:?}",
+            app.status
+        );
     }
 
     #[test]
@@ -16689,10 +17171,13 @@ mod action_tests {
                 SettingsRow::Setting(1),
                 SettingsRow::Setting(2),
                 SettingsRow::Setting(3),
+                SettingsRow::Setting(4),
+                SettingsRow::Setting(5),
                 SettingsRow::SkillsDefault,
                 SettingsRow::Close
             ]
         );
+        let close = rows.len() - 1;
         assert_eq!(form.view(0).0, "unknown", "nothing is read under test");
 
         // Unknown: nothing is changed blind.
@@ -16709,6 +17194,10 @@ mod action_tests {
             (2, false, paste, "true"),
             (2, true, paste, "false"),
             (3, true, sbx::SANDBOX_FUSE, "false"),
+            (4, false, sbx::CLAUDE_CHROME, "true"),
+            (4, true, sbx::CLAUDE_CHROME, "false"),
+            (5, false, sbx::CLAUDE_REMOTE_CONTROL, "true"),
+            (5, true, sbx::CLAUDE_REMOTE_CONTROL, "false"),
         ] {
             app.modal = None;
             let Screen::Settings(form) = &mut app.screen else {
@@ -16728,7 +17217,7 @@ mod action_tests {
         app.modal = None;
         app.click(Hit::FormRow(1));
         assert!(app.modal.is_none(), "no job from a click on the row");
-        app.click(Hit::FormRow(5));
+        app.click(Hit::FormRow(close));
         assert!(matches!(app.screen, Screen::List));
     }
 
@@ -16833,16 +17322,20 @@ mod action_tests {
         let telemetry = |value| crate::testkit::bool_setting(sbx::TELEMETRY_DISABLED, value);
         let paste = |value| crate::testkit::bool_setting(sbx::CLIPBOARD_IMAGE_PASTE, value);
         let fuse = |value| crate::testkit::bool_setting(sbx::SANDBOX_FUSE, value);
+        let chrome = |value| crate::testkit::bool_setting(sbx::CLAUDE_CHROME, value);
+        let remote = |value| crate::testkit::bool_setting(sbx::CLAUDE_REMOTE_CONTROL, value);
         form.values = vec![
             Some(telemetry(true)),
             Some(copy(true)),
             Some(paste(true)),
             Some(fuse(true)),
+            Some(chrome(true)),
+            Some(remote(true)),
         ];
         assert_eq!(form.view(0), ("off", SETTINGS[0].meanings[0].to_string()));
-        assert_eq!(form.view(1), ("on", SETTINGS[1].meanings[0].to_string()));
-        assert_eq!(form.view(2), ("on", SETTINGS[2].meanings[0].to_string()));
-        assert_eq!(form.view(3), ("on", SETTINGS[3].meanings[0].to_string()));
+        for (i, spec) in SETTINGS.iter().enumerate().skip(1) {
+            assert_eq!(form.view(i), ("on", spec.meanings[0].to_string()));
+        }
         let tones: Vec<SettingTone> = (0..SETTINGS.len())
             .map(|i| SETTINGS[i].tone(form.value(i)))
             .collect();
@@ -16852,9 +17345,12 @@ mod action_tests {
                 SettingTone::Calm,
                 SettingTone::Warn,
                 SettingTone::Warn,
-                SettingTone::Plain
+                SettingTone::Plain,
+                SettingTone::Warn,
+                SettingTone::Warn
             ],
-            "telemetry off is calm, an opened clipboard a warning, FUSE neither"
+            "telemetry off is calm; an opened clipboard, browser or remote control a warning; \
+             FUSE neither"
         );
         assert_eq!(SETTINGS[0].tone(None), SettingTone::Unknown);
         form.values = vec![
@@ -16862,16 +17358,20 @@ mod action_tests {
             Some(copy(false)),
             Some(paste(false)),
             Some(fuse(false)),
+            Some(chrome(false)),
+            Some(remote(false)),
         ];
         assert_eq!(
             form.view(0).0,
             "on",
             "telemetry.disabled false: telemetry on"
         );
-        assert_eq!(form.view(1).0, "off");
-        assert_eq!(form.view(2).0, "off");
-        assert_eq!(form.view(3).0, "off");
+        for (i, spec) in SETTINGS.iter().enumerate().skip(1) {
+            assert_eq!(form.view(i).0, "off", "{}", spec.label);
+        }
         assert_eq!(SETTINGS[3].tone(Some(false)), SettingTone::Plain);
+        assert_eq!(SETTINGS[4].tone(Some(false)), SettingTone::Calm);
+        assert_eq!(SETTINGS[5].tone(Some(false)), SettingTone::Calm);
         for spec in SETTINGS {
             assert!(
                 spec.note.starts_with("When on, ") && spec.note.contains(" Otherwise, "),
@@ -16882,6 +17382,15 @@ mod action_tests {
         assert!(
             SETTINGS[0].note.contains("sbx daemon restart"),
             "what telemetry needs"
+        );
+        let note = |key: &str| SETTINGS.iter().find(|s| s.key == key).unwrap().note;
+        assert!(
+            note(sbx::CLAUDE_CHROME).contains("already open stays"),
+            "off blocks only new browser connections"
+        );
+        assert!(
+            note(sbx::CLAUDE_REMOTE_CONTROL).contains("reaches running sandboxes"),
+            "a change needs no rebuild"
         );
     }
 
@@ -18240,6 +18749,7 @@ mod history_tests {
             approvals: None,
             policy_needs_init: None,
             fetchers: Vec::new(),
+            disk: None,
         };
         app.tx.send(Ok(snapshot)).unwrap();
         app.tick();
@@ -18266,6 +18776,7 @@ mod history_tests {
             approvals: None,
             policy_needs_init: None,
             fetchers: Vec::new(),
+            disk: None,
         };
         app.tx.send(Ok(snapshot)).unwrap();
         for name in ["a", "b"] {

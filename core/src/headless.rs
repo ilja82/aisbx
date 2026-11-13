@@ -605,20 +605,24 @@ pub(crate) fn up_inner(raw: &[String]) -> Result<String, Fail> {
         .map(sbx::plain_path)
         .map_err(|e| Fail::usage(format!("workspace {}: {e}", workspace.display())))?;
 
-    let name = match args.one("name")? {
-        Some(n) if valid_sandbox_name(&n) => n,
+    let wanted = match args.one("name")? {
+        Some(n) if valid_sandbox_name(&n) => Some(n),
         Some(n) => {
             return Err(Fail::usage(format!(
                 "{n:?} is not an sbx name: letters, digits, '.' and '-', at most 63, ending in a \
                  letter or digit"
             )))
         }
-        None => model::unique_sandbox_name(&backend.kit.name, &workspace, &[]),
+        None => None,
     };
     let ssh_agent = args.has("ssh-agent");
     let tmpfs_volumes = args.has("tmpfs-volumes");
 
-    if let Some(existing) = find(&name)? {
+    let list = sbx::list().map_err(|e| Fail::sandbox(format!("{e:#}")))?;
+    let names: Vec<String> = list.iter().map(|e| e.name.clone()).collect();
+    let name = up_name(wanted, &backend.kit.name, &workspace, &names)?;
+
+    if let Some(existing) = list.into_iter().find(|e| e.name == name) {
         template_reuse(&name, template.as_deref())?;
         if let Some(refusal) = reuse_refusal(&name, &existing.agent, &backend_name, &backend.agent)
         {
@@ -677,6 +681,27 @@ pub(crate) fn up_inner(raw: &[String]) -> Result<String, Fail> {
                 return Err(Fail::usage(refusal));
             }
             add_addons(&name, &missing, tmpfs_volumes, ssh_agent)?;
+            let account = model::label_account(
+                backend,
+                token.as_deref(),
+                connection.as_ref().map(|(c, _)| c.name.as_str()),
+            );
+            let mut registry = state::Registry::load();
+            let current = registry.display_name(&name);
+            let backend = &backend.kit.name;
+            if let Some(label) = label_after_add(
+                &catalog,
+                current,
+                backend,
+                account.as_deref(),
+                have,
+                &missing,
+            ) {
+                registry.set_display_name(&name, Some(label));
+                if let Err(e) = registry.save() {
+                    eprintln!("aisbx: could not record the sandbox's label ({e:#}) — harmless");
+                }
+            }
         }
         if args.has("no-mcp") {
             eprintln!(
@@ -996,6 +1021,27 @@ fn limit_args(
 }
 
 /// Why an existing sandbox cannot be handed back for this backend: its agent is another one.
+/// The sandbox `up` makes or reuses: `--name` as given, else [`model::reusable_sandbox_name`] over
+/// the host's sandbox `names`. A given name that only another case of exists is a usage error,
+/// since `sbx create` refuses it.
+fn up_name(
+    wanted: Option<String>,
+    prefix: &str,
+    workspace: &Path,
+    names: &[String],
+) -> Result<String, Fail> {
+    let Some(name) = wanted else {
+        return Ok(model::reusable_sandbox_name(prefix, workspace, names));
+    };
+    match model::case_twin(&name, names) {
+        Some(twin) if !names.contains(&name) => Err(Fail::usage(format!(
+            "a sandbox named {twin} exists, and sbx does not tell sandbox names apart by case; \
+             pick another --name, or `aisbx rm {twin}`"
+        ))),
+        _ => Ok(name),
+    }
+}
+
 fn reuse_refusal(
     name: &str,
     agent: &str,
@@ -1029,6 +1075,40 @@ fn volumes_refusal(name: &str, kits: &[String], want_ram: bool) -> Option<String
         )),
         _ => None,
     }
+}
+
+/// The label `up` gives an existing sandbox after adding `added` to the kit dirs `kits` it had:
+/// the one generated for its new addons, if `current` is the one generated for its old ones.
+fn label_after_add(
+    catalog: &Catalog,
+    current: Option<&str>,
+    backend: &str,
+    account: Option<&str>,
+    kits: &[String],
+    added: &[&kits::Addon],
+) -> Option<String> {
+    let before: Vec<String> = kits
+        .iter()
+        .filter_map(|k| Path::new(k).file_name().and_then(|n| n.to_str()))
+        .filter(|n| catalog.addon(n).is_some())
+        .map(str::to_string)
+        .collect();
+    let mut after = before.clone();
+    after.extend(added.iter().map(|a| a.kit.name.clone()));
+    model::regenerated_label(
+        catalog,
+        current,
+        model::LabelParts {
+            backend,
+            account,
+            addons: &before,
+        },
+        model::LabelParts {
+            backend,
+            account,
+            addons: &after,
+        },
+    )
 }
 
 /// The requested addons, in request order, that no kit dir in `kits` is named after.
@@ -4164,6 +4244,31 @@ mod tests {
     }
 
     #[test]
+    fn up_never_asks_sbx_for_a_name_another_case_of_holds() {
+        let ws = PathBuf::from("/w/Proj");
+        let names = strings(&["claude-anthropic-proj", "ci-7", "Ci-8", "ci-8"]);
+        let name = |wanted: Option<&str>| {
+            up_name(wanted.map(str::to_string), "claude-anthropic", &ws, &names)
+        };
+        assert_eq!(name(None).unwrap(), "claude-anthropic-Proj-2");
+        assert_eq!(name(Some("ci-7")).unwrap(), "ci-7", "reused as before");
+        assert_eq!(name(Some("ci-9")).unwrap(), "ci-9", "created as before");
+        assert_eq!(
+            name(Some("Ci-8")).unwrap(),
+            "Ci-8",
+            "an exact name is reused, even next to its twin"
+        );
+        let refused = name(Some("CI-7")).unwrap_err();
+        assert_eq!(refused.code, EXIT_USAGE);
+        assert!(
+            refused.message.contains("a sandbox named ci-7 exists")
+                && refused.message.contains("`aisbx rm ci-7`"),
+            "{}",
+            refused.message
+        );
+    }
+
+    #[test]
     fn a_template_is_refused_under_a_v3_workload() {
         let reference = "my-template-claude-anthropic:20261020t030000z";
         assert_eq!(
@@ -5077,6 +5182,36 @@ mod tests {
         for want_ram in [true, false] {
             assert_eq!(volumes_refusal("box", &none, want_ram), None);
         }
+    }
+
+    #[test]
+    fn adding_addons_on_reuse_renames_only_a_generated_label() {
+        let catalog = Catalog::load().unwrap();
+        let kits = strings(&["/r/kits/claude-anthropic", "/r/kits/rtk"]);
+        let jdk = catalog.addon("jdk25").unwrap();
+        let generated = |addons: &[&str]| {
+            model::auto_label(
+                &catalog,
+                "claude-anthropic",
+                Some("/login"),
+                &strings(addons),
+            )
+        };
+        let label = |current: &str| {
+            label_after_add(
+                &catalog,
+                Some(current),
+                "claude-anthropic",
+                Some("/login"),
+                &kits,
+                &[jdk],
+            )
+        };
+        assert_eq!(
+            label(&generated(&["rtk"])),
+            Some(generated(&["rtk", "jdk25"]))
+        );
+        assert_eq!(label("nightly"), None);
     }
 
     #[test]

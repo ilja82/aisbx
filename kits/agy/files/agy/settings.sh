@@ -13,8 +13,12 @@ merge() { # merge <file> <jq program> [jq args...]
   mkdir -p "$(dirname "$f")"
   [ -s "$f" ] || printf '{}\n' > "$f"
   tmp=$(mktemp) || return 0
-  if jq "$@" "$prog" "$f" > "$tmp" 2>/dev/null; then
+  jq "$@" "$prog" "$f" > "$tmp" 2>/dev/null
+  status=$?
+  if [ "$status" -eq 0 ]; then
     cat "$tmp" > "$f"
+  elif [ "$status" -gt 128 ]; then
+    echo "aisbx: jq was stopped by signal $((status - 128)) while it merged $f (out of memory?) - left unchanged" >&2
   else
     echo "aisbx: $f is not valid JSON - left unchanged" >&2
   fi

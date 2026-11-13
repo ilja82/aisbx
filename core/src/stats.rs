@@ -269,6 +269,21 @@ pub fn gb(kb: u64) -> String {
     format!("{:.1} GB", kb as f64 / 1024.0 / 1024.0)
 }
 
+/// Bytes -> "4.9 GB": decimal units to one decimal, as `sbx df` counts them.
+pub fn disk_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "kB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1000.0 && unit < UNITS.len() - 1 {
+        value /= 1000.0;
+        unit += 1;
+    }
+    match unit {
+        0 => format!("{bytes} B"),
+        _ => format!("{value:.1} {}", UNITS[unit]),
+    }
+}
+
 /// Seconds → the compact "3m", "2h 5m", "4d 1h" spelling `sbx inspect` uses.
 pub fn duration(secs: u64) -> String {
     let (d, h, m, s) = (
@@ -469,6 +484,11 @@ overlay         20466256 320668  19080628   2% /
         assert_eq!(gb(1024 * 1024), "1.0 GB");
         assert_eq!(gb(20 * 1024 * 1024), "20.0 GB");
         assert_eq!(gb(20_466_256), "19.5 GB");
+        assert_eq!(disk_size(4_896_145_408), "4.9 GB");
+        assert_eq!(disk_size(520_339_456), "520.3 MB");
+        assert_eq!(disk_size(36_852_279_300), "36.9 GB");
+        assert_eq!(disk_size(999), "999 B");
+        assert_eq!(disk_size(46_648), "46.6 kB");
         assert_eq!(duration(45), "45s");
         assert_eq!(duration(185), "3m 5s");
         assert_eq!(duration(7_260), "2h 1m");

@@ -100,7 +100,7 @@ Give the workspace folder as the last argument: `aisbx up --backend <kit> [optio
 | `--deny-network HOST` | keeps the sandbox off a host (repeatable; a deny beats every allow) |
 | `--mount DIR[:ro]` | adds a host folder as an extra workspace (repeatable; see below) |
 | `--cpus N`, `--memory SIZE` | default 4 and `4g`; `auto` takes sbx's own ([CPU and memory limits](sandboxes.md#cpu-and-memory-limits)) |
-| `--name NAME` | the sandbox name; default the dashboard's own `<backend>-<folder>` |
+| `--name NAME` | the sandbox name; default the dashboard's own `<backend>-<folder>`, or the next of `-2`, `-3`, … where another sandbox has that name in other upper and lower case ([Names](sandboxes.md#names)); a `NAME` that only another case of exists exits 2 |
 | `--label TEXT` | the label the dashboard shows |
 | `--no-host-folders` | leaves out the host folders (see below) |
 | `--ssh-agent` | forwards the host's SSH agent (off by default) |

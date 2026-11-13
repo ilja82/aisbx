@@ -71,9 +71,13 @@ check "no credential" not sh -c 'grep -vE "^ *#" "$1" | grep -q "credential@1"' 
 check "no gateway host or URL outside comments" not sh -c \
   'cat "$@" | grep -vE "^ *#" | grep -Eq "https://|--base-url|:443\""' sh "$spec" "$recipe"
 check "no hook runs the model-list script" not sh -c 'grep -vE "^ *#" "$1" | grep -q "litellm-models.sh"' sh "$spec"
-check "one install hook, Pi's update" same "$(code "$spec" | grep -c 'command:')" 1
-check "…which is pi/update.sh create" grep -q 'command: \["sh", "/usr/local/lib/aisbx/pi/update.sh", "create"\]' "$spec"
-check "no startup hook" not grep -q '^      startup:' "$spec"
+store='command: ["sh", "/usr/local/lib/aisbx/skills/skills-store.sh", "/home/agent/.agents/skills"]'
+check "three hooks: Pi's update and the skills store at install and at start" \
+  same "$(code "$spec" | grep -c 'command:')" 3
+check "…Pi's update is pi/update.sh create" grep -q 'command: \["sh", "/usr/local/lib/aisbx/pi/update.sh", "create"\]' "$spec"
+check "…the skills store links into ~/.agents/skills" same "$(grep -cF "$store" "$spec")" 2
+check "…the only startup hook is the skills store" same \
+  "$(sed -n '/^      startup:/,/^  - type:/p' "$spec" | grep -c 'command:')" 1
 
 allow=$(allow_list "$spec" runtime)
 check "run-time allow-list exactly npm and the baseline" same "$allow" "$ALLOW"
@@ -90,7 +94,7 @@ check "…the build fails on the first error" sh -c 'sed -n "/^  build)/,/;;/p" 
 check "…installs $PACKAGE, unpinned, into $PREFIX" grep -q "npm install -g --prefix \"\$prefix\" \"\$pkg\"" "$update"
 check "…the prefix and the package" sh -c 'grep -qx "prefix=$2" "$1" && grep -qx "pkg=$3" "$1"' sh "$update" "$PREFIX" "$PACKAGE"
 check "…then runs pi --version" grep -q '"$prefix/bin/pi" --version' "$update"
-check "…the create run is never fatal" sh -c 'sed -n "/^  create)/,/;;/p" "$1" | grep -q "|| echo"' sh "$update"
+check "…the create run ends in exit 0" sh -c 'grep -vE "^ *#" "$1" | tail -1 | grep -qx "exit 0"' sh "$update"
 check "…never fetches Node" not sh -c 'grep -vE "^ *#" "$1" | grep -Eq "nodejs.org|nvm|n install|apt-get|curl|wget"' sh "$update"
 
 # The script's Node check, run for real against stub binaries: its check_node function alone.
@@ -152,14 +156,48 @@ fi
 # --- Pi's config: not in the kit, generated per connection --------------------------------------------
 
 check "the kit ships no Pi config" not sh -c 'find "$1" -path "*.pi*" | grep -q .' sh "$kit"
-check "…only its own install script under files/ (the host fetches the model list)" \
-  same "$(cd "$kit/files" && find . -type f | sort)" "./pi/update.sh"
+check "…only its install script and the skills-store hook under files/ (the host fetches the model list)" \
+  same "$(cd "$kit/files" && find . -type f | sort | tr '\n' ' ')" "./pi/update.sh ./skills/skills-store.sh "
 check "the settings template is JSON" jqe 'type == "object"' "$template"
 check "…with Pi's settings schema" same "$(jq -r '."$schema"' "$template")" "https://pi.dev/schemas/settings.schema.json"
 check "…install telemetry off" same "$(jq -r .enableInstallTelemetry "$template")" false
 check "…no provider and no model (the connection kit adds both)" jqe \
   '(has("defaultProvider") or has("defaultModel") or has("providers")) | not' "$template"
 check "no secret-looking key anywhere in the kit" not grep -rEq 'sk-[A-Za-z0-9]{8,}|"apiKey": "' "$kit"
+
+
+# --- the install hook, run for real against a stub npm ------------------------------------------------
+
+stubs=$(mktemp -d "${TMPDIR:-/tmp}/pi-update.XXXXXX") || exit 2
+mkdir -p "$stubs/bin" "$stubs/home" "$stubs/plain"
+printf '#!/bin/sh\necho "$*" >> "%s"\nexit "${STUB_EXIT:-0}"\n' "$stubs/log" > "$stubs/bin/npm"
+chmod +x "$stubs/bin/npm"
+hook() {   # hook [VAR=value...]: the update hook as the sandbox runs it
+  env -i PATH="$stubs/bin:/usr/bin:/bin" HOME="$stubs/home" "$@" sh "$update" create > "$stubs/out" 2>&1
+}
+hook
+check "update: exits 0 and runs npm install of Pi" sh -c '[ "$1" = 0 ] && grep -q "install -g --prefix /home/agent/.local @earendil-works/pi-coding-agent" "$2"' sh "$?" "$stubs/log"
+hook STUB_EXIT=3
+check "update: a failed update never fails the create" same "$?" 0
+check "update: and says so" grep -q "could not update" "$stubs/out"
+if command -v timeout >/dev/null 2>&1; then
+  printf '#!/bin/sh\nexec sleep 30\n' > "$stubs/bin/npm"
+  started=$(date +%s)
+  hook AISBX_PI_UPDATE_TIMEOUT=1
+  status=$?
+  took=$(($(date +%s) - started))
+  check "update: a hanging update never fails the create" same "$status" 0
+  check "update: and ends at the time limit" test "$took" -lt 10
+  check "update: and says so" grep -q "took longer than 1s" "$stubs/out"
+  printf '#!/bin/sh\necho "$*" >> "%s"\n' "$stubs/log" > "$stubs/bin/npm"
+  for tool in sh sleep; do ln -sf "$(command -v "$tool")" "$stubs/plain/$tool"; done
+  : > "$stubs/log"
+  env -i PATH="$stubs/bin:$stubs/plain" HOME="$stubs/home" "$stubs/plain/sh" "$update" create > "$stubs/out" 2>&1
+  check "update: without timeout, still updates" sh -c '[ "$1" = 0 ] && grep -q "install -g --prefix /home/agent/.local @earendil-works/pi-coding-agent" "$2"' sh "$?" "$stubs/log"
+else
+  echo "skip update: no timeout on this host, the time limit is not checked"
+fi
+rm -rf "$stubs"
 
 if [ "$failures" -gt 0 ]; then
   echo "$failures check(s) failed"
