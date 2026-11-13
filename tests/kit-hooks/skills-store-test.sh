@@ -29,15 +29,16 @@ same() { [ "$1" = "$2" ]; }
 # --- static ----------------------------------------------------------------------------------------
 
 static() {
-  check "eight workloads ship the hook" same "$(printf '%s\n' "$copies" | grep -c .)" 8
+  check "every workload ships the hook" same "$(printf '%s\n' "$copies" | grep -c .)" \
+    "$(grep -l '^kind: workload' "$root"/kits/*/*.yaml | grep -c .)"
   for copy in $copies; do
     check "${copy#"$root"/}: byte-identical" cmp -s "$hook" "$copy"
     kit=$(basename "$(dirname "$(dirname "$(dirname "$copy")")")")
     spec=$root/kits/$kit/$kit.yaml
     check "$kit: declares the store's own path" grep -qF \
       'config: {path: /home/agent/.local/share/aisbx/skills-store, mode: readwrite}' "$spec"
-    check "$kit: runs the hook at install and at every start" same \
-      "$(grep -c 'command: \["sh", "/usr/local/lib/aisbx/skills/skills-store.sh", ' "$spec")" 2
+    runs=$(grep -c 'command: \["sh", "/usr/local/lib/aisbx/skills/skills-store.sh", ' "$spec")
+    check "$kit: runs the hook at install and at every start" sh -c '[ "$1" -ge 2 ] && [ $(($1 % 2)) -eq 0 ]' sh "$runs"
   done
   check "the hook parses (sh -n)" sh -n "$hook"
   check "the hook ends in exit 0" same "$(tail -n 1 "$hook")" "exit 0"

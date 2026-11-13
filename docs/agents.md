@@ -119,7 +119,6 @@ Requests to your gateway or engine still work. The image has `fd` and `rg`, so P
 ### What Pi does not do
 
 - **No sbx MCP gateway.** Pi reads its own `~/.pi/agent/mcp.json`, so `--static-mcp` has no effect.
-- **No shared skills store.**
 - **No Claude Code or OpenCode addons.** `statusline`, `ponytail` and `rtk`'s agent hooks do nothing for Pi.
 - **`AGENTS.md`:** not measured that Pi reads the one sbx writes beside the workspace.
 - **`/share` uploads a session as a GitHub gist** wherever GitHub is open, for example under the `balanced` policy.

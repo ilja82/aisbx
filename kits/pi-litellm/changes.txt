@@ -1,3 +1,4 @@
+The agent now gets the skills from the shared skills store.
 Built on Docker's maintained shell image instead of the shell template Docker no longer updates.
 Pi's file search now has fd, so Pi no longer warns that fd is missing.
 The host now fetches the model list and writes your model picks, so the sandbox no longer asks the gateway itself.

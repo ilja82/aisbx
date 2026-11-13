@@ -50,12 +50,16 @@ after creation; a rebuild keeps it.
 
 ### Which backends get the store
 
+Every backend gets the store:
+
 | Backend | Skills linked into |
 | --- | --- |
-| `claude-litellm`, `claude-anthropic`, `claude-token` | `/home/agent/.claude/skills` |
-| `opencode-litellm` | `/home/agent/.config/opencode/skills` |
-| `codex-openai` | `/home/agent/.agents/skills` |
-| `agy`, `pi-litellm` | nothing |
+| `claude-litellm`, `claude-anthropic`, `claude-token`, `claude-local`, `claude-bare-local` | `/home/agent/.claude/skills` |
+| `opencode-litellm`, `opencode-local` | `/home/agent/.config/opencode/skills` |
+| `codex-openai`, `pi-litellm`, `pi-local` | `/home/agent/.agents/skills` |
+| `agy` | `/home/agent/.gemini/antigravity/skills` and `/home/agent/.gemini/antigravity-cli/skills` |
+
+An `agy` or Pi sandbox that an older aisbx created has no store. Rebuild it (`R`) to get one.
 
 ### How the store reaches the agent
 

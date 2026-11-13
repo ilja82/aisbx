@@ -91,10 +91,29 @@ capabilities:
               expiry: "2000-01-01T00:00:00Z"
             auth_method: consumer
 
+  # sbx's shared skills store, linked by files/skills/skills-store.sh into both folders where agy
+  # may read global skills (as host-skills' AGY_SKILL_DIRS).
+  - type: com.docker.sandbox/agent-skills@1
+    optional: true
+    config: {path: /home/agent/.local/share/aisbx/skills-store, mode: readwrite}
+
   # No volumes: agy's state is container-local; its sign-in is the host-global credential above.
   - type: com.docker.sandbox/lifecycle@1
     config:
+      install:
+        - command: ["sh", "/usr/local/lib/aisbx/skills/skills-store.sh", "/home/agent/.gemini/antigravity/skills"]
+          user: agent
+          description: Link the shared skills store into ~/.gemini/antigravity/skills
+        - command: ["sh", "/usr/local/lib/aisbx/skills/skills-store.sh", "/home/agent/.gemini/antigravity-cli/skills"]
+          user: agent
+          description: Link the shared skills store into ~/.gemini/antigravity-cli/skills
       startup:
+        - command: ["sh", "/usr/local/lib/aisbx/skills/skills-store.sh", "/home/agent/.gemini/antigravity/skills"]
+          user: agent
+          description: Refresh the shared-skills links in ~/.gemini/antigravity/skills
+        - command: ["sh", "/usr/local/lib/aisbx/skills/skills-store.sh", "/home/agent/.gemini/antigravity-cli/skills"]
+          user: agent
+          description: Refresh the shared-skills links in ~/.gemini/antigravity-cli/skills
         - command: ["sh", "/usr/local/lib/aisbx/agy/settings.sh", "mode"]
           user: agent
           description: Select Gemini API-key mode only when a Google API key is injected
