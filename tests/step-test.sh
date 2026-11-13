@@ -93,8 +93,9 @@ if ! command -v sbx >/dev/null 2>&1 || ! sbx ls --json >/dev/null 2>&1; then
   [ "$failures" -eq 0 ]
   exit
 fi
-bin=${AISBX_BIN:-$root/target/debug/aisbx}
-if [ ! -x "$bin" ]; then
+bin=${AISBX_BIN:-}
+if [ -z "$bin" ]; then
+  bin=$root/target/debug/aisbx
   if ! cargo build -q -p aisbx --manifest-path "$root/Cargo.toml" >/dev/null 2>&1; then
     printf 'FAIL build the binary\n'
     exit 1

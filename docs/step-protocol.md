@@ -38,7 +38,7 @@ stream. `max_turns` becomes Claude Code's `--max-turns`; the other agents have n
 them. The kits switch non-essential agent traffic off. `args` go after aisbx's own flags, before the prompt.
 
 `work.checks`: `[{"workdir": string, "argv": [string], "env": {string: string}}]`, run in order with `sbx exec`,
-each with the step timeout, stdout and stderr captured up to a limit (the limit is part of the report).
+all within the one step timeout, stdout and stderr captured up to a limit (the limit is part of the report).
 
 ## Lifecycle, in this order, never reordered
 
@@ -67,7 +67,8 @@ each with the step timeout, stdout and stderr captured up to a limit (the limit 
 
 ## Events on stdout
 
-One JSON object per line. Every event has `t` (RFC 3339 with milliseconds), `seq` (1, 2, 3, …), `kind` and `phase`.
+One JSON object per line, its keys in no fixed order. Every event has `t` (RFC 3339 with milliseconds), `seq` (1, 2,
+3, …), `kind` and `phase`.
 
 | `kind` | Fields | When |
 |---|---|---|
@@ -126,16 +127,20 @@ starts over.
 
 ## Verified behaviours
 
-Measured with sbx 0.51.0 on an Apple silicon Mac with the `claude-anthropic` image cached, no addon kits; the
-fixtures in `tests/step/` are these very runs.
+Measured with sbx 0.53.0 on an Apple silicon Mac on 2026-11-13, with the `claude-anthropic` image cached and no
+addon kits. Rows marked *0.51.0* were measured with sbx 0.51.0 and not again since; the fixtures in `tests/step/` are
+those 0.51.0 runs.
 
 | What | Result |
 |---|---|
-| Checks step, proof not cached (6 probes in parallel) | 12.5 s: create 10.6 s, prove 0.36 s, work 0.55 s (two `sbx exec`), remove 0.49 s |
-| Checks step, proof cached | 10.0 s: create 8.6 s, prove 0.10 s, work 0.56 s, remove 0.35 s |
-| Agent step, `haiku`, one-line prompt, `max_turns` 2 | 12.5 s: create 7.4 s, prove 0.36 s, work 3.7 s, remove 0.65 s |
-| Pre-warm, then continue | pre-warm 8.6 s; the continued step 1.35 s end to end |
-| One `sbx policy …` or `sbx exec` call | about 0.1 s; the create is the cost of a step |
+| Agent step, `haiku`, one-line prompt, `max_turns` 2 | 20.0 s: create 15.7 s, prove 0.28 s, work 3.3 s, remove 0.5 s |
 | `stream.ndjson` of the agent step | the `system`/`init` event, the `assistant` event, the `result` event, each line written as it arrived |
-| A read-only extra mount inside the read-write workspace (`mounts: [{"path": "<ws>/sub", "readonly": true}]`) | a second virtiofs mount, `ro`: writes and deletes under `sub` fail with permission denied, the rest of the workspace stays writable; `node_modules` can be shadowed this way |
-| `claude-anthropic` with only `api.anthropic.com` allowed | the proxy blocks `platform.claude.com:443` once at start (the OAuth token endpoint of the subscription sign-in); the run succeeded. A caller allows it, or expects it in `network.blocked` |
+| `claude-anthropic` with only `api.anthropic.com` allowed | the run succeeded; the report lists `mcp-proxy.anthropic.com:443` as blocked (Claude Code's connector proxy) and `mcp-gateway.docker.internal:80` as foreign, although the step creates the sandbox with no MCP servers. A caller expects both, or allows the first |
+| Pre-warm, then continue | pre-warm 15 s; the continued step 0.8 s end to end |
+| A check that runs longer than `timeout_seconds` (10 s) | exit 124 after a work phase of 11.3 s; the sandbox was removed |
+| Ctrl-C during a check | exit 130 about 3 s later; the sandbox was removed |
+| A spec whose name exists | exit 3; the existing sandbox is untouched |
+| One `sbx policy …` or `sbx exec` call | about 0.1 s; the create is the cost of a step |
+| Checks step, proof not cached, 6 probes in parallel (*0.51.0*) | 12.5 s: create 10.6 s, prove 0.36 s, work 0.55 s (two `sbx exec`), remove 0.49 s |
+| Checks step, proof cached (*0.51.0*) | 10.0 s: create 8.6 s, prove 0.10 s, work 0.56 s, remove 0.35 s |
+| A read-only extra mount inside the read-write workspace (`mounts: [{"path": "<ws>/sub", "readonly": true}]`) (*0.51.0*) | a second virtiofs mount, `ro`: writes and deletes under `sub` fail with permission denied, the rest of the workspace stays writable; `node_modules` can be shadowed this way |
