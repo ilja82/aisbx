@@ -71,9 +71,13 @@ check "no credential" not sh -c 'grep -vE "^ *#" "$1" | grep -q "credential@1"' 
 check "no gateway host or URL outside comments" not sh -c \
   'cat "$@" | grep -vE "^ *#" | grep -Eq "https://|--base-url|:443\""' sh "$spec" "$recipe"
 check "no hook runs the model-list script" not sh -c 'grep -vE "^ *#" "$1" | grep -q "litellm-models.sh"' sh "$spec"
-check "one install hook, Pi's update" same "$(code "$spec" | grep -c 'command:')" 1
-check "…which is pi/update.sh create" grep -q 'command: \["sh", "/usr/local/lib/aisbx/pi/update.sh", "create"\]' "$spec"
-check "no startup hook" not grep -q '^      startup:' "$spec"
+store='command: ["sh", "/usr/local/lib/aisbx/skills/skills-store.sh", "/home/agent/.agents/skills"]'
+check "three hooks: Pi's update and the skills store at install and at start" \
+  same "$(code "$spec" | grep -c 'command:')" 3
+check "…Pi's update is pi/update.sh create" grep -q 'command: \["sh", "/usr/local/lib/aisbx/pi/update.sh", "create"\]' "$spec"
+check "…the skills store links into ~/.agents/skills" same "$(grep -cF "$store" "$spec")" 2
+check "…the only startup hook is the skills store" same \
+  "$(sed -n '/^      startup:/,/^  - type:/p' "$spec" | grep -c 'command:')" 1
 
 allow=$(allow_list "$spec" runtime)
 check "run-time allow-list exactly npm and the baseline" same "$allow" "$ALLOW"
@@ -152,8 +156,8 @@ fi
 # --- Pi's config: not in the kit, generated per connection --------------------------------------------
 
 check "the kit ships no Pi config" not sh -c 'find "$1" -path "*.pi*" | grep -q .' sh "$kit"
-check "…only its own install script under files/ (the host fetches the model list)" \
-  same "$(cd "$kit/files" && find . -type f | sort)" "./pi/update.sh"
+check "…only its install script and the skills-store hook under files/ (the host fetches the model list)" \
+  same "$(cd "$kit/files" && find . -type f | sort | tr '\n' ' ')" "./pi/update.sh ./skills/skills-store.sh "
 check "the settings template is JSON" jqe 'type == "object"' "$template"
 check "…with Pi's settings schema" same "$(jq -r '."$schema"' "$template")" "https://pi.dev/schemas/settings.schema.json"
 check "…install telemetry off" same "$(jq -r .enableInstallTelemetry "$template")" false

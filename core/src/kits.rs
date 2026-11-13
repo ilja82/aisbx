@@ -1328,7 +1328,7 @@ mod tests {
         assert_eq!(pi.type_label(), "Pi · LiteLLM");
         assert_eq!(pi.setup_hint(), "your LiteLLM gateway");
         assert!(!pi.model_overrides());
-        assert!(!pi.shares_skills());
+        assert!(pi.shares_skills());
         assert_eq!(pi.account(), None);
         assert_eq!(pi.litellm_agent(), Some(crate::litellm::Agent::Pi));
         assert_eq!(
@@ -1671,6 +1671,12 @@ mod tests {
             "claude-token",
             "opencode-litellm",
             "codex-openai",
+            "pi-litellm",
+            "agy",
+            "claude-local",
+            "claude-bare-local",
+            "opencode-local",
+            "pi-local",
         ] {
             assert_eq!(shares(name), Some(true), "{name}");
             let skills = cap(&shipped(name), "agent-skills@1");
@@ -1681,8 +1687,13 @@ mod tests {
             );
             assert!(skills.optional, "{name}");
         }
-        assert_eq!(shares("agy"), Some(false));
-        assert_eq!(shares("pi-litellm"), Some(false));
+        for backend in &catalog.backends {
+            assert!(
+                backend.shares_skills(),
+                "{}: every backend shares the skills store",
+                backend.kit.name
+            );
+        }
     }
 
     /// The telemetry switches the Claude Code workloads' image sets: every `DISABLE_*`,

@@ -28,6 +28,12 @@ capabilities:
           - security.ubuntu.com
           - download.docker.com
 
+  # sbx's shared skills store, linked into ~/.agents/skills (where Pi reads global skills) by
+  # files/skills/skills-store.sh.
+  - type: com.docker.sandbox/agent-skills@1
+    optional: true
+    config: {path: /home/agent/.local/share/aisbx/skills-store, mode: readwrite}
+
   - type: com.docker.sandbox/lifecycle@1
     config:
       # No model-list hook on purpose: aisbx writes the list before each session.
@@ -35,6 +41,13 @@ capabilities:
         - command: ["sh", "/usr/local/lib/aisbx/pi/update.sh", "create"]
           user: agent
           description: Update Pi to the current release
+        - command: ["sh", "/usr/local/lib/aisbx/skills/skills-store.sh", "/home/agent/.agents/skills"]
+          user: agent
+          description: Link the shared skills store into ~/.agents/skills
+      startup:
+        - command: ["sh", "/usr/local/lib/aisbx/skills/skills-store.sh", "/home/agent/.agents/skills"]
+          user: agent
+          description: Refresh the shared-skills links
 
   - type: com.docker.sandbox/agent-context@1
     config:
