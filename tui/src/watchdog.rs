@@ -35,17 +35,29 @@ impl InputWatch {
 
     /// Run one input read under the watch.
     pub fn read<T>(&self, f: impl FnOnce() -> T) -> T {
-        self.entered.store(self.now(), Ordering::Relaxed);
+        self.enter_at(self.now());
         let result = f();
-        self.entered.store(0, Ordering::Relaxed);
+        self.leave();
         result
+    }
+
+    fn enter_at(&self, now: u64) {
+        self.entered.store(now, Ordering::Relaxed);
+    }
+
+    fn leave(&self) {
+        self.entered.store(0, Ordering::Relaxed);
     }
 
     /// How long the current read has run, or `None` outside a read.
     pub fn reading_for(&self) -> Option<Duration> {
+        self.reading_for_at(self.now())
+    }
+
+    fn reading_for_at(&self, now: u64) -> Option<Duration> {
         match self.entered.load(Ordering::Relaxed) {
             0 => None,
-            at => Some(Duration::from_millis(self.now().saturating_sub(at))),
+            at => Some(Duration::from_millis(now.saturating_sub(at))),
         }
     }
 }
@@ -78,6 +90,7 @@ mod tests {
     use std::sync::mpsc;
 
     const SHORT: Duration = Duration::from_millis(150);
+    const LONG: Duration = Duration::from_secs(2);
     const TICK: Duration = Duration::from_millis(10);
 
     #[test]
@@ -93,24 +106,42 @@ mod tests {
     }
 
     #[test]
+    fn each_read_counts_from_its_own_start() {
+        let watch = InputWatch::new();
+        watch.enter_at(1_000);
+        assert_eq!(
+            watch.reading_for_at(1_100),
+            Some(Duration::from_millis(100))
+        );
+        watch.leave();
+        assert_eq!(watch.reading_for_at(60_000), None);
+        watch.enter_at(60_000);
+        assert_eq!(
+            watch.reading_for_at(60_020),
+            Some(Duration::from_millis(20))
+        );
+    }
+
+    #[test]
     fn a_read_that_never_returns_ends_the_dashboard() {
         let watch = InputWatch::new();
         let (tx, rx) = mpsc::channel();
         spawn_every(Arc::clone(&watch), SHORT, TICK, move || {
             let _ = tx.send(());
         });
-        watch.read(|| thread::sleep(SHORT * 4));
-        assert!(rx.try_recv().is_ok());
+        let ended = watch.read(|| rx.recv_timeout(Duration::from_secs(30)));
+        assert!(ended.is_ok());
     }
 
     #[test]
     fn short_reads_never_end_it() {
         let watch = InputWatch::new();
         let (tx, rx) = mpsc::channel();
-        spawn_every(Arc::clone(&watch), SHORT, TICK, move || {
+        spawn_every(Arc::clone(&watch), LONG, TICK, move || {
             let _ = tx.send(());
         });
-        for _ in 0..30 {
+        let start = Instant::now();
+        while start.elapsed() < LONG + LONG / 4 {
             watch.read(|| thread::sleep(Duration::from_millis(20)));
             thread::sleep(Duration::from_millis(5));
         }
