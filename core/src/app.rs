@@ -65,12 +65,48 @@ fn skill_repos_in_use(state: &Path) -> bool {
     repos || picks
 }
 
-/// What the daily update of the store's Git skills says once it is done.
+/// The *Update daily* row's muted note: when the last update ran, and how many repositories it
+/// changed and could not update (its report lines, [`crate::store_skills::report_line`]).
+fn update_meta(ago: &str, report: &[String]) -> String {
+    let failed = report
+        .iter()
+        .filter(|l| l.contains(": not updated: "))
+        .count();
+    let changed = report.len() - failed;
+    let mut parts: Vec<String> = Vec::new();
+    if changed > 0 {
+        parts.push(format!("{changed} changed"));
+    }
+    if failed > 0 {
+        parts.push(format!("{failed} failed"));
+    }
+    match parts.is_empty() {
+        true => format!("last update {ago}, no change"),
+        false => format!("last update {ago}: {}", parts.join(", ")),
+    }
+}
+
+/// What the daily update of the store's Git skills says when it changed nothing.
 const DAILY_UPDATED: &str = "the skills added from Git are up to date (daily update)";
 
-/// …and when it failed.
-const DAILY_FAILED: &str = "the daily update of the skills added from Git failed — Update from \
-     repositories in Skills (K) shows why";
+/// …and when it could not run at all.
+const DAILY_FAILED: &str = "the daily update of the skills added from Git did not run — Update \
+     from repositories in Skills (K) shows why";
+
+/// The status line after the daily update: what `aisbx skills update` reported, one part per
+/// repository (an error when one failed), or that nothing changed. The full report stays on
+/// Skills (K).
+fn daily_message(ok: bool, report: &str) -> (bool, String) {
+    let lines: Vec<&str> = report.lines().filter(|l| !l.trim().is_empty()).collect();
+    match (ok, lines.is_empty()) {
+        (true, true) => (false, DAILY_UPDATED.to_string()),
+        (false, true) => (true, DAILY_FAILED.to_string()),
+        (ok, false) => (
+            !ok,
+            format!("skills from Git, daily update: {}", lines.join(" · ")),
+        ),
+    }
+}
 
 /// [`App::litellm_root`]: the real folder, or under `cargo test` one that does not exist.
 fn litellm_root() -> PathBuf {
@@ -111,6 +147,10 @@ const STATUS_TTL: Duration = Duration::from_secs(6);
 /// What saving the Repo skills screen's global scope says; the screen says it before the save.
 const GLOBAL_SAVED: &str = "saved for every sandbox — existing sandboxes get the change at \
      their next start, new ones at their first";
+/// What an add of skills says when skill names follow the repository: it always takes them all.
+const ADD_WHOLE_REPO: &str = "type only the repository: every skill of it comes in, off until you \
+     switch it on, so you pick the ones you want on Skills (K)";
+
 /// The first line under the skills screen's title.
 pub const SKILLS_INTRO: &str = "A switch on gives the skill to every sandbox at its next start. A \
      sandbox can switch single skills the other way (Sandbox skills, i).";
@@ -2658,11 +2698,10 @@ impl Ask {
             ],
             Ask::SetSecret(_) => &[],
             Ask::AddSkills => &[
-                "owner/repo (GitHub) or a Git URL, then optionally the skills to take:",
-                "  anthropics/skills              every SKILL.md the repository holds",
-                "  anthropics/skills pdf docx     only those two",
-                "A skill of the same name already in the store is replaced (--force), and",
-                "every sandbox sharing the store sees it at its next agent session.",
+                "owner/repo (GitHub) or a Git URL, for example anthropics/skills. Every skill of",
+                "the repository comes in, off until you switch it on; skills it gains later come",
+                "in with the daily update. A skill of the same name already in the store is",
+                "replaced (--force).",
             ],
         };
         lines.iter().map(|l| (*l).to_string()).collect()
@@ -2774,13 +2813,8 @@ pub struct Registered {
 pub enum OriginRecord {
     /// `sbx skills import` ran: a skill a host folder holds came from the first such folder.
     Import,
-    /// `sbx skills add <repo>` ran for these named skills (none: all), while the store held
-    /// `before`.
-    Added {
-        repo: String,
-        before: Vec<String>,
-        named: Vec<String>,
-    },
+    /// `sbx skills add <repo>` ran while the store held `before`.
+    Added { repo: String, before: Vec<String> },
 }
 
 /// What to record once a job succeeds.
@@ -3663,14 +3697,13 @@ impl App {
                 OriginRecord::Import => {
                     found.extend(store_skills::imported(&store, &self.host_skill_folders))
                 }
-                OriginRecord::Added {
-                    repo,
-                    before,
-                    named,
-                } => found.extend(store_skills::added(&repo, &before, &store, &named)),
+                OriginRecord::Added { repo, before } => {
+                    found.extend(store_skills::added(&repo, &before, &store))
+                }
             }
         }
-        if let Err(e) = self.change_switches(|s| s.record(found)) {
+        let recorded = self.change_switches(|s| s.record(found));
+        if let Err(e) = recorded {
             self.set_error(e);
         }
     }
@@ -3698,11 +3731,17 @@ impl App {
             return;
         }
         let tx = self.notice_tx.clone();
+        let argv = crate::headless::job_argv(&["skills", "update"]);
         std::thread::spawn(move || {
-            let step = Step::new("sbx skills update", sbx::skills_update_argv(&[]));
-            let _ = tx.send(match crate::job::run_quiet(&step) {
-                true => (false, DAILY_UPDATED.to_string()),
-                false => (true, DAILY_FAILED.to_string()),
+            let out = std::process::Command::new(&argv[0])
+                .args(&argv[1..])
+                .stdin(std::process::Stdio::null())
+                .output();
+            let _ = tx.send(match out {
+                Ok(out) => {
+                    daily_message(out.status.success(), &String::from_utf8_lossy(&out.stdout))
+                }
+                Err(e) => (true, format!("{DAILY_FAILED} ({e})")),
             });
         });
     }
@@ -3830,7 +3869,22 @@ impl App {
             self.pending_origins.push(record.clone());
         }
         if let Some(skill) = &post.forget_store_skill {
-            if let Err(e) = self.change_switches(|s| s.forget_skill(skill)) {
+            let left: Vec<String> = (self.skills.iter())
+                .flat_map(|s| s.skills.clone())
+                .filter(|s| s != skill)
+                .collect();
+            let forgot = self.change_switches(|s| {
+                let repo = match s.origins.get(skill.as_str()) {
+                    Some(store_skills::Origin::Repo(repo)) => Some(repo.clone()),
+                    _ => None,
+                };
+                let mut changed = s.forget_skill(skill);
+                if let Some(repo) = repo {
+                    changed |= s.untrack_if_gone(&repo, &left);
+                }
+                changed
+            });
+            if let Err(e) = forgot {
                 self.set_error(e);
             }
         }
@@ -7573,7 +7627,7 @@ impl App {
             SkillRow::AutoUpdate => (
                 "Update daily".to_string(),
                 match self.switches.updated_at {
-                    Some(at) => format!("last update {}", crate::state::ago(at)),
+                    Some(at) => update_meta(&crate::state::ago(at), &self.switches.last_report),
                     None => "the skills added from Git, every 24 hours".to_string(),
                 },
             ),
@@ -7591,6 +7645,12 @@ impl App {
         match row {
             SkillRow::Skill(name) => {
                 let from = match self.skill_source(name) {
+                    store_skills::Source::Repo(repo) if self.switches.repos.contains_key(&repo) => {
+                        format!(
+                            "It came from {repo}: the daily update and Update from repositories \
+                             keep it in step, and remove it when the repository deletes it."
+                        )
+                    }
                     store_skills::Source::Repo(repo) => {
                         format!("It came from {repo}: Update from repositories refreshes it.")
                     }
@@ -7628,13 +7688,21 @@ impl App {
                 self.skills_sharers(),
                 if self.skills_sharers() == 1 { "" } else { "es" }
             )],
-            SkillRow::AutoUpdate => vec![
-                "When on, the dashboard runs `sbx skills update` once a day while it runs, if a \
-                 skill here was added from Git: those skills get their repository's current \
-                 version. Otherwise, only Update from repositories does. A skill's scripts are \
-                 code, so an update brings new code into every sandbox that has the skill."
-                    .into(),
-            ],
+            SkillRow::AutoUpdate => {
+                let mut notes = vec![
+                    "When on, the dashboard brings the skills added from Git in step with their \
+                     repositories once a day while it runs: new skills come in (off until you \
+                     switch them on), changed ones are replaced, deleted ones leave the store. \
+                     Otherwise, only Update from repositories does. A skill's scripts are code, \
+                     so an update brings new code into every sandbox that has the skill."
+                        .into(),
+                ];
+                if !self.switches.last_report.is_empty() {
+                    notes.push("The last update:".into());
+                    notes.extend(self.switches.last_report.iter().cloned());
+                }
+                notes
+            }
             SkillRow::RepoSkills => vec![
                 "Picks skills of the repos `aisbx skill-repo` configured for every sandbox. \
                  Deprecated: add the skills to the store instead and switch them on here."
@@ -8119,17 +8187,34 @@ impl App {
             self.set_info("the shared store is empty — nothing to update");
             return;
         }
+        let tracked = self.switches.repos.len();
         let mut body = vec![
-            "Runs `sbx skills update`: every skill that was added from a Git repository is fetched"
+            "Brings the skills added from Git in step with their repositories: new skills of a"
                 .into(),
-            "again and replaced with the repository's current version.".into(),
+            "repository added whole come in (off until you switch them on), changed skills are"
+                .into(),
+            "replaced, and skills the repository deleted leave the store.".into(),
             String::new(),
-            "Skills copied from this host with `import` have no repository and are left alone —"
-                .into(),
-            "import again to refresh those.".into(),
+            match tracked {
+                0 => "No repository was added here yet: only `sbx skills update` runs.".into(),
+                1 => "1 repository was added here.".into(),
+                n => format!("{n} repositories were added here."),
+            },
+            "Then `sbx skills update` refreshes skills added with plain sbx.".into(),
+            String::new(),
+            "Skills copied from this host with `import` are left alone: import again to".into(),
+            "refresh those.".into(),
         ];
         body.push(String::new());
         body.push(self.skills_sharers_line());
+        let mut steps = Vec::new();
+        if tracked > 0 {
+            steps.push(Step::new(
+                "update the skills of the repositories added here",
+                crate::headless::job_argv(&["skills", "update"]),
+            ));
+        }
+        steps.push(Step::new("sbx skills update", sbx::skills_update_argv(&[])));
         self.modal = Some(Modal::Confirm(Confirm {
             title: "Update skills from their repositories".into(),
             body,
@@ -8138,7 +8223,7 @@ impl App {
             yes: false,
             job: PendingJob {
                 title: "Updating agent skills".into(),
-                steps: vec![Step::new("sbx skills update", sbx::skills_update_argv(&[]))],
+                steps,
                 post: PostJob::default(),
                 fallback: None,
                 fallback_hint: None,
@@ -8613,35 +8698,38 @@ impl App {
             Ask::AddSkills => {
                 let mut parts = value.split_whitespace();
                 let repo = parts.next().unwrap_or_default().to_string();
-                let skills: Vec<String> = parts.map(str::to_string).collect();
+                if parts.next().is_some() {
+                    self.set_error(ADD_WHOLE_REPO);
+                    return;
+                }
                 if !sbx::skills_repo_ok(&repo) {
-                    self.set_error(
-                        "name the repository as owner/repo or a Git URL, then optionally the \
-                         skills to take",
-                    );
+                    self.set_error("name the repository as owner/repo or a Git URL");
                     return;
                 }
                 let before: Vec<String> =
                     self.skills.iter().flat_map(|s| s.skills.clone()).collect();
                 self.start_job(PendingJob {
                     title: format!("Adding skills from {repo}"),
-                    steps: vec![Step::new(
-                        format!("sbx skills add {repo} --force"),
-                        sbx::skills_add_argv(&repo, &skills),
-                    )],
+                    steps: vec![
+                        Step::new(
+                            format!("sbx skills add {repo} --force"),
+                            sbx::skills_add_argv(&repo, &[]),
+                        ),
+                        Step::new(
+                            format!("keep {repo} in step from now on"),
+                            crate::headless::job_argv(&["skills", "update", "--track", &repo]),
+                        ),
+                    ],
                     post: PostJob {
                         record_origins: Some(OriginRecord::Added {
                             repo: repo.clone(),
                             before,
-                            named: skills.clone(),
                         }),
                         ..Default::default()
                     },
                     fallback: None,
                     fallback_hint: Some(
-                        "owner/repo is GitHub shorthand; any HTTPS or SSH Git URL works too. A \
-                         --skill name has to match a directory holding a SKILL.md in the \
-                         repository."
+                        "owner/repo is GitHub shorthand; any HTTPS or SSH Git URL works too."
                             .into(),
                     ),
                 });
@@ -13842,14 +13930,14 @@ mod tests {
         };
         assert!(matches!(prompt.ask, Ask::AddSkills));
         assert!(!prompt.masked(), "a repository is not a secret");
-        prompt.input = TextInput::new("anthropics/skills pdf docx");
+        prompt.input = TextInput::new("anthropics/skills");
         app.on_key(KeyEvent::from(KeyCode::Enter));
         let Some(Modal::Running(_, pending)) = &app.modal else {
             panic!("the add runs as a job")
         };
         assert_eq!(
             pending.steps[0].argv,
-            sbx::skills_add_argv("anthropics/skills", &["pdf".into(), "docx".into()])
+            sbx::skills_add_argv("anthropics/skills", &[])
         );
         app.modal = None;
 
@@ -15800,11 +15888,8 @@ mod tests {
         );
 
         app.start_due_skill_update();
-        assert_eq!(app.skill_updates, 0, "no skill came from Git");
-        app.switches.record([(
-            "pdf".to_string(),
-            store_skills::Origin::Repo("anthropics/skills".into()),
-        )]);
+        assert_eq!(app.skill_updates, 0, "no repository added here");
+        app.switches.track("anthropics/skills");
         app.start_due_skill_update();
         assert_eq!(app.skill_updates, 1, "due: never updated");
         assert!(app.switches.updated_at.is_some(), "marked first");
@@ -15827,6 +15912,115 @@ mod tests {
     }
 
     #[test]
+    fn the_last_update_shows_on_k_and_as_a_message() {
+        let mut app = App::for_test(Catalog::load().unwrap(), Vec::new());
+        app.switches.updated_at = Some(crate::state::now_epoch());
+        app.switches.last_report = vec![
+            "o/a: new x (off until you switch it on)".into(),
+            "o/b: not updated: offline".into(),
+        ];
+        assert_eq!(
+            app.skill_view(&SkillRow::AutoUpdate).1,
+            "last update just now: 1 changed, 1 failed"
+        );
+        let notes = app.skill_notes(&SkillRow::AutoUpdate);
+        assert_eq!(
+            notes[1..],
+            [
+                "The last update:",
+                "o/a: new x (off until you switch it on)",
+                "o/b: not updated: offline"
+            ]
+        );
+        app.switches.last_report.clear();
+        assert_eq!(
+            app.skill_view(&SkillRow::AutoUpdate).1,
+            "last update just now, no change"
+        );
+
+        assert_eq!(daily_message(true, ""), (false, DAILY_UPDATED.to_string()));
+        assert_eq!(daily_message(false, "\n"), (true, DAILY_FAILED.to_string()));
+        assert_eq!(
+            daily_message(true, "o/a: deleted old\n"),
+            (
+                false,
+                "skills from Git, daily update: o/a: deleted old".to_string()
+            )
+        );
+        assert_eq!(
+            daily_message(false, "o/a: deleted old\no/b: not updated: offline\n"),
+            (
+                true,
+                "skills from Git, daily update: o/a: deleted old · o/b: not updated: offline"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn an_add_tracks_its_repository_and_removing_its_last_skill_untracks_it() {
+        let mut app = App::for_test(Catalog::load().unwrap(), Vec::new());
+        app.skills = Some(store(&["web", "pdf", "docx"]));
+        app.switches.track("o/a");
+        app.switches.record(
+            ["pdf", "docx"].map(|s| (s.to_string(), store_skills::Origin::Repo("o/a".into()))),
+        );
+
+        let remove = |app: &mut App, skill: &str| {
+            app.apply_post(&PostJob {
+                forget_store_skill: Some(skill.into()),
+                ..Default::default()
+            });
+            let left: Vec<String> = (app.skills.iter())
+                .flat_map(|s| s.skills.clone())
+                .filter(|s| s != skill)
+                .collect();
+            let refs: Vec<&str> = left.iter().map(String::as_str).collect();
+            app.skills = Some(store(&refs));
+        };
+        remove(&mut app, "pdf");
+        assert!(
+            app.switches.repos.contains_key("o/a"),
+            "docx still comes from it"
+        );
+        remove(&mut app, "docx");
+        assert!(
+            !app.switches.repos.contains_key("o/a"),
+            "nothing of it is left: no more updates"
+        );
+    }
+
+    #[test]
+    fn update_from_repositories_updates_the_added_repositories_first() {
+        let mut app = App::for_test(Catalog::load().unwrap(), Vec::new());
+        app.skills = Some(store(&["pdf"]));
+        open_skills(&mut app);
+        app.on_key(KeyEvent::from(KeyCode::Char('u')));
+        let Some(Modal::Confirm(confirm)) = app.modal.take() else {
+            panic!("u asks first")
+        };
+        let argvs: Vec<Vec<String>> = confirm.job.steps.iter().map(|s| s.argv.clone()).collect();
+        assert_eq!(
+            argvs,
+            [sbx::skills_update_argv(&[])],
+            "no repository added here"
+        );
+
+        app.switches.track("o/a");
+        app.on_key(KeyEvent::from(KeyCode::Char('u')));
+        let Some(Modal::Confirm(confirm)) = app.modal.take() else {
+            panic!("u asks first")
+        };
+        assert_eq!(confirm.job.steps.len(), 2);
+        assert_eq!(&confirm.job.steps[0].argv[1..], ["skills", "update"]);
+        assert_eq!(confirm.job.steps[1].argv, sbx::skills_update_argv(&[]));
+        assert!(confirm
+            .body
+            .iter()
+            .any(|l| l.contains("1 repository was added here")));
+    }
+
+    #[test]
     fn imports_and_adds_record_where_their_skills_came_from() {
         let mut app = App::for_test(Catalog::load().unwrap(), Vec::new());
         app.skills = Some(store(&["web"]));
@@ -15841,15 +16035,35 @@ mod tests {
         };
         prompt.input = TextInput::new("anthropics/skills pdf");
         app.on_key(KeyEvent::from(KeyCode::Enter));
+        assert!(
+            app.status
+                .as_ref()
+                .is_some_and(|(m, err, _)| *err && m == ADD_WHOLE_REPO),
+            "skill names are refused: the whole repository comes in"
+        );
+        app.on_key(KeyEvent::from(KeyCode::Char('a')));
+        let Some(Modal::Prompt(prompt)) = &mut app.modal else {
+            panic!("a opens the repository prompt")
+        };
+        prompt.input = TextInput::new("anthropics/skills");
+        app.on_key(KeyEvent::from(KeyCode::Enter));
         let Some(Modal::Running(_, pending)) = app.modal.take() else {
             panic!("the add runs as a job")
         };
+        assert_eq!(
+            pending.steps[0].argv,
+            sbx::skills_add_argv("anthropics/skills", &[])
+        );
+        assert_eq!(
+            pending.steps[1].argv[1..],
+            ["skills", "update", "--track", "anthropics/skills"],
+            "the add keeps the repository in step at once"
+        );
         assert_eq!(
             pending.post.record_origins,
             Some(OriginRecord::Added {
                 repo: "anthropics/skills".into(),
                 before: vec!["web".into()],
-                named: vec!["pdf".into()],
             })
         );
         app.apply_post(&pending.post);

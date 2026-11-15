@@ -36,7 +36,7 @@ aisbx — Docker Sandboxes dashboard for the aisbx kits
 USAGE:
     aisbx [OPTIONS]                        the dashboard
     aisbx up|run|step|status|stop|rm ...   headless, for scripts (below)
-    aisbx skills ls|on|off|default ...     the shared store's skills per sandbox (below)
+    aisbx skills ls|on|off|update ...      the shared store's skills per sandbox (below)
     aisbx skill-repo add|rm|ls|fetch ...   deprecated: the skill repositories (below)
     aisbx skill add|rm|ls|sync ...         deprecated: repo skills per sandbox (below)
 

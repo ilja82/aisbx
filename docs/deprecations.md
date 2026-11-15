@@ -15,7 +15,7 @@ gets a section here: its id, the old way, the replacement, your step and the ais
 | --- | --- |
 | Old way | The skill repositories: `aisbx skill-repo`, `aisbx skill`, `aisbx up --skill`, and the dashboard's *Repo skills (deprecated)* rows on `K` and on `i`. |
 | Replacement | The sbx skills store with a switch per skill: `K`, *Sandbox skills* (`i`), the create wizard's *shared skills* fold, [`aisbx skills`](headless.md#aisbx-skills) and `aisbx up --skill-on` ([Switches](skills.md#switches)). |
-| Your step | For each repository, put its skills into the store: `sbx skills add REPO --skill NAME`, or `K`, then `a`. Switch them on for all sandboxes on `K`, or for one sandbox on `i`. Then remove the repository with `aisbx skill-repo rm REPO`. |
+| Your step | Add each repository on `K` with `a` (every skill comes in, off, and the repository is kept in step), or with `sbx skills add REPO` and `aisbx skills update --track REPO`. Switch the skills on for all sandboxes on `K`, or for one sandbox on `i`. Then remove the repository with `aisbx skill-repo rm REPO`. |
 | Deprecated in | 0.53.0.1 |
 
 The commands keep working. `aisbx skill-repo` and `aisbx skill` print one warning on stderr per run; stdout does not

@@ -102,7 +102,7 @@ fn the_help_names_aisbx_skills_and_marks_the_skill_repos_deprecated() {
     assert!(
         usage
             .iter()
-            .any(|l| l.starts_with("    aisbx skills ls|on|off|default ")),
+            .any(|l| l.starts_with("    aisbx skills ls|on|off|update ")),
         "{usage:#?}"
     );
     for command in ["aisbx skill-repo ", "aisbx skill "] {

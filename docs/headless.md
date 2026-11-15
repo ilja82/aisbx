@@ -277,6 +277,7 @@ switch single skills the other way ([Switches](skills.md#switches)). A change ap
 | `skills on SANDBOX SKILL...`, `skills off SANDBOX SKILL...` | switches skills on or off for one sandbox: its own switches |
 | `skills default SANDBOX [SKILL...]` | drops the sandbox's own switches, or only those of the named skills |
 | `skills auto-update [on\|off]` | prints `on` or `off`, or sets the daily update of the store's Git skills ([Updates](skills.md#updates)) |
+| `skills update [--track REPO]` | brings the skills of each repository added on `K` in step with it: new ones in, changed ones replaced, deleted ones out ([Updates](skills.md#updates)). `--track` adds REPO to them first, as `K` does after `sbx skills add REPO`: the store's skills of REPO are then recorded as its |
 
 - `on`, `off` and `default` check every name first. A refused name exits 2, and nothing is written.
 - `on` and `off` for one sandbox exit 125 when sbx lists no sandbox of that name. `default` also takes the name of a
@@ -320,6 +321,12 @@ example, with `SANDBOX` (the real output puts each key on its own line, in alpha
 ```
 
 If sbx cannot list the store, `skills ls` prints one line to stderr, nothing to stdout, and exits 125.
+
+`skills update` prints one line per repository that changed or failed, for example
+`anthropics/skills: new xlsx (off until you switch it on); changed docx; deleted old` or
+`acme/skills: not updated: <why>`. It prints nothing on stdout when nothing changed. It exits 1 when a repository
+failed (the others are still updated), 125 when sbx cannot list the store, and 1 when the switches file cannot be
+read. It never asks for credentials.
 
 ## The contract and exit codes
 

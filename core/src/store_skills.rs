@@ -96,6 +96,22 @@ pub struct Switches {
     /// When that update last started, in seconds since the epoch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<u64>,
+    /// The Git repositories the dashboard added skills from, by the source as typed: the daily
+    /// update keeps their skills in step with them.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub repos: BTreeMap<String, Tracked>,
+    /// What the last update of those repositories did, one line per repository.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub last_report: Vec<String>,
+}
+
+/// A repository whose skills the update keeps in step: every skill of it, also skills it gains.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tracked {
+    /// Each of its skills as the last update saw it: the git tree id of the skill's folder. Empty
+    /// until the first update.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub known: BTreeMap<String, String>,
 }
 
 impl Default for Switches {
@@ -107,6 +123,8 @@ impl Default for Switches {
             origins: BTreeMap::new(),
             auto_update: None,
             updated_at: None,
+            repos: BTreeMap::new(),
+            last_report: Vec::new(),
         }
     }
 }
@@ -247,11 +265,11 @@ impl Switches {
         self.auto_update.unwrap_or(true)
     }
 
-    /// Whether the daily update is due at `now`: switched on, a skill aisbx saw come from Git, and
-    /// no update started in the last [`UPDATE_EVERY`].
+    /// Whether the daily update is due at `now`: switched on, a repository to keep in step, and no
+    /// update started in the last [`UPDATE_EVERY`].
     pub fn update_due(&self, now: u64) -> bool {
         self.auto_update()
-            && self.origins.values().any(|o| matches!(o, Origin::Repo(_)))
+            && !self.repos.is_empty()
             && self
                 .updated_at
                 .is_none_or(|at| now.saturating_sub(at) >= UPDATE_EVERY)
@@ -294,12 +312,17 @@ pub fn load(path: &Path) -> Result<Switches> {
             switches.version
         );
     }
-    let names = switches.on.iter().chain(switches.origins.keys()).chain(
-        switches
-            .sandboxes
-            .values()
-            .flat_map(|o| o.on.iter().chain(&o.off)),
-    );
+    let names = switches
+        .on
+        .iter()
+        .chain(switches.origins.keys())
+        .chain(
+            switches
+                .sandboxes
+                .values()
+                .flat_map(|o| o.on.iter().chain(&o.off)),
+        )
+        .chain(switches.repos.values().flat_map(|t| t.known.keys()));
     for name in names {
         if !valid_name(name) {
             bail!(
@@ -408,17 +431,11 @@ pub fn imported(store: &[String], host: &[HostFolder]) -> Vec<(String, Origin)> 
         .collect()
 }
 
-/// What `sbx skills add <repo>` brought: the skills it was asked for by name, and every skill the
-/// store holds now and did not before.
-pub fn added(
-    repo: &str,
-    before: &[String],
-    after: &[String],
-    named: &[String],
-) -> Vec<(String, Origin)> {
+/// What `sbx skills add <repo>` brought: every skill the store holds now and did not before.
+pub fn added(repo: &str, before: &[String], after: &[String]) -> Vec<(String, Origin)> {
     after
         .iter()
-        .filter(|s| named.contains(s) || !before.contains(s))
+        .filter(|s| !before.contains(s))
         .map(|s| (s.clone(), Origin::Repo(repo.to_string())))
         .collect()
 }
@@ -475,6 +492,124 @@ pub fn groups(
         skills.sort();
     }
     out
+}
+
+impl Switches {
+    /// Keep `repo` in step from now on, every skill of it.
+    pub fn track(&mut self, repo: &str) -> bool {
+        if self.repos.contains_key(repo) {
+            return false;
+        }
+        self.repos.insert(repo.to_string(), Tracked::default());
+        true
+    }
+
+    /// Stop keeping `repo` in step when the store holds none of its skills any more.
+    pub fn untrack_if_gone(&mut self, repo: &str, store: &[String]) -> bool {
+        let held = (self.origins.iter())
+            .any(|(skill, o)| *o == Origin::Repo(repo.to_string()) && store.contains(skill));
+        !held && self.repos.remove(repo).is_some()
+    }
+}
+
+/// What one repository's update changes in the store.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RepoPlan {
+    /// Skills the repository gained, which the store does not hold yet.
+    pub new: Vec<String>,
+    /// Skills from this repository whose folder changed since the last update.
+    pub changed: Vec<String>,
+    /// Skills from this repository that it no longer has.
+    pub deleted: Vec<String>,
+    /// Every skill of the repository the update keeps in step, as it is now.
+    pub known: BTreeMap<String, String>,
+    /// Skills in the store now recorded as this repository's: on the first update, those it holds
+    /// that came from nowhere aisbx recorded, or, right after an add, every one it holds.
+    pub claimed: Vec<String>,
+}
+
+impl RepoPlan {
+    /// The skills `sbx skills add <repo> --skill …` puts into the store.
+    pub fn to_add(&self) -> Vec<String> {
+        self.new.iter().chain(&self.changed).cloned().collect()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.new.is_empty() && self.changed.is_empty() && self.deleted.is_empty()
+    }
+}
+
+/// One repository's update: `found` is each skill of its fetched commit with its content id,
+/// `store` the store's skills now. Only skills that came from this repository change: one the
+/// user imported or added from elsewhere under the same name is left alone, and one the user
+/// removed from the store does not come back. The first update only learns the content ids and
+/// claims the store's skills of the repository: `just_added` (the add replaced every one of
+/// them) claims them all, else only those of no recorded origin.
+pub fn plan_repo(
+    repo: &str,
+    tracked: &Tracked,
+    found: &[(String, String)],
+    store: &[String],
+    origins: &BTreeMap<String, Origin>,
+    just_added: bool,
+) -> RepoPlan {
+    let ours = |skill: &str| origins.get(skill) == Some(&Origin::Repo(repo.to_string()));
+    let wanted: BTreeMap<String, String> = found
+        .iter()
+        .filter(|(name, _)| valid_name(name))
+        .cloned()
+        .collect();
+    let mut plan = RepoPlan {
+        known: wanted.clone(),
+        ..RepoPlan::default()
+    };
+    if tracked.known.is_empty() {
+        plan.claimed = (wanted.keys())
+            .filter(|name| store.contains(name))
+            .filter(|name| just_added || !origins.contains_key(*name))
+            .cloned()
+            .collect();
+        return plan;
+    }
+    for (name, content) in &wanted {
+        match tracked.known.get(name) {
+            None if !store.contains(name) => plan.new.push(name.clone()),
+            Some(before) if before != content && store.contains(name) && ours(name) => {
+                plan.changed.push(name.clone())
+            }
+            _ => {}
+        }
+    }
+    for name in tracked.known.keys() {
+        if !wanted.contains_key(name) && store.contains(name) && ours(name) {
+            plan.deleted.push(name.clone());
+        }
+    }
+    plan
+}
+
+/// The report line of one repository's update; `None` when it changed nothing.
+pub fn report_line(repo: &str, plan: &RepoPlan) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if !plan.new.is_empty() {
+        parts.push(format!(
+            "new {} (off until you switch it on)",
+            plan.new.join(", ")
+        ));
+    }
+    if !plan.changed.is_empty() {
+        parts.push(format!("changed {}", plan.changed.join(", ")));
+    }
+    if !plan.deleted.is_empty() {
+        parts.push(format!("deleted {}", plan.deleted.join(", ")));
+    }
+    (!parts.is_empty()).then(|| format!("{repo}: {}", parts.join("; ")))
+}
+
+/// Where the update keeps its mirrors of the repositories: apart from the deprecated skill
+/// repositories' `skill-cache/`.
+pub fn cache_root(state: &Path) -> PathBuf {
+    state.join("store-skill-cache")
 }
 
 #[cfg(test)]
@@ -667,22 +802,123 @@ mod tests {
     }
 
     #[test]
-    fn the_daily_update_needs_a_git_skill_and_a_day() {
+    fn the_daily_update_needs_a_tracked_repository_and_a_day() {
         let mut s = Switches::default();
         assert!(s.auto_update());
-        assert!(!s.update_due(10_000_000), "no skill from Git");
+        assert!(!s.update_due(10_000_000), "no repository to keep in step");
         s.record([("pdf".to_string(), Origin::Folder("~/.agents/skills".into()))]);
         assert!(
             !s.update_due(10_000_000),
-            "an imported skill is no Git skill"
+            "an imported skill is no repository"
         );
-        s.record([("docx".to_string(), Origin::Repo("anthropics/skills".into()))]);
+        s.track("anthropics/skills");
         assert!(s.update_due(10_000_000), "never updated");
         s.updated_at = Some(10_000_000);
         assert!(!s.update_due(10_000_000 + UPDATE_EVERY - 1));
         assert!(s.update_due(10_000_000 + UPDATE_EVERY));
         s.auto_update = Some(false);
         assert!(!s.update_due(10_000_000 + 2 * UPDATE_EVERY));
+    }
+
+    #[test]
+    fn a_repository_is_tracked_whole_and_untracked_once_its_skills_are_gone() {
+        let mut s = Switches::default();
+        assert!(s.track("o/a"));
+        assert!(!s.track("o/a"), "tracked once");
+        assert_eq!(s.repos["o/a"], Tracked::default());
+
+        s.record([("pdf".to_string(), Origin::Repo("o/a".into()))]);
+        assert!(
+            !s.untrack_if_gone("o/a", &strings(&["pdf"])),
+            "pdf still in the store"
+        );
+        assert!(s.untrack_if_gone("o/a", &strings(&["web"])));
+        assert!(s.repos.is_empty());
+    }
+
+    fn pairs(items: &[(&str, &str)]) -> Vec<(String, String)> {
+        items
+            .iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn the_update_adds_new_skills_changes_changed_ones_and_deletes_gone_ones() {
+        let repo = "o/a";
+        let from = |names: &[&str]| -> BTreeMap<String, Origin> {
+            names
+                .iter()
+                .map(|n| (n.to_string(), Origin::Repo(repo.into())))
+                .collect()
+        };
+        let first = Tracked::default();
+        let found = pairs(&[("pdf", "t1"), ("docx", "t2"), ("xlsx", "t3")]);
+        let store = strings(&["pdf", "docx"]);
+        let plan = plan_repo(repo, &first, &found, &store, &from(&["pdf", "docx"]), false);
+        assert!(plan.is_empty(), "the first update only learns: {plan:?}");
+        assert_eq!(plan.known.len(), 3);
+        assert!(
+            plan.claimed.is_empty(),
+            "both already recorded as this repo's"
+        );
+        let mut mixed = from(&["pdf"]);
+        mixed.insert("docx".into(), Origin::Folder("~/.claude/skills".into()));
+        let unknown = strings(&["pdf", "docx", "xlsx"]);
+        let daily = plan_repo(repo, &first, &found, &unknown, &mixed, false);
+        assert_eq!(
+            daily.claimed,
+            ["xlsx"],
+            "only a skill of no recorded origin"
+        );
+        let added = plan_repo(repo, &first, &found, &unknown, &mixed, true);
+        assert_eq!(
+            added.claimed,
+            ["docx", "pdf", "xlsx"],
+            "the add replaced them all"
+        );
+
+        let tracked = Tracked {
+            known: plan.known.clone(),
+        };
+        let mut origins = from(&["pdf", "docx", "old"]);
+        origins.insert("web".into(), Origin::Folder("~/.claude/skills".into()));
+        let tracked = Tracked {
+            known: [("old", "t0"), ("web", "w0")]
+                .iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .chain(tracked.known)
+                .collect(),
+        };
+        let found = pairs(&[
+            ("pdf", "t1"),
+            ("docx", "t9"),
+            ("xlsx", "t3"),
+            ("new", "n1"),
+            ("web", "w1"),
+            ("bad/x", "z"),
+        ]);
+        let store = strings(&["pdf", "docx", "old", "web"]);
+        let plan = plan_repo(repo, &tracked, &found, &store, &origins, false);
+        assert_eq!(
+            plan.new,
+            ["new"],
+            "xlsx was known and is not in the store: removed by the user"
+        );
+        assert_eq!(
+            plan.changed,
+            ["docx"],
+            "web changed but was imported: left alone"
+        );
+        assert_eq!(plan.deleted, ["old"]);
+        assert_eq!(plan.to_add(), ["new", "docx"]);
+        assert!(!plan.known.contains_key("bad/x"));
+        assert_eq!(
+            report_line(repo, &plan).unwrap(),
+            "o/a: new new (off until you switch it on); changed docx; deleted old"
+        );
+
+        assert_eq!(report_line(repo, &RepoPlan::default()), None);
     }
 
     #[test]
@@ -705,16 +941,8 @@ mod tests {
             ]
         );
         assert_eq!(
-            added(
-                "o/r",
-                &strings(&["a", "b"]),
-                &strings(&["a", "b", "c"]),
-                &strings(&["b"])
-            ),
-            [
-                ("b".to_string(), Origin::Repo("o/r".into())),
-                ("c".to_string(), Origin::Repo("o/r".into())),
-            ]
+            added("o/r", &strings(&["a", "b"]), &strings(&["a", "b", "c"])),
+            [("c".to_string(), Origin::Repo("o/r".into()))]
         );
     }
 

@@ -5,9 +5,9 @@
 /// `skill-repos`: the line `aisbx skill-repo` and `aisbx skill` print on stderr, once per run.
 pub fn skill_repos_warning(command: &str) -> String {
     format!(
-        "aisbx: `aisbx {command}` is deprecated: put the skills into the shared store with `sbx \
-         skills add REPO` (or K, then a), then switch them on with `aisbx skills on` (or K); see \
-         docs/deprecations.md#skill-repos"
+        "aisbx: `aisbx {command}` is deprecated: add the repository on Skills (K) with a, or \
+         with `sbx skills add REPO` and `aisbx skills update --track REPO`, then switch its skills \
+         on with `aisbx skills on` (or K); see docs/deprecations.md#skill-repos"
     )
 }
 

@@ -138,6 +138,10 @@ HEADLESS USE — the same kits and names as the dashboard, for scripts:
                                              without SKILL)
     aisbx skills auto-update [on|off]        print on or off, or set the daily update of
                                              the store's Git skills, which the dashboard runs
+    aisbx skills update [--track REPO]       bring the skills of each repository added on K
+                                             in step: new in, changed replaced, deleted out;
+                                             one line per repository that changed or failed;
+                                             --track keeps REPO in step from now on
         Every skill is off until you switch it on. aisbx run and the dashboard link the
         skills switched on for a sandbox before its agent starts; a sandbox that mounts the
         store read-write gets every skill. A name the store does not hold yet is kept, with
@@ -210,7 +214,12 @@ pub fn is_subcommand(arg: &str) -> bool {
 
 /// The command lines core's own jobs run as this very binary ([`job_argv`]), by their first
 /// words. `aisbx` takes every subcommand; `aisbx-ui` hands only these to [`exit`].
-pub const JOB_COMMANDS: [&[&str]; 3] = [&["skill"], &["local", "fetch"], &["prune-images"]];
+pub const JOB_COMMANDS: [&[&str]; 4] = [
+    &["skill"],
+    &["skills", "update"],
+    &["local", "fetch"],
+    &["prune-images"],
+];
 
 /// Whether `args` start with one of [`JOB_COMMANDS`].
 pub fn is_job_command<S: AsRef<str>>(args: &[S]) -> bool {
@@ -3061,7 +3070,7 @@ fn connection_flag(
 fn skills_cmd(raw: &[String]) -> Outcome {
     let Some((sub, rest)) = raw.split_first() else {
         return Err(Fail::usage(
-            "skills needs ls, on, off, default or auto-update",
+            "skills needs ls, on, off, default, update or auto-update",
         ));
     };
     let state_dir = state::state_dir();
@@ -3079,15 +3088,23 @@ fn skills_cmd(raw: &[String]) -> Outcome {
             &mut || sbx::skills_ls().ok().map(|store| store.skills),
         )?,
         "default" => skills_default_in(&state_dir, rest)?,
+        "update" => skills_update_in(
+            &state_dir,
+            rest,
+            &mut |repo| repo_skills_now(&state_dir, repo),
+            &mut || sbx::skills_ls().ok().map(|store| store.skills),
+            &mut |argv| run_sbx_quiet(argv),
+        )?,
         "auto-update" => skills_auto_update_in(&state_dir, rest)?,
         other => {
             return Err(Fail::usage(format!(
-                "unknown skills command: {other} (ls, on, off, default or auto-update)"
+                "unknown skills command: {other} (ls, on, off, default, update or auto-update)"
             )))
         }
     };
+    let code = printed.exit;
     printed.emit();
-    Ok(0)
+    Ok(code)
 }
 
 /// Each name once, in the order given, if [`store_skills::valid_name`] takes them all; else the
@@ -3364,6 +3381,153 @@ fn skills_default_in(state_dir: &Path, raw: &[String]) -> Result<Printed, Fail> 
     Ok(out)
 }
 
+/// One repository's skills as its fetched commit holds them, each with its content id: mirrored
+/// into [`store_skills::cache_root`], read by git. Never prompts for credentials.
+fn repo_skills_now(state_dir: &Path, repo: &str) -> Result<Vec<(String, String)>, String> {
+    let entry = skill_repos::Repo {
+        source: repo.to_string(),
+        git_ref: None,
+        via: skill_repos::Method::Auto,
+    };
+    let root = store_skills::cache_root(state_dir);
+    std::fs::create_dir_all(&root).map_err(|e| format!("creating {}: {e}", root.display()))?;
+    let fetched = skill_repos::fetch(&entry, &root, &skill_repos::Env::from_host())
+        .map_err(|why| why.join("; "))?;
+    let dir = root.join(entry.id()?);
+    let (found, _) = skill_select::discover(&dir, &fetched.commit).map_err(|e| format!("{e:#}"))?;
+    Ok(found.into_iter().map(|f| (f.name, f.content)).collect())
+}
+
+/// Run one sbx command without a person to answer; its error output is the reason it failed.
+fn run_sbx_quiet(argv: &[String]) -> Result<(), String> {
+    let out = sbx_command(argv, false)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("could not run sbx: {e}"))?;
+    match out.status.success() {
+        true => Ok(()),
+        false => {
+            let why = String::from_utf8_lossy(&out.stderr);
+            let why = why.trim().lines().last().unwrap_or("no reason given");
+            Err(format!(
+                "{} exited {}: {why}",
+                argv[..3].join(" "),
+                out.status
+            ))
+        }
+    }
+}
+
+/// How `skills update` reads one repository's skills, with their content ids
+/// ([`repo_skills_now`]).
+type RepoSkills<'a> = dyn FnMut(&str) -> Result<Vec<(String, String)>, String> + 'a;
+
+/// `skills update`: keep the store's skills in step with every repository the dashboard added
+/// skills from ([`store_skills::Switches::repos`]): new skills in, changed ones replaced, deleted
+/// ones out. One stdout line per repository that changed or failed; exit 1 when one failed. The
+/// repositories' skills (`found`), the store list and the sbx runs are handed in, for the tests.
+fn skills_update_in(
+    state_dir: &Path,
+    raw: &[String],
+    found: &mut RepoSkills<'_>,
+    store: &mut dyn FnMut() -> Option<Vec<String>>,
+    run: &mut dyn FnMut(&[String]) -> Result<(), String>,
+) -> Result<Printed, Fail> {
+    let args = Args::parse(raw, &[], &["track"])?;
+    if !args.positional.is_empty() || !args.trailing.is_empty() {
+        return Err(Fail::usage("skills update takes only --track REPO"));
+    }
+    let just_added = args.one("track")?;
+    if let Some(repo) = &just_added {
+        if !sbx::skills_repo_ok(repo) {
+            return Err(Fail::usage(
+                "--track takes the repository as `sbx skills add` took it: owner/repo or a Git URL",
+            ));
+        }
+        store_skills::update(&store_skills::config_path(state_dir), |s| {
+            s.track(repo);
+            Ok(())
+        })
+        .map_err(|e| Fail::failed(format!("{e:#}")))?;
+    }
+    let switches = load_switches(state_dir)?;
+    let mut out = Printed::default();
+    if switches.repos.is_empty() {
+        out.stderr.push(
+            "no repository to update: add skills from one on Skills (K) with a, or with \
+             `sbx skills add REPO`"
+                .into(),
+        );
+        return Ok(out);
+    }
+    let held = store().ok_or_else(|| Fail::sandbox("sbx skills ls failed"))?;
+    let mut lines: Vec<String> = Vec::new();
+    let mut done: Vec<(String, store_skills::RepoPlan)> = Vec::new();
+    let mut failed = false;
+    for (repo, tracked) in &switches.repos {
+        let plan = found(repo).and_then(|found| {
+            let fresh = just_added.as_deref() == Some(repo.as_str());
+            let plan = store_skills::plan_repo(
+                repo,
+                tracked,
+                &found,
+                &held,
+                &switches.origins,
+                fresh && tracked.known.is_empty(),
+            );
+            let add = plan.to_add();
+            if !add.is_empty() {
+                run(&sbx::skills_add_argv(repo, &add))?;
+            }
+            if !plan.deleted.is_empty() {
+                run(&sbx::skills_rm_argv(&plan.deleted))?;
+            }
+            Ok(plan)
+        });
+        match plan {
+            Ok(plan) => {
+                lines.extend(store_skills::report_line(repo, &plan));
+                done.push((repo.clone(), plan));
+            }
+            Err(why) => {
+                failed = true;
+                lines.push(format!("{repo}: not updated: {why}"));
+            }
+        }
+    }
+    let now = state::now_epoch();
+    let report = lines.clone();
+    store_skills::update(&store_skills::config_path(state_dir), |s| {
+        for (repo, plan) in done {
+            s.record(
+                (plan
+                    .to_add()
+                    .into_iter()
+                    .chain(plan.claimed.iter().cloned()))
+                .map(|skill| (skill, store_skills::Origin::Repo(repo.clone()))),
+            );
+            for skill in &plan.deleted {
+                s.forget_skill(skill);
+            }
+            if let Some(tracked) = s.repos.get_mut(&repo) {
+                tracked.known = plan.known;
+            }
+        }
+        s.updated_at = Some(now);
+        s.last_report = report;
+        Ok(())
+    })
+    .map_err(|e| Fail::failed(format!("{e:#}")))?;
+    out.stdout = lines.iter().map(|l| format!("{l}\n")).collect();
+    if lines.is_empty() {
+        out.stderr.push("the skills from Git are up to date".into());
+    }
+    if failed {
+        out.exit = 1;
+    }
+    Ok(out)
+}
+
 /// `skills auto-update [on|off]`: print the daily update switch of the store's Git skills, or set
 /// it. Absent in the file is on.
 fn skills_auto_update_in(state_dir: &Path, raw: &[String]) -> Result<Printed, Fail> {
@@ -3484,6 +3648,8 @@ fn shown_handle(handle: &str) -> String {
 struct Printed {
     stdout: String,
     stderr: Vec<String>,
+    /// The exit code; 0 unless a part failed.
+    exit: u8,
 }
 
 impl Printed {
@@ -5066,6 +5232,166 @@ mod tests {
             "left as it was"
         );
         let _ = std::fs::remove_dir_all(&state);
+    }
+
+    #[test]
+    fn skills_update_track_claims_what_the_add_just_replaced() {
+        use store_skills::Origin;
+        let state = scratch_state("skills-track");
+        let path = store_skills::config_path(&state);
+        store_skills::update(&path, |s| {
+            s.record([("web".to_string(), Origin::Folder("~/.claude/skills".into()))]);
+            Ok(())
+        })
+        .unwrap();
+        let found = |_: &str| -> Result<Vec<(String, String)>, String> {
+            Ok(vec![
+                ("web".into(), "t1".into()),
+                ("pdf".into(), "t2".into()),
+            ])
+        };
+        let out = skills_update_in(
+            &state,
+            &strings(&["--track", "o/a"]),
+            &mut |r| found(r),
+            &mut || Some(strings(&["web", "pdf", "notes"])),
+            &mut |argv| panic!("the first update runs no sbx: {argv:?}"),
+        )
+        .unwrap();
+        assert_eq!(out.stdout, "", "the first update reports no change");
+        let saved = store_skills::load(&path).unwrap();
+        assert!(saved.repos.contains_key("o/a"));
+        assert_eq!(
+            saved.origins["web"],
+            Origin::Repo("o/a".into()),
+            "the add replaced it"
+        );
+        assert_eq!(saved.origins["pdf"], Origin::Repo("o/a".into()));
+        assert!(!saved.origins.contains_key("notes"));
+        assert_eq!(saved.repos["o/a"].known.len(), 2);
+
+        let refused = skills_update_in(
+            &state,
+            &strings(&["--track", "not a repo"]),
+            &mut |r| found(r),
+            &mut || None,
+            &mut |_| Ok(()),
+        );
+        assert_eq!(refused.unwrap_err().code, EXIT_USAGE);
+    }
+
+    #[test]
+    fn skills_update_keeps_the_store_in_step_with_each_repository() {
+        use store_skills::Origin;
+        let state = scratch_state("skills-update");
+        let path = store_skills::config_path(&state);
+        let none = skills_update_in(
+            &state,
+            &[],
+            &mut |_| panic!("no repository, no fetch"),
+            &mut || panic!("no store read"),
+            &mut |_| panic!("no sbx"),
+        )
+        .unwrap();
+        assert_eq!(none.stdout, "");
+        assert!(none.stderr[0].starts_with("no repository to update"));
+
+        store_skills::update(&path, |s| {
+            s.track("o/a");
+            s.track("o/b");
+            s.record(["pdf", "docx", "old"].map(|n| (n.to_string(), Origin::Repo("o/a".into()))));
+            Ok(())
+        })
+        .unwrap();
+        let pairs = |items: &[(&str, &str)]| -> Vec<(String, String)> {
+            items
+                .iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect()
+        };
+        let store = strings(&["pdf", "docx", "old"]);
+        let mut ran: Vec<Vec<String>> = Vec::new();
+        let first = skills_update_in(
+            &state,
+            &[],
+            &mut |repo| match repo {
+                "o/a" => Ok(pairs(&[("pdf", "t1"), ("docx", "t2"), ("old", "t3")])),
+                _ => Err("no route reached it".into()),
+            },
+            &mut || Some(store.clone()),
+            &mut |argv| {
+                ran.push(argv.to_vec());
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(ran.is_empty(), "the first update only learns: {ran:?}");
+        assert_eq!(first.stdout, "o/b: not updated: no route reached it\n");
+        assert_eq!(first.exit, 1);
+
+        let second = skills_update_in(
+            &state,
+            &[],
+            &mut |repo| match repo {
+                "o/a" => Ok(pairs(&[("pdf", "t1"), ("docx", "t9"), ("xlsx", "t4")])),
+                _ => Ok(Vec::new()),
+            },
+            &mut || Some(store.clone()),
+            &mut |argv| {
+                ran.push(argv.to_vec());
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            ran,
+            [
+                sbx::skills_add_argv("o/a", &strings(&["xlsx", "docx"])),
+                sbx::skills_rm_argv(&strings(&["old"])),
+            ]
+        );
+        assert_eq!(
+            second.stdout,
+            "o/a: new xlsx (off until you switch it on); changed docx; deleted old\n"
+        );
+        assert_eq!(second.exit, 0);
+        let saved = store_skills::load(&path).unwrap();
+        assert_eq!(saved.origins.get("xlsx"), Some(&Origin::Repo("o/a".into())));
+        assert!(!saved.origins.contains_key("old"));
+        assert!(!saved.global("xlsx"), "a new skill starts off");
+        assert_eq!(saved.last_report.len(), 1);
+        assert!(saved.updated_at.is_some());
+
+        // An sbx failure keeps what the update knew, so the next one tries again.
+        let failed = skills_update_in(
+            &state,
+            &[],
+            &mut |repo| match repo {
+                "o/a" => Ok(pairs(&[("pdf", "t5"), ("docx", "t9"), ("xlsx", "t4")])),
+                _ => Ok(Vec::new()),
+            },
+            &mut || Some(strings(&["pdf", "docx", "xlsx"])),
+            &mut |_| Err("sbx skills add exited 1: offline".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            failed.stdout,
+            "o/a: not updated: sbx skills add exited 1: offline\n"
+        );
+        assert_eq!(failed.exit, 1);
+        assert_eq!(
+            store_skills::load(&path).unwrap().repos["o/a"].known["pdf"],
+            "t1"
+        );
+
+        let usage = skills_update_in(
+            &state,
+            &strings(&["x"]),
+            &mut |_| Ok(Vec::new()),
+            &mut || None,
+            &mut |_| Ok(()),
+        );
+        assert_eq!(usage.unwrap_err().code, EXIT_USAGE);
     }
 
     #[test]

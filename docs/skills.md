@@ -28,7 +28,7 @@ they came from ([Where a skill came from](#where-a-skill-came-from)). Each skill
 | --- | --- |
 | `space` or `↵` | switches the skill under the cursor on or off for all sandboxes |
 | `i` | imports your skill folders (`~/.agents/skills`, `~/.claude/skills`, `~/.config/opencode/skills`, ...) |
-| `a` | adds skills from a Git repository, from one line such as `anthropics/skills pdf docx` |
+| `a` | adds every skill of a Git repository, such as `anthropics/skills`, and keeps it in step ([Updates](#updates)) |
 | `u` | updates the skills that `a` added (*Update from repositories*) |
 | `d` | removes a skill |
 
@@ -88,12 +88,32 @@ the skill names.
 
 ### Updates
 
-- *Update from repositories* (`u`) runs `sbx skills update`: each skill added from a Git repository gets the
-  repository's current version.
-- An imported skill changes only when you import it again.
-- **Update daily** (on by default): while the dashboard runs, it runs `sbx skills update` once every 24 hours, if
-  aisbx recorded a skill from Git. Switch it off on `K`, or with `aisbx skills auto-update off`. A skill added with
-  plain `sbx` alone does not start the daily update.
+aisbx keeps each repository you add on `K` (`a`) in step with the store. It mirrors the repository on the host,
+compares its skills with the last update and changes the store:
+
+- **New skills** of a repository you added whole come into the store. They start off: switch them on.
+- **Changed skills** are replaced with the repository's version.
+- **Deleted skills** leave the store, with their switches.
+
+An add always takes every skill of the repository: they all start off, so you switch on only the ones you want, and
+skills the repository gains later come in the same way. The add replaces skills of the same name in the store and
+records them as the repository's. Later, a skill of the same name that you import or add from elsewhere is never
+changed or deleted by the update. A skill you removed with `d` does not come
+back. When you remove the last skill of a repository, aisbx stops updating it. A repository added with plain
+`sbx skills add` is not kept in step: add it on `K` instead.
+
+When it runs:
+
+- **Update daily** (on by default): while the dashboard runs, once every 24 hours. Switch it off on `K`, or with
+  `aisbx skills auto-update off`.
+- *Update from repositories* (`u`) runs it at once, then `sbx skills update` for skills added with plain `sbx`.
+- `aisbx skills update` runs it from a script ([`aisbx skills`](headless.md#aisbx-skills)).
+
+Each update reports what changed: on the status line, and under *Update daily* on `K` (*last update 2 hours ago:
+1 changed*, and the lines on the row). An update that fails for a repository says why and changes nothing of it;
+the next update tries again. A fetch never asks for credentials: a private repository needs your SSH key, the GitHub
+CLI or `GITHUB_TOKEN`, as for [skill repositories](#sources-and-methods). An imported skill changes only when you
+import it again.
 
 **A skill's scripts are code: an update brings new code into every sandbox that has the skill on.**
 
@@ -134,8 +154,8 @@ in it stay.
 
 ## Skill repositories (`aisbx skill-repo`)
 
-**Deprecated:** add the skills to the store instead: `sbx skills add REPO --skill NAME`, or `K`, then `a`. Then
-switch them on ([Switches](#switches)). The commands below keep working and warn on stderr. See
+**Deprecated:** add the repository on `K` instead (`a`): every skill comes in, off, and the repository is kept in
+step. Then switch them on ([Switches](#switches)). The commands below keep working and warn on stderr. See
 [Deprecations](deprecations.md#skill-repos).
 
 aisbx keeps a list of skill repositories, public or private, and a local mirror of each. Sandboxes take skills from
