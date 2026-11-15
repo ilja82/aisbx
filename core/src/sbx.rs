@@ -1875,6 +1875,8 @@ pub struct DiskUsage {
     pub summaries: Vec<DiskSummary>,
     #[serde(default)]
     pub containers: Vec<DiskContainer>,
+    #[serde(default)]
+    pub images: Vec<DiskImage>,
 }
 
 /// One kind of resource in [`DiskUsage::summaries`]. Sizes are bytes.
@@ -1905,6 +1907,52 @@ pub struct DiskContainer {
     pub size: u64,
     #[serde(default)]
     pub state: String,
+    /// The image it runs, short (`sandbox-kit-assembled:<hash>`) where [`DiskImage::names`] are long.
+    #[serde(default)]
+    pub image: String,
+}
+
+/// One image in [`DiskUsage::images`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct DiskImage {
+    #[serde(default)]
+    pub id: String,
+    /// Every tag of the image, long (`docker.io/library/sandbox-kit-assembled:<hash>`).
+    #[serde(default)]
+    pub names: Vec<String>,
+    /// The containers that run this very tag; another tag of the same kit set does not count.
+    #[serde(default)]
+    pub containers: u64,
+    #[serde(default)]
+    pub created_at: String,
+    /// Bytes no other image shares: what removing it frees.
+    #[serde(default)]
+    pub unique_size: u64,
+}
+
+/// The repositories of the images sbx builds from kits: the assembled sandbox image with its
+/// `-template` and `-kit-<n>` tags, and each kit's staged sources.
+pub const KIT_IMAGE_REPOS: [&str; 2] = ["sandbox-kit-assembled", "sbx-kit-src"];
+
+/// A kit image younger than this stays: another process may be creating a sandbox from it.
+pub const KIT_IMAGE_MIN_AGE_SECS: u64 = 60 * 60;
+
+/// `docker.io/library/x:t` and `docker.io/x/y:t` as sbx shortens them for a container.
+fn short_image_name(name: &str) -> &str {
+    (name.strip_prefix("docker.io/library/"))
+        .or_else(|| name.strip_prefix("docker.io/"))
+        .unwrap_or(name)
+}
+
+fn is_kit_image(name: &str) -> bool {
+    let (repo, tag) = short_image_name(name).split_once(':').unwrap_or_default();
+    KIT_IMAGE_REPOS.contains(&repo) && !tag.is_empty()
+}
+
+/// The kit set an assembled tag belongs to: `<hash>` of `<hash>`, `<hash>-template`, `<hash>-kit-0`.
+fn kit_set_of(name: &str) -> Option<&str> {
+    let tag = short_image_name(name).strip_prefix("sandbox-kit-assembled:")?;
+    Some(tag.split_once('-').map_or(tag, |(hash, _)| hash))
 }
 
 /// The kinds `sbx df --json` sums up, as it spells them.
@@ -1930,6 +1978,43 @@ impl DiskUsage {
     pub fn summary(&self, kind: &str) -> Option<&DiskSummary> {
         self.summaries.iter().find(|s| s.kind == kind)
     }
+
+    /// The kit images no sandbox needs, at `now` (Unix seconds): every tag is a kit image, no
+    /// container runs any of them or another tag of their kit set, and the image is at least
+    /// [`KIT_IMAGE_MIN_AGE_SECS`] old. sbx's `rm` and `prune` leave these behind; the next create
+    /// of the same kit set builds them again.
+    pub fn unused_kit_images(&self, now: u64) -> Vec<&DiskImage> {
+        let used: Vec<&str> = (self.containers.iter())
+            .map(|c| short_image_name(&c.image))
+            .collect();
+        let used_sets: Vec<&str> = used.iter().filter_map(|n| kit_set_of(n)).collect();
+        let in_use = |name: &String| {
+            used.contains(&short_image_name(name))
+                || kit_set_of(name).is_some_and(|set| used_sets.contains(&set))
+        };
+        (self.images.iter())
+            .filter(|i| !i.id.is_empty() && i.containers == 0)
+            .filter(|i| !i.names.is_empty() && i.names.iter().all(|n| is_kit_image(n)))
+            .filter(|i| !i.names.iter().any(in_use))
+            .filter(|i| {
+                crate::state::parse_rfc3339(&i.created_at)
+                    .is_some_and(|at| now.saturating_sub(at) >= KIT_IMAGE_MIN_AGE_SECS)
+            })
+            .collect()
+    }
+}
+
+/// Remove one image, every tag of it, by its id. `--force`: sbx confirms on a terminal, and the
+/// caller has chosen the image with [`DiskUsage::unused_kit_images`]. sbx itself removes an image
+/// a sandbox runs, too.
+pub fn template_rm_argv(id: &str) -> Vec<String> {
+    vec![
+        "sbx".into(),
+        "template".into(),
+        "rm".into(),
+        "--force".into(),
+        id.into(),
+    ]
 }
 
 /// The host's disk usage by sbx. Read-only and quick; a failure is an error, never zero bytes.
@@ -2920,7 +3005,19 @@ mod live {
                 "{}: no container in sbx df --json",
                 s.name
             );
+            assert!(
+                container.is_some_and(|c| !c.image.is_empty()),
+                "{}: sbx df --json names no image for its container",
+                s.name
+            );
         }
+        assert!(!disk.images.is_empty(), "sbx df --json lists no image");
+        let unused = disk.unused_kit_images(crate::state::now_epoch());
+        println!(
+            "df: {} unused kit images, {} bytes",
+            unused.len(),
+            unused.iter().map(|i| i.unique_size).sum::<u64>()
+        );
         println!("ssh configured: {}", ssh_configured());
         // Approval requests, host-wide. A key that moves shows up here as an empty column, and a
         // shape that moves as a list the plain one disagrees with.
@@ -3950,6 +4047,73 @@ mod tests {
         );
         assert_eq!(size("claude-anthropic"), None, "a prefix is not a name");
         assert_eq!(size("other"), None);
+    }
+
+    #[test]
+    fn unused_kit_images_are_the_kit_images_no_container_needs() {
+        let raw = br#"{
+  "containers": [
+    {"name": "agy-a", "image": "sandbox-kit-assembled:84e04968f869b483", "state": "stopped"},
+    {"name": "shop", "image": "docker/sandbox-templates:claude-code-docker", "state": "stopped"},
+    {"name": "pi-swap-85fe64ea", "image": "sandbox-kit-assembled:56fba94b004c63e6",
+     "state": "running"},
+    {"name": "src", "image": "sbx-kit-src:aisbx-models-b2c58044e4c3", "state": "stopped"}
+  ],
+  "images": [
+    {"containers": 1, "id": "sha256:inuse", "created_at": "2026-10-01T00:00:00Z",
+     "names": ["docker.io/library/sandbox-kit-assembled:84e04968f869b483"], "unique_size": 9},
+    {"containers": 0, "id": "sha256:sibling", "created_at": "2026-10-01T00:00:00Z",
+     "names": ["docker.io/library/sandbox-kit-assembled:84e04968f869b483-template"]},
+    {"containers": 0, "id": "sha256:shared", "created_at": "2026-10-01T00:00:00Z",
+     "names": ["docker.io/library/sandbox-kit-assembled:4354cc2f941c6ada-kit-0",
+               "docker.io/library/sandbox-kit-assembled:56fba94b004c63e6-kit-0",
+               "docker.io/library/sbx-kit-src:pi-local-198830dea58a"]},
+    {"containers": 0, "id": "sha256:srcused", "created_at": "2026-10-01T00:00:00Z",
+     "names": ["docker.io/library/sbx-kit-src:aisbx-models-b2c58044e4c3"]},
+    {"containers": 0, "id": "sha256:base", "created_at": "2026-10-01T00:00:00Z",
+     "names": ["docker.io/docker/sandbox-templates:claude-code-docker"]},
+    {"containers": 0, "id": "sha256:otherbase", "created_at": "2026-10-01T00:00:00Z",
+     "names": ["docker.io/sbx/shell:latest"]},
+    {"containers": 0, "id": "sha256:untagged", "created_at": "2026-10-01T00:00:00Z",
+     "names": []},
+    {"containers": 0, "id": "sha256:mixed", "created_at": "2026-10-01T00:00:00Z",
+     "names": ["docker.io/library/sandbox-kit-assembled:aaaaaaaaaaaaaaaa",
+               "docker.io/library/mine:v1"]},
+    {"containers": 0, "id": "sha256:new", "created_at": "2026-11-15T11:30:00Z",
+     "names": ["docker.io/library/sandbox-kit-assembled:bbbbbbbbbbbbbbbb"]},
+    {"containers": 0, "id": "sha256:nodate",
+     "names": ["docker.io/library/sandbox-kit-assembled:cccccccccccccccc"]},
+    {"containers": 0, "id": "sha256:orphan", "created_at": "2026-10-01T00:00:00.123Z",
+     "names": ["docker.io/library/sandbox-kit-assembled:1107f060e5a014e8",
+               "docker.io/library/sbx-kit-src:probe-hm-kit-114bd2ca3dc0"], "unique_size": 7},
+    {"containers": 0, "id": "sha256:orphantemplate", "created_at": "2026-10-01T00:00:00Z",
+     "names": ["docker.io/library/sandbox-kit-assembled:0a506c9900c8e97a-template"]},
+    {"containers": 0, "id": "sha256:orphansrc", "created_at": "2026-10-01T00:00:00Z",
+     "names": ["docker.io/library/sbx-kit-src:sfprobe-0123456789ab"]}
+  ]
+}"#;
+        let disk: DiskUsage = parse_json(raw).unwrap();
+        let now = crate::state::parse_rfc3339("2026-11-15T12:00:00Z").unwrap();
+        let ids: Vec<&str> = (disk.unused_kit_images(now).iter())
+            .map(|i| i.id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            ["sha256:orphan", "sha256:orphantemplate", "sha256:orphansrc"]
+        );
+        assert_eq!(disk.unused_kit_images(now)[0].unique_size, 7);
+        let none_run = DiskUsage {
+            containers: Vec::new(),
+            ..disk.clone()
+        };
+        assert!(
+            (none_run.unused_kit_images(now).iter()).any(|i| i.id == "sha256:sibling"),
+            "a kit set is free once no container runs it"
+        );
+        assert_eq!(
+            template_rm_argv("sha256:orphan"),
+            ["sbx", "template", "rm", "--force", "sha256:orphan"]
+        );
     }
 
     #[test]

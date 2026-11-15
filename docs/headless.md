@@ -228,7 +228,7 @@ protocol, the sbx version and whether it is new enough, whether sbx is signed in
 deny-all fallback, the user kit folders searched, and every kit found or skipped. It exits 0 whatever it finds; the
 `problems` list and `ok` say what is wrong.
 
-### `aisbx ls`, `status`, `stop` and `rm`
+### `aisbx ls`, `status`, `stop`, `rm` and `prune-images`
 
 - `ls [--json]` lists every local sandbox in sbx's order and changes nothing. A line has five tab-separated fields:
   name, status, agent, the primary workspace (empty if none) and the label. The label is the one `aisbx up --label`
@@ -240,7 +240,13 @@ deny-all fallback, the user kit folders searched, and every kit found or skipped
   (`detached`), the agent, workspaces, kits, and the requests it holds for approval. It exits 1 for an unknown
   sandbox.
 - `stop NAME` stops the sandbox.
-- `rm NAME` removes it. It never touches the workspace.
+- `rm NAME` removes it. It never touches the workspace. sbx keeps the sandbox's
+  [kit image](sandboxes.md#unused-kit-images).
+- `prune-images [--dry-run]` removes the kit images that no sandbox runs. It prints one line per image: the size,
+  a tab and the image's first tag. A summary goes to stderr. `--dry-run` only prints. It exits 125 and removes
+  nothing if sbx cannot be read, or if `sbx df` lists no container for a sandbox. It exits 1 if a removal failed.
+  Run it when no other script creates sandboxes: it keeps images younger than one hour, but a create can reuse an
+  older one.
 
 ## The contract and exit codes
 

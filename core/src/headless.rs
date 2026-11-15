@@ -88,6 +88,9 @@ HEADLESS USE — the same kits and names as the dashboard, for scripts:
     aisbx status NAME [--json]     state, agent, kits, held requests (exit 1 if unknown)
     aisbx stop NAME                stop it
     aisbx rm NAME                  remove it (the workspace is never touched)
+    aisbx prune-images [--dry-run] remove the kit images no sandbox runs, which sbx rm and
+                                   sbx prune leave behind, and print each: size, then tag.
+                                   Images made in the last hour stay. --dry-run only prints
 
     aisbx litellm ls [--json]      the LiteLLM connections: name, URL, models, key stored
     aisbx litellm add FILE.json [--key-stdin] [--replace]
@@ -175,12 +178,13 @@ pub fn is_subcommand(arg: &str) -> bool {
             | "folders"
             | "skill-repo"
             | "skill"
+            | "prune-images"
     )
 }
 
 /// The command lines core's own jobs run as this very binary ([`job_argv`]), by their first
 /// words. `aisbx` takes every subcommand; `aisbx-ui` hands only these to [`exit`].
-pub const JOB_COMMANDS: [&[&str]; 2] = [&["skill"], &["local", "fetch"]];
+pub const JOB_COMMANDS: [&[&str]; 3] = [&["skill"], &["local", "fetch"], &["prune-images"]];
 
 /// Whether `args` start with one of [`JOB_COMMANDS`].
 pub fn is_job_command<S: AsRef<str>>(args: &[S]) -> bool {
@@ -229,6 +233,7 @@ pub fn main(args: &[String]) -> u8 {
         "folders" => folders_cmd(&state::state_dir(), rest, &mut std::io::stdout()),
         "skill-repo" => skill_repo(rest),
         "skill" => skill(rest),
+        "prune-images" => prune_images(rest),
         other => Err(Fail::usage(format!("unknown subcommand: {other}"))),
     };
     match result {
@@ -1831,6 +1836,66 @@ pub(crate) fn rm_inner(name: &str) -> Result<(), Fail> {
         eprintln!("aisbx: warning: the skill selection of {name} was not dropped ({e:#})");
     }
     Ok(())
+}
+
+/// `aisbx prune-images [--dry-run]`: [`sbx::DiskUsage::unused_kit_images`], removed.
+fn prune_images(raw: &[String]) -> Outcome {
+    let args = Args::parse(raw, &["dry-run"], &[])?;
+    if let Some(extra) = args.positional.first().or(args.trailing.first()) {
+        return Err(Fail::usage(format!(
+            "prune-images takes no argument: {extra}"
+        )));
+    }
+    let disk = sbx::disk_usage().map_err(|e| Fail::sandbox(format!("{e:#}")))?;
+    let names: Vec<String> = (sbx::list().map_err(|e| Fail::sandbox(format!("{e:#}")))?)
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    let mut remove = |argv: &[String]| step(argv, false).is_ok_and(|s| s.success());
+    prune_images_in(
+        &disk,
+        &names,
+        state::now_epoch(),
+        args.has("dry-run"),
+        &mut remove,
+        &mut std::io::stdout(),
+    )
+}
+
+/// [`prune_images`] on what sbx reported. It removes nothing when `sbx df` lists no container for
+/// one of `sandboxes`: the images that sandbox runs would look unused.
+pub(crate) fn prune_images_in(
+    disk: &sbx::DiskUsage,
+    sandboxes: &[String],
+    now: u64,
+    dry_run: bool,
+    remove: &mut dyn FnMut(&[String]) -> bool,
+    out: &mut dyn Write,
+) -> Outcome {
+    if let Some(name) = sandboxes.iter().find(|n| disk.container_of(n).is_none()) {
+        return Err(Fail::sandbox(format!(
+            "sbx df lists no container for {name}: no image removed"
+        )));
+    }
+    let (mut freed, mut failed) = (0, 0);
+    for image in disk.unused_kit_images(now) {
+        if !dry_run && !remove(&sbx::template_rm_argv(&image.id)) {
+            failed += 1;
+            continue;
+        }
+        freed += image.unique_size;
+        let tag = image
+            .names
+            .first()
+            .map_or(image.id.as_str(), |n| n.as_str());
+        let _ = writeln!(out, "{}\t{tag}", crate::stats::disk_size(image.unique_size));
+    }
+    let verb = if dry_run { "would free" } else { "freed" };
+    eprintln!("aisbx: {verb} {}", crate::stats::disk_size(freed));
+    match failed {
+        0 => Ok(0),
+        n => Err(Fail::failed(format!("{n} image(s) not removed"))),
+    }
 }
 
 /// `aisbx doctor [--json]`: what a script needs to know before its first `up` or `step`.
@@ -4784,6 +4849,7 @@ mod tests {
             &["skill", "sync", "box"],
             &["local", "fetch", "llama-server"],
             &["local", "fetch", "llama-server", "--key-stdin"],
+            &["prune-images"],
         ] {
             assert!(is_job_command(args), "{args:?}");
             assert!(is_subcommand(args[0]), "{args:?}");
@@ -4799,6 +4865,111 @@ mod tests {
         ] {
             assert!(!is_job_command(args), "{args:?}");
         }
+    }
+
+    fn kit_disk() -> sbx::DiskUsage {
+        serde_json::from_str(
+            r#"{
+  "containers": [{"name": "keep", "image": "sandbox-kit-assembled:84e04968f869b483"}],
+  "images": [
+    {"containers": 1, "id": "sha256:used", "created_at": "2026-10-01T00:00:00Z",
+     "names": ["docker.io/library/sandbox-kit-assembled:84e04968f869b483"]},
+    {"containers": 0, "id": "sha256:one", "created_at": "2026-10-01T00:00:00Z",
+     "unique_size": 2500000000,
+     "names": ["docker.io/library/sandbox-kit-assembled:1107f060e5a014e8"]},
+    {"containers": 0, "id": "sha256:two", "created_at": "2026-10-01T00:00:00Z",
+     "unique_size": 1000, "names": ["docker.io/library/sbx-kit-src:sfprobe-0123456789ab"]}
+  ]
+}"#,
+        )
+        .unwrap()
+    }
+
+    const KIT_NOW: u64 = 1_794_700_000;
+
+    #[test]
+    fn prune_images_removes_each_unused_kit_image_by_id_and_prints_it() {
+        let mut ran: Vec<Vec<String>> = Vec::new();
+        let mut out = Vec::new();
+        let code = prune_images_in(
+            &kit_disk(),
+            &["keep".into()],
+            KIT_NOW,
+            false,
+            &mut |argv| {
+                ran.push(argv.to_vec());
+                true
+            },
+            &mut out,
+        );
+        assert_eq!(code.unwrap(), 0);
+        assert_eq!(
+            ran,
+            [
+                sbx::template_rm_argv("sha256:one"),
+                sbx::template_rm_argv("sha256:two")
+            ]
+        );
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "2.5 GB\tdocker.io/library/sandbox-kit-assembled:1107f060e5a014e8\n\
+             1.0 kB\tdocker.io/library/sbx-kit-src:sfprobe-0123456789ab\n"
+        );
+    }
+
+    #[test]
+    fn prune_images_dry_run_removes_nothing() {
+        let mut out = Vec::new();
+        let code = prune_images_in(
+            &kit_disk(),
+            &["keep".into()],
+            KIT_NOW,
+            true,
+            &mut |argv| panic!("ran {argv:?}"),
+            &mut out,
+        );
+        assert_eq!(code.unwrap(), 0);
+        assert_eq!(String::from_utf8(out).unwrap().lines().count(), 2);
+    }
+
+    #[test]
+    fn prune_images_removes_nothing_when_a_sandbox_has_no_container_in_df() {
+        let fail = prune_images_in(
+            &kit_disk(),
+            &["keep".into(), "lost".into()],
+            KIT_NOW,
+            false,
+            &mut |argv| panic!("ran {argv:?}"),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert_eq!(fail.code, EXIT_SANDBOX);
+        assert!(fail.message.contains("lost"), "{}", fail.message);
+    }
+
+    #[test]
+    fn prune_images_exits_1_when_a_removal_fails_and_prints_only_the_removed() {
+        let mut out = Vec::new();
+        let fail = prune_images_in(
+            &kit_disk(),
+            &["keep".into()],
+            KIT_NOW,
+            false,
+            &mut |argv| argv.last().is_some_and(|id| id == "sha256:two"),
+            &mut out,
+        )
+        .unwrap_err();
+        assert_eq!(fail.code, 1);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "1.0 kB\tdocker.io/library/sbx-kit-src:sfprobe-0123456789ab\n"
+        );
+    }
+
+    #[test]
+    fn prune_images_takes_no_argument() {
+        let fail = prune_images(&["x".into()]).unwrap_err();
+        assert_eq!(fail.code, EXIT_USAGE);
     }
 
     #[cfg(debug_assertions)]
