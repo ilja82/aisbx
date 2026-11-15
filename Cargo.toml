@@ -8,3 +8,9 @@ edition = "2021"
 license = "MIT"
 repository = "https://github.com/ilja82/aisbx"
 publish = false
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

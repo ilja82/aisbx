@@ -2711,6 +2711,9 @@ pub struct PostJob {
     pub resume: Option<Restore>,
     /// The create succeeded: keep the form's answers as the next form's defaults.
     pub defaults: Option<crate::state::CreateDefaults>,
+    /// A sandbox is gone or was rebuilt: remove the kit images no sandbox runs any more, in the
+    /// background (`aisbx prune-images`).
+    pub prune_kit_images: bool,
     // No field for detached mode: `sbx ls --json` reports it (`detached`).
 }
 
@@ -3455,6 +3458,17 @@ impl App {
     }
 
     fn apply_post(&mut self, post: &PostJob) {
+        if post.prune_kit_images && !cfg!(any(test, feature = "test-support")) {
+            let argv = crate::headless::job_argv(&["prune-images"]);
+            std::thread::spawn(move || {
+                let _ = std::process::Command::new(&argv[0])
+                    .args(&argv[1..])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            });
+        }
         if post.reread_settings {
             if let Screen::Settings(form) = &mut self.screen {
                 form.read();
@@ -7912,6 +7926,7 @@ impl App {
                 steps,
                 post: PostJob {
                     forget: Some(name),
+                    prune_kit_images: true,
                     ..Default::default()
                 },
                 fallback: None,
@@ -7996,7 +8011,10 @@ impl App {
                 title: "Pruning stopped sandboxes".into(),
                 // --force: the job runner has no terminal for sbx's prompt; the dashboard asked.
                 steps: vec![Step::new("sbx prune --force", sbx::prune_argv())],
-                post: PostJob::default(),
+                post: PostJob {
+                    prune_kit_images: true,
+                    ..Default::default()
+                },
                 fallback: None,
                 fallback_hint: None,
             },
@@ -10303,6 +10321,7 @@ impl App {
                         token,
                         conn.as_ref().map(|c| c.name.as_str()),
                     ),
+                    prune_kit_images: true,
                     ..Default::default()
                 },
                 fallback: None,
@@ -10765,7 +10784,6 @@ fn on_token(sb: &Sandbox, token: &str) -> bool {
         .is_some_and(|a| a.token_name() == Some(token))
 }
 
-/// "a", "a and b", "a, b and c" — for prose about the other sandboxes a shared token reaches.
 /// The prune confirmation's disk lines, from `sbx df`: what the containers of the sandboxes
 /// `names` hold, then what sbx estimates the host's unused images, containers and volumes hold.
 fn prune_disk_lines(disk: &sbx::DiskUsage, names: &[&str]) -> Vec<String> {
@@ -10802,6 +10820,7 @@ fn prune_disk_lines(disk: &sbx::DiskUsage, names: &[&str]) -> Vec<String> {
     out
 }
 
+/// "a", "a and b", "a, b and c" — for prose about the other sandboxes a shared token reaches.
 fn join_names(names: &[String]) -> String {
     match names.len() {
         0 => String::new(),
@@ -13150,6 +13169,7 @@ mod tests {
             name: name.into(),
             size,
             state: "stopped".into(),
+            ..Default::default()
         };
         let summary = |kind: &str, reclaimable| sbx::DiskSummary {
             kind: kind.into(),
@@ -13167,6 +13187,7 @@ mod tests {
                 container("swapped-swap-dc5b1b77", 900_000_000),
                 container("running", 9),
             ],
+            ..Default::default()
         };
         assert_eq!(
             prune_disk_lines(&disk, &["old", "swapped", "gone"]),
@@ -13269,6 +13290,35 @@ mod tests {
             "its files live inside it, and go with it: {:?}",
             confirm.body
         );
+    }
+
+    #[test]
+    fn delete_prune_and_rebuild_remove_the_kit_images_left_unused_afterwards() {
+        let sb = model::sample("claude-litellm-proj", Some("claude-litellm"), &[]);
+        let mut sb_stopped = model::sample("claude-anthropic-old", Some("claude-anthropic"), &[]);
+        sb_stopped.running = false;
+        let mut app = App::for_test(Catalog::load().unwrap(), vec![sb, sb_stopped]);
+        let job = |app: &App| match &app.modal {
+            Some(Modal::Confirm(c)) => c.job.clone(),
+            _ => panic!("asks first"),
+        };
+        app.cursor = (0..10)
+            .find(|&c| {
+                app.cursor = c;
+                app.selected()
+                    .is_some_and(|s| s.name == "claude-litellm-proj")
+            })
+            .expect("its row");
+        app.action_delete();
+        assert!(job(&app).post.prune_kit_images, "delete");
+        app.modal = None;
+        app.action_prune();
+        assert!(job(&app).post.prune_kit_images, "prune");
+        let rebuild = app
+            .recreate_job("claude-litellm-proj", &[], None)
+            .expect("a rebuild plan");
+        assert!(rebuild.post.prune_kit_images, "rebuild");
+        assert!(!PostJob::default().prune_kit_images, "no other job");
     }
 
     fn open_secrets(app: &mut App) -> Vec<SecretRow> {

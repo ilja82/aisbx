@@ -117,6 +117,23 @@ images, containers and volumes on the host. That count is sbx's estimate: `sbx p
 | --- | --- |
 | the container | workspace files |
 | sandbox-scoped secrets | named tokens, the `/login`, the skills store, kit volumes (the session history) |
+| [kit images no sandbox runs](#unused-kit-images) | the base images, such as `docker/sandbox-templates` |
+
+## Unused kit images
+
+sbx builds one image for each set of kits a sandbox uses. `sbx rm` and `sbx prune` keep that image, so each deleted
+sandbox and each rebuild with other kits leaves one behind. Most are small, but one can hold several GB.
+
+The dashboard removes these images in the background after a delete (`d`), a prune (`P`) and a rebuild (`R`). In
+scripts, run `aisbx prune-images` ([Headless](headless.md#aisbx-ls-status-stop-rm-and-prune-images)).
+
+An image is removed only if all of these are true:
+
+- each of its tags is a kit image: `sandbox-kit-assembled:…` or `sbx-kit-src:…`;
+- no container of any sandbox runs it or another image of its kit set;
+- it is at least one hour old, so another create can still use it.
+
+sbx builds a removed image again at the next create with the same kits. This takes time, but loses no data.
 
 ## Always starting on the current agent
 
@@ -344,6 +361,7 @@ build and a Gradle build ran as fast at 4 CPUs and 4 GiB.
 | Answer a request | `sbx policy approval respond <id> --option allow` (or `dismiss`) |
 | Prune | `sbx prune --dry-run`, then `sbx prune`; add `--filter until=168h` to keep what stopped in the last week |
 | Disk use | `sbx df`; `--verbose` lists each image, container and volume |
+| Remove a kit image | `sbx df --verbose` to find an image no container runs, then `sbx template rm --force <image id>` |
 | Connect over SSH | `sbx setup ssh` once, then `ssh <name>.sbx` |
 | Detach an MCP server | `sbx mcp unload notion --sandbox my-sandbox` |
 | Create without MCP servers | `sbx create --static-mcp none …` |
