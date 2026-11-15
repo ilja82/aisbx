@@ -53,8 +53,8 @@ aisbx builds on these sbx features. It does not replace them.
   ([Telemetry](docs/network.md#telemetry-and-non-essential-traffic)).
 - **Credential bindings set for you:** without a binding, sbx silently withholds a credential. aisbx adds it before
   each create, rebuild or start ([Credentials](docs/accounts.md#credentials)).
-- **Skill repositories:** Git repositories of skills that aisbx mirrors, with skills picked per sandbox
-  ([Skill repositories](docs/skills.md#skill-repositories-aisbx-skill-repo)).
+- **Skill switches:** switch each skill of the sbx store on or off for all sandboxes, and per sandbox, grouped by
+  where the skills came from ([Switches](docs/skills.md#switches)).
 - **A dashboard** in the terminal (`aisbx`) and as a desktop window (`aisbx-ui`): many sandboxes per project, a
   create wizard, approvals, rebuilds that keep your settings, and update detection ([The aisbx dashboard](docs/dashboard.md)).
 - **Headless commands** for scripts and CI, and `aisbx step`, one sandboxed unit of work per process with a

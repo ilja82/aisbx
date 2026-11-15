@@ -1234,8 +1234,8 @@ fn kits_step(ui: &mut egui::Ui, at: &mut Draw<'_, '_>) {
     }
 }
 
-/// Step 6: the label, the start folder and the folders picked to mount, the options, and under a
-/// fold the ports, the blocked hosts and the MCP servers.
+/// Step 6: the label, the start folder and the folders picked to mount, the options, under a fold
+/// the shared store's skills, and under another the ports, the blocked hosts and the MCP servers.
 fn workspace_step(ui: &mut egui::Ui, at: &mut Draw<'_, '_>) {
     let catalog = &at.app.catalog;
     let form = at.form;
@@ -1330,6 +1330,13 @@ fn workspace_step(ui: &mut egui::Ui, at: &mut Draw<'_, '_>) {
             at.list.choose(index, value);
         }
     }
+    if form.store_skills_offered(catalog) {
+        let open = form.wizard.skills_open;
+        fold(ui, at, CreateRow::SkillsFold, SHARED_SKILLS, open);
+        if open {
+            nested(ui, |ui| store_skills(ui, at));
+        }
+    }
 
     let open = form.wizard.advanced_open;
     fold(ui, at, CreateRow::AdvancedFold, "More options", open);
@@ -1337,6 +1344,42 @@ fn workspace_step(ui: &mut egui::Ui, at: &mut Draw<'_, '_>) {
         return;
     }
     nested(ui, |ui| advanced(ui, at));
+}
+
+/// The title of the Workspace step's fold over the shared store's skills, and the badge of a skill
+/// whose switch is the new sandbox's own.
+pub const SHARED_SKILLS: &str = "Shared skills";
+pub const OWN: &str = "Own";
+
+/// Under the *Shared skills* fold: a tick per skill of the shared store, ticked where the new
+/// sandbox gets it, with [`OWN`] where its switch differs from the one for all sandboxes.
+fn store_skills(ui: &mut egui::Ui, at: &mut Draw<'_, '_>) {
+    let form = at.form;
+    let dark = dark(ui);
+    let weak = ui.visuals().weak_text_color();
+    let width = ui.available_width().min(FIELD + 120.0);
+    for (i, skill) in form.workspace.store_skills.iter().enumerate() {
+        let row = WizardRow::Field(CreateRow::StoreSkill(i));
+        let mut badges = Vec::new();
+        if form.store_skill_own(i) {
+            badges.push(Badge {
+                text: OWN,
+                color: weak,
+            });
+        }
+        let item = Item {
+            mark: Mark::Check,
+            title: skill,
+            detail: "",
+            badges,
+            color: theme::accent(dark),
+            checked: form.store_skill_on(i),
+            enabled: true,
+            focused: at.focused(row),
+        };
+        let response = controls::check_item(ui, item, width);
+        at.take(response, row);
+    }
 }
 
 /// The folders picked to mount, each with its access and *Remove*, then *Mount a folder…*.

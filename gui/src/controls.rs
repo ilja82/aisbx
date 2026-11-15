@@ -1,6 +1,7 @@
 //! The create wizard's controls: option tiles, check items, input boxes, a segmented choice, folds,
-//! badges and banners. Each is painted from core's form, takes no keyboard, reports its role to the
-//! accessibility tree, and shows core's cursor as a ring outside it.
+//! badges and banners, and the pages' switches. Each is painted from core's form, takes no
+//! keyboard, reports its role to the accessibility tree, and shows core's cursor as a ring outside
+//! it.
 
 use aisbx_core::app::TextInput;
 use eframe::egui::{
@@ -323,6 +324,101 @@ pub fn check_item(ui: &mut egui::Ui, item: Item<'_>, width: f32) -> Response {
     response
         .widget_info(|| egui::WidgetInfo::selected(role, item.enabled, item.checked, item.title));
     match item.enabled {
+        true => response.on_hover_cursor(egui::CursorIcon::PointingHand),
+        false => response,
+    }
+}
+
+/// Something that is on or off, as a switch: its word, then a pill with a knob. On, the pill is
+/// filled in the running green with the knob at its right; off, it is hollow, its knob at its
+/// left. A disabled switch is drawn faded and takes no click.
+pub struct Switch<'a> {
+    /// What it turns on and off, for the accessibility tree.
+    pub label: &'a str,
+    pub on: bool,
+    pub enabled: bool,
+}
+
+/// The word beside a switch that is on, and beside one that is off.
+pub const ON: &str = "On";
+pub const OFF: &str = "Off";
+
+/// A switch's pill, and the room between its word and the pill.
+const TRACK: Vec2 = Vec2::new(40.0, 22.0);
+const WORD_GAP: f32 = 8.0;
+
+/// The knob's radius, and its radius under the pointer.
+const KNOB: f32 = 7.0;
+const KNOB_HOVERED: f32 = 8.0;
+
+/// A switch's word, laid out in its size.
+fn switch_word(ui: &egui::Ui, word: &str, color: Color32) -> std::sync::Arc<egui::Galley> {
+    (ui.painter()).layout_no_wrap(word.to_string(), FontId::proportional(13.0), color)
+}
+
+/// How wide [`switch`] is drawn: the longer of its two words, the gap and the pill, so the
+/// switch keeps its size and place as it turns.
+pub fn switch_width(ui: &egui::Ui) -> f32 {
+    let word = |w: &str| switch_word(ui, w, Color32::PLACEHOLDER).size().x;
+    word(ON).max(word(OFF)) + WORD_GAP + TRACK.x
+}
+
+/// Draw `switch` [`switch_width`] wide and `height` high, the pill at its right edge: its whole
+/// height takes a click, which is the caller's to hand to core.
+pub fn switch(ui: &mut egui::Ui, switch: Switch<'_>, height: f32) -> Response {
+    let ink = Ink::of(ui);
+    let sense = match switch.enabled {
+        true => Sense::CLICK,
+        false => Sense::hover(),
+    };
+    let size = Vec2::new(switch_width(ui), height.max(TRACK.y));
+    let (rect, response) = ui.allocate_exact_size(size, sense);
+    let hovered = switch.enabled && response.hovered();
+    let track = Rect::from_center_size(
+        Pos2::new(rect.right() - TRACK.x / 2.0, rect.center().y),
+        TRACK,
+    );
+    let ends = TRACK.y / 2.0;
+    let fade = |c: Color32| match switch.enabled {
+        true => c,
+        false => c.gamma_multiply(0.5),
+    };
+    let (word, word_color, knob_x, knob_color) = match switch.on {
+        true => (
+            ON,
+            theme::running(ink.dark),
+            track.right() - ends,
+            theme::on_running(ink.dark),
+        ),
+        false => (OFF, ink.weak, track.left() + ends, ink.weak),
+    };
+    let painter = ui.painter();
+    if switch.on {
+        painter.rect_filled(track, ends, fade(theme::running(ink.dark)));
+    } else {
+        let edge = match hovered {
+            true => ink.text,
+            false => ink.weak,
+        };
+        let edge = Stroke::new(1.5, fade(edge));
+        painter.rect(track, ends, ink.field, edge, StrokeKind::Inside);
+    }
+    let radius = if hovered { KNOB_HOVERED } else { KNOB };
+    painter.circle_filled(
+        Pos2::new(knob_x, track.center().y),
+        radius,
+        fade(knob_color),
+    );
+    let galley = switch_word(ui, word, fade(word_color));
+    let at = Pos2::new(
+        track.left() - WORD_GAP - galley.size().x,
+        rect.center().y - galley.size().y / 2.0,
+    );
+    ui.painter().galley(at, galley, fade(word_color));
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::Role::Switch, switch.enabled, switch.on, switch.label)
+    });
+    match switch.enabled {
         true => response.on_hover_cursor(egui::CursorIcon::PointingHand),
         false => response,
     }
@@ -695,5 +791,18 @@ mod tests {
             tree.contains("RadioButton") && tree.contains("Claude Code"),
             "{tree}"
         );
+
+        for (on, state) in [(true, "True"), (false, "False")] {
+            let tree = told(|ui| {
+                let switch = Switch {
+                    label: "pdf",
+                    on,
+                    enabled: true,
+                };
+                super::switch(ui, switch, 40.0);
+            });
+            assert!(tree.contains("Switch") && tree.contains("pdf"), "{tree}");
+            assert!(tree.contains(&format!("toggled: {state}")), "{on}: {tree}");
+        }
     }
 }

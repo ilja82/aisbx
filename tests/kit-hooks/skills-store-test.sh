@@ -121,6 +121,62 @@ behaviour() {
     sh -c '[ -d "$1" ] && [ ! -L "$1" ] && [ -L "$1/alpha" ]' sh "$D"
   check "the store itself is never written" same "$(cd "$S" && find . | sort | tr '\n' ' ')" \
     ". ./alpha ./alpha/SKILL.md ./beta ./beta/SKILL.md ./notes "
+
+  F=$scratch/home/.config/aisbx/store-skills
+  only() { AISBX_SKILLS_STORE=$S AISBX_SKILLS_STORE_MOUNTS=$M AISBX_SKILLS_FILTER=$F \
+    sh "$hook" --only "$@" 2>"$scratch/err"; }
+  filtered() { AISBX_SKILLS_STORE=$S AISBX_SKILLS_STORE_MOUNTS=$M AISBX_SKILLS_FILTER=$F \
+    sh "$hook" "$D" 2>"$scratch/err"; }
+  D2=$scratch/home/.agents/skills
+  rm -rf "$D" "$D2"
+  mounted ro
+  only beta -- "$D" "$D2"
+  check "only: exits 0" same "$?" 0
+  check "only: writes the filter file" grep -qx beta "$F"
+  check "only: links the named skill into every folder" sh -c \
+    '[ "$(readlink "$1/beta")" = "$3/beta" ] && [ "$(readlink "$2/beta")" = "$3/beta" ]' sh "$D" "$D2" "$S"
+  check "only: does not link a skill it does not name" not test -L "$D/alpha"
+
+  filtered
+  check "filter: a plain start keeps the choice" sh -c '[ -L "$1/beta" ] && [ ! -L "$1/alpha" ]' sh "$D"
+
+  only alpha -- "$D"
+  check "filter: a skill no longer named loses its link" not test -L "$D/beta"
+  check "filter: the newly named one is linked" link_to "$D/alpha" "$S/alpha"
+
+  mkdir -p "$D/mine"
+  touch "$D/mine/SKILL.md"
+  only -- "$D"
+  check "only: no names links no store skill" sh -c '[ ! -L "$1/alpha" ] && [ ! -L "$1/beta" ]' sh "$D"
+  check "only: …and keeps the agent's own skills" test -d "$D/mine"
+  check "only: …and still writes the filter file" same "$(grep -vc '^#' "$F")" 0
+
+  only nosuch "alpha beta" -- "$D"
+  check "filter: a name the store lacks links nothing" sh -c \
+    '[ -z "$(find "$1" -type l)" ]' sh "$D"
+
+  rm -rf "$D"
+  mounted rw
+  only -- "$D"
+  check "filter: a read-write store still gets the whole folder" link_to "$D" "$S"
+
+  rm "$D"
+  : > "$M"
+  only alpha -- "$D"
+  check "filter: the store off links nothing" not test -L "$D/alpha"
+
+  mounted ro
+  rm -rf "$D"
+  : > "$scratch/blocked"
+  AISBX_SKILLS_STORE=$S AISBX_SKILLS_STORE_MOUNTS=$M AISBX_SKILLS_FILTER=$scratch/blocked/store-skills \
+    sh "$hook" --only alpha -- "$D" 2>"$scratch/err"
+  check "only: a filter it cannot write fails the step" same "$?" 1
+  check "only: …says so" grep -q 'could not write' "$scratch/err"
+  check "only: …and still links the names it was given" sh -c \
+    '[ -L "$1/alpha" ] && [ ! -L "$1/beta" ]' sh "$D"
+
+  AISBX_SKILLS_STORE=$S AISBX_SKILLS_STORE_MOUNTS=$M AISBX_SKILLS_FILTER=$F sh "$hook" 2>"$scratch/err"
+  check "no folder: a usage error" same "$?" 2
 }
 
 case ${1-} in

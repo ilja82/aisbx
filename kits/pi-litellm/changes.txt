@@ -1,3 +1,4 @@
+The shared skills you switched off stay out of the agent, also at a plain sbx run start.
 The agent now gets the skills from the shared skills store.
 Built on Docker's maintained shell image instead of the shell template Docker no longer updates.
 Pi's file search now has fd, so Pi no longer warns that fd is missing.

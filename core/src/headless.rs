@@ -1,5 +1,5 @@
-//! `aisbx up | run | status | stop | rm`, `litellm`, `skill-repo` and `skill`: the dashboard's
-//! kits and sandboxes, driven by parameters, for scripts.
+//! `aisbx up | run | status | stop | rm`, `litellm`, `skills`, `skill-repo` and `skill`: the
+//! dashboard's kits and sandboxes, driven by parameters, for scripts.
 //!
 //! Scripts depend on this contract: stdout carries only the payload (`up`: the sandbox name,
 //! `run`: the agent's own output, `status --json`: one JSON document), and everything else goes to
@@ -13,9 +13,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::kits::{self, Catalog, HeadlessRun, OutputFormat};
+use crate::store_skills::{self, Scope, Switches};
 use crate::{
-    bindings, folders, litellm, model, models, sbx, skill_repos, skill_select, skill_source, state,
-    tmpfs, tokens,
+    bindings, compat, folders, litellm, model, models, sbx, skill_repos, skill_select,
+    skill_source, state, tmpfs, tokens,
 };
 
 /// Usage error: nothing ran.
@@ -51,8 +52,10 @@ HEADLESS USE — the same kits and names as the dashboard, for scripts:
                                disk after `aisbx rm` (sbx keeps a block volume, and no sbx command
                                deletes it), and their contents go at every stop
         --label TEXT           the label the dashboard shows
-        --skill REPO[#SKILL]   skills from a cached skill repo: all of it, or one skill
-                               (repeatable; see `aisbx skill`)
+        --skill-on SKILL       switch a skill of sbx's shared store on for this sandbox
+        --skill-off SKILL      switch one off for it (both repeatable; see `aisbx skills`)
+        --skill REPO[#SKILL]   deprecated, use --skill-on: skills from a cached skill repo,
+                               all of it or one skill (repeatable; see `aisbx skill`)
         --ssh-agent            forward the host SSH agent (off by default)
         --git-readonly         mount the workspace's .git folder read-only as well: the agent
                                reads the history but cannot commit or change hooks
@@ -123,6 +126,28 @@ HEADLESS USE — the same kits and names as the dashboard, for scripts:
         or rebuild, as it mounts the folders its workspace's companion.json names.
     aisbx folders rm DIR           drop it from the list
 
+    aisbx skills ls [SANDBOX] [--json]
+        The skills of sbx's shared store, one line each: name, source (~/.claude/skills,
+        owner/repo or -) and on or off for every sandbox; with SANDBOX also on or off for
+        it, and `own` where it has its own switch. The auto-update switch is the last line,
+        on stderr. --json prints one JSON document instead.
+    aisbx skills on|off --global SKILL ...   switch store skills on or off for every sandbox
+    aisbx skills on|off SANDBOX SKILL ...    the same for one sandbox: its own switches,
+                                             which win over those for every sandbox
+    aisbx skills default SANDBOX [SKILL ...] drop the sandbox's own switches (all of them
+                                             without SKILL)
+    aisbx skills auto-update [on|off]        print on or off, or set the daily update of
+                                             the store's Git skills, which the dashboard runs
+        Every skill is off until you switch it on. aisbx run and the dashboard link the
+        skills switched on for a sandbox before its agent starts; a sandbox that mounts the
+        store read-write gets every skill. A name the store does not hold yet is kept, with
+        a note. The switches are store-skills.json in aisbx's state folder. Exit codes: 2 a
+        refused name, 125 no such sandbox or sbx failed, 1 that file cannot be read or written.
+
+    Deprecated (docs/deprecations.md#skill-repos): aisbx skill-repo, aisbx skill and
+    up --skill. They keep working and warn once on stderr. Put the skills into the
+    shared store with `sbx skills add REPO`, then switch them with `aisbx skills`.
+
     aisbx skill-repo add SOURCE [--ref REF] [--via auto|gh|ssh|token|git]
         Keep a skill repository in aisbx's list and print its id. SOURCE is owner/repo
         (GitHub), https://host/path, ssh://[user@]host/path or user@host:path — never a token
@@ -176,6 +201,7 @@ pub fn is_subcommand(arg: &str) -> bool {
             | "litellm"
             | "local"
             | "folders"
+            | "skills"
             | "skill-repo"
             | "skill"
             | "prune-images"
@@ -218,6 +244,10 @@ pub fn main(args: &[String]) -> u8 {
     if runs_sandboxes(cmd) {
         telemetry_off_by_default();
     }
+    if let Some(line) = skill_repos_note(cmd, rest) {
+        eprintln!("{line}");
+    }
+    #[allow(deprecated)]
     let result = match cmd.as_str() {
         "up" => up(rest),
         "run" => run(rest),
@@ -231,6 +261,7 @@ pub fn main(args: &[String]) -> u8 {
         "litellm" => litellm_cmd(rest),
         "local" => local_cmd(rest),
         "folders" => folders_cmd(&state::state_dir(), rest, &mut std::io::stdout()),
+        "skills" => skills_cmd(rest),
         "skill-repo" => skill_repo(rest),
         "skill" => skill(rest),
         "prune-images" => prune_images(rest),
@@ -246,6 +277,17 @@ pub fn main(args: &[String]) -> u8 {
             }
             fail.code
         }
+    }
+}
+
+/// The deprecation line `skill-repo` and `skill` print on stderr once per run
+/// ([`compat::skill_repos_warning`]); none for aisbx's own pre-start sync, and none for another
+/// command.
+fn skill_repos_note(cmd: &str, rest: &[String]) -> Option<String> {
+    match cmd {
+        "skill-repo" => Some(compat::skill_repos_warning(cmd)),
+        "skill" if !compat::skill_repos_quiet(rest) => Some(compat::skill_repos_warning(cmd)),
+        _ => None,
     }
 }
 
@@ -506,13 +548,19 @@ pub(crate) fn up_inner(raw: &[String]) -> Result<String, Fail> {
             "label",
             "template",
             "skill",
+            "skill-on",
+            "skill-off",
         ],
     )?;
     if !args.trailing.is_empty() {
         return Err(Fail::usage("up takes no agent arguments"));
     }
     let skill_specs = args.all("skill");
+    if let Some(line) = up_skill_note(&skill_specs) {
+        eprintln!("{line}");
+    }
     parse_specs(&skill_specs)?;
+    let store_switches = store_switch_flags(&args)?;
     let catalog = Catalog::load().map_err(|e| Fail::sandbox(format!("{e:#}")))?;
     let backend_name = args.one("backend")?.ok_or_else(|| {
         Fail::usage("--backend is required (a kit in kits/, e.g. claude-anthropic)")
@@ -719,6 +767,16 @@ pub(crate) fn up_inner(raw: &[String]) -> Result<String, Fail> {
             Ok(inspected) => approve_credentials(&inspected.kits),
             Err(e) => eprintln!("aisbx: could not read the kit list ({e:#}) — no credential check"),
         }
+        if !store_switches.is_empty() {
+            set_store_switches(&state::state_dir(), &name, &store_switches, false).map_err(
+                |e| {
+                    Fail::failed(format!(
+                        "the skill switches of {name} were not recorded ({e:#})"
+                    ))
+                },
+            )?;
+            note_not_in_store(&store_switches);
+        }
         if !skill_specs.is_empty() {
             let notes =
                 skill_select::add(&state::state_dir(), &name, &skill_specs).map_err(select_fail)?;
@@ -883,7 +941,80 @@ pub(crate) fn up_inner(raw: &[String]) -> Result<String, Fail> {
         }
         Err(e) => eprintln!("aisbx: warning: the skill selection was not recorded ({e:#})"),
     }
+    match set_store_switches(&state::state_dir(), &name, &store_switches, true) {
+        Ok(_) => note_not_in_store(&store_switches),
+        Err(e) => {
+            eprintln!("aisbx: warning: the skill switches of {name} were not recorded ({e:#})")
+        }
+    }
     Ok(name)
+}
+
+/// The deprecation line `up --skill` prints on stderr, once however many `--skill` it has.
+fn up_skill_note(specs: &[String]) -> Option<String> {
+    (!specs.is_empty()).then(compat::skill_repos_up_warning)
+}
+
+/// `up`'s `--skill-on SKILL` and `--skill-off SKILL`: each store skill once, with its switch for
+/// the sandbox. A name [`store_skills::valid_name`] refuses, or one given to both flags, is a
+/// usage error.
+fn store_switch_flags(args: &Args) -> Result<Vec<(String, bool)>, Fail> {
+    let mut out: Vec<(String, bool)> = Vec::new();
+    for (flag, on) in [("skill-on", true), ("skill-off", false)] {
+        for skill in skill_names(&args.all(flag), &format!("--{flag} "))? {
+            match out.iter().find(|(s, _)| *s == skill) {
+                Some((_, was)) if *was != on => {
+                    return Err(Fail::usage(format!(
+                        "--skill-on and --skill-off both name {skill}"
+                    )))
+                }
+                Some(_) => {}
+                None => out.push((skill, on)),
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Record `up`'s store-skill switches for `name` in `store-skills.json`. A new sandbox (`fresh`)
+/// starts on exactly these, so none of an earlier sandbox of the name stays; a reused one keeps
+/// its other own switches. A switch that matches the one for every sandbox is not kept: the
+/// sandbox follows that one, as with `aisbx skills on|off SANDBOX`.
+fn set_store_switches(
+    state_dir: &Path,
+    name: &str,
+    flags: &[(String, bool)],
+    fresh: bool,
+) -> anyhow::Result<Switches> {
+    store_skills::update(&store_skills::config_path(state_dir), |s| {
+        if fresh {
+            let mut own = store_skills::Own::default();
+            for (skill, on) in flags {
+                own.set(skill, *on, s.global(skill));
+            }
+            s.replace_own(name, own);
+        } else {
+            for (skill, on) in flags {
+                s.set(Scope::Sandbox(name), skill, *on);
+            }
+        }
+        Ok(())
+    })
+}
+
+/// `up`'s note for the switched skills the store does not hold yet; nothing when sbx cannot list
+/// the store.
+fn note_not_in_store(flags: &[(String, bool)]) {
+    if flags.is_empty() {
+        return;
+    }
+    let skills: Vec<String> = flags.iter().map(|(s, _)| s.clone()).collect();
+    if let Some(line) = sbx::skills_ls()
+        .ok()
+        .and_then(|store| not_in_store_note(&skills, &store.skills))
+    {
+        eprintln!("{line}");
+    }
 }
 
 /// The fixed MCP set `up` asks sbx for: none at all with `--no-mcp`, else sbx's default (no flag).
@@ -1350,20 +1481,34 @@ fn run(raw: &[String]) -> Outcome {
     // skill scan. Never fatal, and `--no-update` does not skip it.
     // The skill-repo sync needs the selection, not the kits: it runs also when `inspect` fails.
     let mut connection = None;
+    let mut kit_dirs: Vec<String> = Vec::new();
     let addons = match sbx::inspect(&name) {
         Ok(inspected) => {
             approve_credentials(&inspected.kits);
             connection = connection_of_kits(&inspected.kits);
+            kit_dirs = inspected.kits.clone();
             skill_source::addons_from_kit_dirs(&inspected.kits)
         }
         Err(e) => {
             eprintln!(
-                "aisbx: could not read the kit list ({e:#}) — no host-skills sync, no credential \
-                 check"
+                "aisbx: could not read the kit list ({e:#}) - no store-skills link, no host-skills \
+                 sync, no credential check"
             );
             Vec::new()
         }
     };
+    let switches_file = store_skills::config_path(&state::state_dir());
+    match store_link_step(&name, &kit_dirs, || store_skills::load(&switches_file)) {
+        Ok(None) => {}
+        Ok(Some(argv)) => match step(&argv, ssh_agent) {
+            Ok(s) if s.success() => {}
+            Ok(s) => eprintln!("aisbx: the store-skills link exited {s} - running anyway"),
+            Err(e) => eprintln!("aisbx: the store-skills link did not run ({e}) - running anyway"),
+        },
+        Err(why) => eprintln!(
+            "aisbx: the skill switches cannot be read ({why}) - {name} keeps its store links"
+        ),
+    }
     for source in skill_source::sources_for(&name, &addons) {
         let what = source.step_label();
         match step(&source.install_argv(&name), ssh_agent) {
@@ -1468,6 +1613,34 @@ fn run(raw: &[String]) -> Outcome {
         );
     }
     Ok(code)
+}
+
+/// `run`'s first skill step ([`store_skills::link_argv`]): link the store skills switched on for
+/// `name` into the agent skills folders its kit dirs name ([`kits::skill_dirs_of`]). `Ok(None)`
+/// where none of them links the store, and then `switches` is not read; `Err` with the reason
+/// where it cannot be read.
+fn store_link_step(
+    name: &str,
+    kit_dirs: &[String],
+    switches: impl FnOnce() -> anyhow::Result<Switches>,
+) -> Result<Option<Vec<String>>, String> {
+    let mut dirs: Vec<String> = Vec::new();
+    for kit in kit_dirs {
+        for dir in kits::skill_dirs_of(Path::new(kit)) {
+            if !dirs.contains(&dir) {
+                dirs.push(dir);
+            }
+        }
+    }
+    if dirs.is_empty() {
+        return Ok(None);
+    }
+    let switches = switches().map_err(|e| format!("{e:#}"))?;
+    Ok(Some(store_skills::link_argv(
+        name,
+        &dirs,
+        &switches.linked(name),
+    )))
 }
 
 /// Approve the kits' credentials in sbx's bindings file (see [`crate::bindings`]). Reported on
@@ -1835,7 +2008,18 @@ pub(crate) fn rm_inner(name: &str) -> Result<(), Fail> {
     if let Err(e) = skill_select::forget(&state::state_dir(), name) {
         eprintln!("aisbx: warning: the skill selection of {name} was not dropped ({e:#})");
     }
+    if let Err(e) = forget_store_switches(&state::state_dir(), name) {
+        eprintln!("aisbx: warning: the skill switches of {name} were not dropped ({e:#})");
+    }
     Ok(())
+}
+
+/// Drop a removed sandbox's own store-skill switches, as the dashboard's delete does.
+fn forget_store_switches(state_dir: &Path, name: &str) -> anyhow::Result<Switches> {
+    store_skills::update(&store_skills::config_path(state_dir), |s| {
+        s.forget_sandbox(name);
+        Ok(())
+    })
 }
 
 /// `aisbx prune-images [--dry-run]`: [`sbx::DiskUsage::unused_kit_images`], removed.
@@ -2869,10 +3053,346 @@ fn connection_flag(
     }
 }
 
+// --- skills --------------------------------------------------------------------------------------
+
+/// `aisbx skills ls | on | off | default | auto-update`: which skills of sbx's shared store each
+/// sandbox gets ([`store_skills`]). `ls`, and `on` / `off` for one sandbox, read sbx; the rest only
+/// read and write `store-skills.json`.
+fn skills_cmd(raw: &[String]) -> Outcome {
+    let Some((sub, rest)) = raw.split_first() else {
+        return Err(Fail::usage(
+            "skills needs ls, on, off, default or auto-update",
+        ));
+    };
+    let state_dir = state::state_dir();
+    let printed = match sub.as_str() {
+        "ls" => skills_ls_in(&state_dir, rest, &mut sbx::skills_ls, &mut || {
+            model::home_dir()
+                .map(|home| store_skills::host_folders(&home))
+                .unwrap_or_default()
+        })?,
+        "on" | "off" => skills_switch_in(
+            &state_dir,
+            rest,
+            sub == "on",
+            &mut known_sandbox,
+            &mut || sbx::skills_ls().ok().map(|store| store.skills),
+        )?,
+        "default" => skills_default_in(&state_dir, rest)?,
+        "auto-update" => skills_auto_update_in(&state_dir, rest)?,
+        other => {
+            return Err(Fail::usage(format!(
+                "unknown skills command: {other} (ls, on, off, default or auto-update)"
+            )))
+        }
+    };
+    printed.emit();
+    Ok(0)
+}
+
+/// Each name once, in the order given, if [`store_skills::valid_name`] takes them all; else the
+/// usage error for the first it refuses, after `prefix` (a flag, or nothing).
+fn skill_names(names: &[String], prefix: &str) -> Result<Vec<String>, Fail> {
+    let mut out: Vec<String> = Vec::new();
+    for name in names {
+        if !store_skills::valid_name(name) {
+            return Err(Fail::usage(format!(
+                "{prefix}{name:?} is not a skill name: letters, digits, '.', '_' and '-', not \
+                 starting with '.' or '-', at most 128 characters"
+            )));
+        }
+        if !out.contains(name) {
+            out.push(name.clone());
+        }
+    }
+    Ok(out)
+}
+
+/// The switches file, or exit 1 naming why it cannot be read.
+fn load_switches(state_dir: &Path) -> Result<Switches, Fail> {
+    store_skills::load(&store_skills::config_path(state_dir))
+        .map_err(|e| Fail::failed(format!("{e:#}")))
+}
+
+/// The note for the switched `skills` that the store (`held`) does not hold yet, if any.
+fn not_in_store_note(skills: &[String], held: &[String]) -> Option<String> {
+    let missing: Vec<&str> = skills
+        .iter()
+        .filter(|s| !held.contains(s))
+        .map(String::as_str)
+        .collect();
+    (!missing.is_empty()).then(|| {
+        format!(
+            "aisbx: note: the shared store does not hold {} yet; the switch applies once it does \
+             (`sbx skills add REPO`)",
+            missing.join(", ")
+        )
+    })
+}
+
+/// [`skills_cmd`]'s `ls`, with sbx's store list and the host's skills folders handed in, for the
+/// tests.
+fn skills_ls_in(
+    state_dir: &Path,
+    raw: &[String],
+    store: &mut dyn FnMut() -> anyhow::Result<sbx::SkillsStore>,
+    host: &mut dyn FnMut() -> Vec<store_skills::HostFolder>,
+) -> Result<Printed, Fail> {
+    let args = Args::parse(raw, &["json"], &[])?;
+    if let Some(extra) = args.trailing.first() {
+        return Err(Fail::usage(format!(
+            "skills ls takes no argument after --: {extra}"
+        )));
+    }
+    let sandbox = match args.positional.as_slice() {
+        [] => None,
+        [name] => Some(name.as_str()),
+        _ => return Err(Fail::usage("skills ls takes at most one sandbox name")),
+    };
+    let switches = load_switches(state_dir)?;
+    let store = store().map_err(|e| Fail::sandbox(one_line(&format!("{e:#}"))))?;
+    Ok(skills_ls_output(
+        &store,
+        &switches,
+        &host(),
+        sandbox,
+        args.has("json"),
+    ))
+}
+
+/// `skills ls` from what sbx and the files hold: one tab-separated line per store skill in
+/// [`store_skills::groups`] order (name, source, on or off for every sandbox; with `sandbox` also
+/// on or off for it, then `own` or nothing), or the `--json` document.
+fn skills_ls_output(
+    store: &sbx::SkillsStore,
+    switches: &Switches,
+    host: &[store_skills::HostFolder],
+    sandbox: Option<&str>,
+    json: bool,
+) -> Printed {
+    use store_skills::Source;
+    let groups = store_skills::groups(&store.skills, &switches.origins, host);
+    let mut out = Printed::default();
+    if json {
+        let mut skills: Vec<serde_json::Value> = Vec::new();
+        for (source, names) in &groups {
+            let source = match source {
+                Source::Folder(dir) => serde_json::json!({ "folder": dir }),
+                Source::Repo(repo) => serde_json::json!({ "repo": repo }),
+                Source::Unknown => serde_json::Value::Null,
+            };
+            for name in names {
+                let mut row = serde_json::json!({
+                    "name": name,
+                    "source": source,
+                    "all": switches.global(name),
+                });
+                if let Some(sandbox) = sandbox {
+                    row["on"] = switches.is_on(sandbox, name).into();
+                    row["own"] = switches.own(sandbox, name).is_some().into();
+                }
+                skills.push(row);
+            }
+        }
+        let doc = serde_json::json!({
+            "store": store.store,
+            "auto_update": switches.auto_update(),
+            "skills": skills,
+        });
+        out.stdout = format!(
+            "{}\n",
+            serde_json::to_string_pretty(&doc).unwrap_or_default()
+        );
+        return out;
+    }
+    let cell = |text: &str| text.replace(['\t', '\n', '\r'], " ");
+    for (source, names) in &groups {
+        let source = match source {
+            Source::Folder(dir) => cell(dir),
+            Source::Repo(repo) => cell(repo),
+            Source::Unknown => "-".to_string(),
+        };
+        for name in names {
+            let all = on_off(switches.global(name));
+            out.stdout
+                .push_str(&format!("{}\t{source}\t{all}", cell(name)));
+            if let Some(sandbox) = sandbox {
+                let own = match switches.own(sandbox, name) {
+                    Some(_) => "own",
+                    None => "",
+                };
+                let on = on_off(switches.is_on(sandbox, name));
+                out.stdout.push_str(&format!("\t{on}\t{own}"));
+            }
+            out.stdout.push('\n');
+        }
+    }
+    if store.skills.is_empty() {
+        out.stderr.push(
+            "the shared store holds no skills; add some with `sbx skills add REPO` or `sbx \
+             skills import`"
+                .into(),
+        );
+    }
+    let mut switched: Vec<&str> = switches.on.iter().map(String::as_str).collect();
+    if let Some(own) = sandbox.and_then(|s| switches.sandboxes.get(s)) {
+        switched.extend(own.on.iter().chain(&own.off).map(String::as_str));
+    }
+    switched.sort_unstable();
+    switched.dedup();
+    switched.retain(|s| !store.skills.iter().any(|held| held == s));
+    if !switched.is_empty() {
+        out.stderr.push(format!(
+            "switches for skills not in the store: {}; each applies once its skill is there",
+            switched.join(", ")
+        ));
+    }
+    out.stderr
+        .push(format!("auto-update: {}", on_off(switches.auto_update())));
+    out
+}
+
+/// [`skills_cmd`]'s `on` and `off`, with the sandbox check and sbx's store list handed in, for
+/// the tests. Every name is checked before anything runs or is written.
+fn skills_switch_in(
+    state_dir: &Path,
+    raw: &[String],
+    on: bool,
+    known: &mut dyn FnMut(&str) -> Result<(), Fail>,
+    held: &mut dyn FnMut() -> Option<Vec<String>>,
+) -> Result<Printed, Fail> {
+    let word = on_off(on);
+    let (sandbox, skills) = switch_args(raw, word)?;
+    if let Some(name) = &sandbox {
+        known(name)?;
+    }
+    let scope = match &sandbox {
+        Some(name) => Scope::Sandbox(name.as_str()),
+        None => Scope::All,
+    };
+    let saved = store_skills::update(&store_skills::config_path(state_dir), |s| {
+        for skill in &skills {
+            s.set(scope, skill, on);
+        }
+        Ok(())
+    })
+    .map_err(|e| Fail::failed(format!("{e:#}")))?;
+    let mut out = Printed::default();
+    out.stderr.push(format!(
+        "{word} for {}: {} (from the next start by aisbx run or the dashboard)",
+        sandbox.as_deref().unwrap_or("every sandbox"),
+        skills.join(", ")
+    ));
+    if sandbox.is_none() {
+        for skill in &skills {
+            let kept: Vec<&str> = (saved.sandboxes.iter())
+                .filter(|(_, own)| own.get(skill) == Some(!on))
+                .map(|(name, _)| name.as_str())
+                .collect();
+            if !kept.is_empty() {
+                out.stderr.push(format!(
+                    "aisbx: note: an own switch keeps {skill} {} in {}; `aisbx skills default \
+                     NAME {skill}` drops it",
+                    on_off(!on),
+                    kept.join(", ")
+                ));
+            }
+        }
+    }
+    if let Some(note) = held().and_then(|held| not_in_store_note(&skills, &held)) {
+        out.stderr.push(note);
+    }
+    Ok(out)
+}
+
+/// `--global SKILL...` or `SANDBOX SKILL...`: the sandbox (`None` for every sandbox) and at least one
+/// store skill, each checked ([`skill_names`]). `--global` takes every positional as a skill,
+/// wherever the flag stands.
+fn switch_args(raw: &[String], word: &str) -> Result<(Option<String>, Vec<String>), Fail> {
+    let args = Args::parse(raw, &["global"], &[])?;
+    if let Some(extra) = args.trailing.first() {
+        return Err(Fail::usage(format!(
+            "skills {word} takes no argument after --: {extra}"
+        )));
+    }
+    if args.has("global") {
+        if args.positional.is_empty() {
+            return Err(Fail::usage(format!(
+                "which skills to switch {word} for every sandbox? Pass SKILL"
+            )));
+        }
+        return Ok((None, skill_names(&args.positional, "")?));
+    }
+    match args.positional.as_slice() {
+        [] => Err(Fail::usage("which sandbox? Pass its name, or --global")),
+        [name] => Err(Fail::usage(format!(
+            "which skills to switch {word} for {name}? Pass SKILL"
+        ))),
+        [name, skills @ ..] => Ok((Some(name.clone()), skill_names(skills, "")?)),
+    }
+}
+
+/// [`skills_cmd`]'s `default`: drop the sandbox's own switches, all of them or those of the named
+/// skills, so it follows the switches for every sandbox. The sandbox need not exist: the switches
+/// of a removed one can go too.
+fn skills_default_in(state_dir: &Path, raw: &[String]) -> Result<Printed, Fail> {
+    let args = Args::parse(raw, &[], &[])?;
+    if let Some(extra) = args.trailing.first() {
+        return Err(Fail::usage(format!(
+            "skills default takes no argument after --: {extra}"
+        )));
+    }
+    let Some((name, rest)) = args.positional.split_first() else {
+        return Err(Fail::usage("which sandbox? Pass its name"));
+    };
+    let skills = skill_names(rest, "")?;
+    let mut changed = false;
+    store_skills::update(&store_skills::config_path(state_dir), |s| {
+        changed = s.reset(name, &skills);
+        Ok(())
+    })
+    .map_err(|e| Fail::failed(format!("{e:#}")))?;
+    let which = match skills.is_empty() {
+        true => String::new(),
+        false => format!(" for {}", skills.join(", ")),
+    };
+    let mut out = Printed::default();
+    out.stderr.push(match changed {
+        true => format!("{name} follows the switches for every sandbox again{which}"),
+        false => format!("{name} has no own switch{which}; nothing changed"),
+    });
+    Ok(out)
+}
+
+/// `skills auto-update [on|off]`: print the daily update switch of the store's Git skills, or set
+/// it. Absent in the file is on.
+fn skills_auto_update_in(state_dir: &Path, raw: &[String]) -> Result<Printed, Fail> {
+    let args = Args::parse(raw, &[], &[])?;
+    let refused = || Fail::usage("skills auto-update takes on, off or nothing");
+    if !args.trailing.is_empty() {
+        return Err(refused());
+    }
+    let mut out = Printed::default();
+    match args.positional.as_slice() {
+        [] => out.stdout = format!("{}\n", on_off(load_switches(state_dir)?.auto_update())),
+        [word] if word == "on" || word == "off" => {
+            store_skills::update(&store_skills::config_path(state_dir), |s| {
+                s.auto_update = Some(word == "on");
+                Ok(())
+            })
+            .map_err(|e| Fail::failed(format!("{e:#}")))?;
+            out.stderr.push(format!("auto-update: {word}"));
+        }
+        _ => return Err(refused()),
+    }
+    Ok(out)
+}
+
 // --- skill-repo ----------------------------------------------------------------------------------
 
 /// `aisbx skill-repo add | rm | ls | fetch | auto-update`: the skill repositories, their cache
 /// ([`skill_repos`]) and the auto-update switch. Nothing here reads or touches a sandbox.
+#[deprecated(note = "use aisbx skills; docs/deprecations.md#skill-repos")]
 fn skill_repo(raw: &[String]) -> Outcome {
     let Some((sub, rest)) = raw.split_first() else {
         return Err(Fail::usage(
@@ -3178,6 +3698,7 @@ fn skill_repo_fetch_in(
 
 /// `aisbx skill add | rm | ls | sync`: which skills of the cached skill repos each sandbox gets
 /// ([`skill_select`]). `rm` and `ls` only read and write the selection file.
+#[deprecated(note = "use aisbx skills; docs/deprecations.md#skill-repos")]
 fn skill(raw: &[String]) -> Outcome {
     let Some((sub, rest)) = raw.split_first() else {
         return Err(Fail::usage("skill needs add, rm, ls or sync"));
@@ -3529,7 +4050,14 @@ mod tests {
         for cmd in ["up", "run", "ls", "status", "stop", "rm"] {
             assert!(runs_sandboxes(cmd), "{cmd}");
         }
-        for cmd in ["litellm", "folders", "skill-repo", "skill", "nope"] {
+        for cmd in [
+            "litellm",
+            "folders",
+            "skills",
+            "skill-repo",
+            "skill",
+            "nope",
+        ] {
             assert!(!runs_sandboxes(cmd), "{cmd}");
         }
     }
@@ -3636,6 +4164,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn skill_repo_auto_update_prints_and_sets_the_switch() {
         let state = scratch_state("auto-update");
         let read = || skill_repo_auto_update_in(&state, &[]).unwrap();
@@ -3997,6 +4526,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn skill_repo_refusals_exit_2_without_quoting_the_source() {
         assert!(is_subcommand("skill-repo"));
         assert!(is_subcommand("folders"));
@@ -4024,6 +4554,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn skill_refusals_exit_2_before_anything_runs() {
         assert!(is_subcommand("skill"));
         let secretish = format!("https://user:{}@github.com/o/r", "pw-123");
@@ -4115,6 +4646,664 @@ mod tests {
         ] {
             assert_eq!(up(&raw).expect_err("refused").code, EXIT_USAGE, "{raw:?}");
         }
+    }
+
+    #[test]
+    fn the_skill_repo_commands_warn_once_and_aisbxs_own_sync_does_not() {
+        let warning = |cmd: &str| Some(compat::skill_repos_warning(cmd));
+        assert_eq!(
+            skill_repos_note("skill-repo", &strings(&["ls"])),
+            warning("skill-repo")
+        );
+        assert_eq!(skill_repos_note("skill-repo", &[]), warning("skill-repo"));
+        assert_eq!(
+            skill_repos_note("skill", &strings(&["add", "box", "o/r"])),
+            warning("skill")
+        );
+        assert_eq!(
+            skill_repos_note("skill", &strings(&["sync", "box"])),
+            warning("skill"),
+            "the owner's own sync warns"
+        );
+        let step = skill_source::SkillSource::RepoCache.install_argv("box");
+        assert_eq!(skill_repos_note(&step[1], &step[2..]), None, "{step:?}");
+        for cmd in ["skills", "up", "run", "folders"] {
+            assert_eq!(
+                skill_repos_note(cmd, &strings(&["add", "--global", "o/r"])),
+                None,
+                "{cmd}"
+            );
+        }
+        assert_eq!(
+            up_skill_note(&strings(&["o/r", "o/s#one"])),
+            Some(compat::skill_repos_up_warning()),
+            "once for every --skill"
+        );
+        assert_eq!(up_skill_note(&[]), None);
+        assert!(HELP.contains("Deprecated (docs/deprecations.md#skill-repos)"));
+        assert!(HELP.contains("--skill REPO[#SKILL]   deprecated, use --skill-on"));
+    }
+
+    fn held_store(skills: &[&str]) -> sbx::SkillsStore {
+        sbx::SkillsStore {
+            store: "/state/sandboxes/agent-skills".into(),
+            skills: strings(skills),
+        }
+    }
+
+    fn host_folder(dir: &str, skills: &[&str]) -> store_skills::HostFolder {
+        store_skills::HostFolder {
+            dir: dir.into(),
+            skills: skills.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// The store and switches `skills ls` reads in the tests: `web` from two host folders, `slides`
+    /// from one, `pdf` added from a repository, `lost` from nowhere aisbx knows. `box` turns
+    /// `web` off and `slides` on.
+    fn ls_fixture() -> (sbx::SkillsStore, Switches, Vec<store_skills::HostFolder>) {
+        let host = vec![
+            host_folder("~/.agents/skills", &["web"]),
+            host_folder("~/.claude/skills", &["slides", "web"]),
+        ];
+        let mut switches = Switches::default();
+        switches.set(Scope::All, "pdf", true);
+        switches.set(Scope::All, "web", true);
+        switches.set(Scope::Sandbox("box"), "web", false);
+        switches.set(Scope::Sandbox("box"), "slides", true);
+        switches.record([(
+            "pdf".to_string(),
+            store_skills::Origin::Repo("anthropics/skills".into()),
+        )]);
+        (
+            held_store(&["pdf", "slides", "web", "lost"]),
+            switches,
+            host,
+        )
+    }
+
+    #[test]
+    fn skills_ls_lists_each_store_skill_under_its_source() {
+        let (held, mut switches, host) = ls_fixture();
+        let all = skills_ls_output(&held, &switches, &host, None, false);
+        assert_eq!(
+            all.stdout,
+            "web\t~/.agents/skills\ton\n\
+             slides\t~/.claude/skills\toff\n\
+             pdf\tanthropics/skills\ton\n\
+             lost\t-\toff\n"
+        );
+        assert_eq!(all.stderr, strings(&["auto-update: on"]));
+
+        let one = skills_ls_output(&held, &switches, &host, Some("box"), false);
+        assert_eq!(
+            one.stdout,
+            "web\t~/.agents/skills\ton\toff\town\n\
+             slides\t~/.claude/skills\toff\ton\town\n\
+             pdf\tanthropics/skills\ton\ton\t\n\
+             lost\t-\toff\toff\t\n"
+        );
+        let other = skills_ls_output(&held, &switches, &host, Some("other"), false);
+        assert!(
+            other
+                .stdout
+                .starts_with("web\t~/.agents/skills\ton\ton\t\n"),
+            "{}",
+            other.stdout
+        );
+
+        switches.auto_update = Some(false);
+        switches.set(Scope::All, "gone", true);
+        switches.set(Scope::Sandbox("box"), "away", true);
+        let off = skills_ls_output(&held, &switches, &host, None, false);
+        assert_eq!(off.stdout, all.stdout, "stdout is the store's skills only");
+        assert_eq!(
+            off.stderr,
+            strings(&[
+                "switches for skills not in the store: gone; each applies once its skill is there",
+                "auto-update: off",
+            ])
+        );
+        let own = skills_ls_output(&held, &switches, &host, Some("box"), false);
+        assert_eq!(
+            own.stderr[0],
+            "switches for skills not in the store: away, gone; each applies once its skill is \
+             there"
+        );
+
+        let empty = skills_ls_output(&held_store(&[]), &Switches::default(), &host, None, false);
+        assert_eq!(empty.stdout, "");
+        assert_eq!(
+            empty.stderr,
+            strings(&[
+                "the shared store holds no skills; add some with `sbx skills add REPO` or `sbx \
+                 skills import`",
+                "auto-update: on",
+            ])
+        );
+
+        let mut odd = Switches::default();
+        odd.record([(
+            "x".to_string(),
+            store_skills::Origin::Repo("a\tb\nc".into()),
+        )]);
+        let line = skills_ls_output(&held_store(&["x"]), &odd, &[], None, false).stdout;
+        assert_eq!(line, "x\ta b c\toff\n", "one line of three fields");
+    }
+
+    #[test]
+    fn skills_ls_json_is_one_document_on_stdout() {
+        let (held, switches, host) = ls_fixture();
+        let all = skills_ls_output(&held, &switches, &host, None, true);
+        assert!(all.stderr.is_empty());
+        let doc: serde_json::Value = serde_json::from_str(&all.stdout).unwrap();
+        assert_eq!(doc["store"], "/state/sandboxes/agent-skills");
+        assert_eq!(doc["auto_update"], true);
+        assert_eq!(
+            doc["skills"],
+            serde_json::json!([
+                {"name": "web", "source": {"folder": "~/.agents/skills"}, "all": true},
+                {"name": "slides", "source": {"folder": "~/.claude/skills"}, "all": false},
+                {"name": "pdf", "source": {"repo": "anthropics/skills"}, "all": true},
+                {"name": "lost", "source": null, "all": false},
+            ])
+        );
+
+        let one = skills_ls_output(&held, &switches, &host, Some("box"), true);
+        let doc: serde_json::Value = serde_json::from_str(&one.stdout).unwrap();
+        let rows = doc["skills"].as_array().unwrap();
+        assert_eq!(
+            rows[0],
+            serde_json::json!({"name": "web", "source": {"folder": "~/.agents/skills"}, "all": true, "on": false, "own": true})
+        );
+        assert_eq!(rows[2]["on"], true, "on for every sandbox");
+        assert_eq!(rows[2]["own"], false);
+        assert_eq!(rows[3]["on"], false);
+        assert_eq!(rows[3]["own"], false);
+
+        let empty = skills_ls_output(&held_store(&[]), &Switches::default(), &[], None, true);
+        let doc: serde_json::Value = serde_json::from_str(&empty.stdout).unwrap();
+        assert_eq!(doc["skills"], serde_json::json!([]));
+        assert!(empty.stderr.is_empty());
+    }
+
+    #[test]
+    fn skills_ls_exits_125_without_the_store_list_and_1_on_a_bad_file() {
+        let state = scratch_state("skills-ls");
+        let failed = skills_ls_in(
+            &state,
+            &[],
+            &mut || Err(anyhow::anyhow!("sbx skills ls failed:\nboom")),
+            &mut Vec::new,
+        )
+        .unwrap_err();
+        assert_eq!(failed.code, EXIT_SANDBOX);
+        assert_eq!(failed.message, "sbx skills ls failed: boom");
+
+        let shown = skills_ls_in(
+            &state,
+            &strings(&["box", "--json"]),
+            &mut || Ok(held_store(&["pdf"])),
+            &mut || vec![host_folder("~/.claude/skills", &["pdf"])],
+        )
+        .unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&shown.stdout).unwrap();
+        assert_eq!(
+            doc["skills"],
+            serde_json::json!([{"name": "pdf", "source": {"folder": "~/.claude/skills"}, "all": false, "on": false, "own": false}])
+        );
+
+        std::fs::write(store_skills::config_path(&state), "{").unwrap();
+        let broken =
+            skills_ls_in(&state, &[], &mut || Ok(held_store(&[])), &mut Vec::new).unwrap_err();
+        assert_eq!(broken.code, 1);
+        assert!(
+            broken.message.contains("does not parse"),
+            "{}",
+            broken.message
+        );
+
+        for raw in [
+            strings(&["a", "b"]),
+            strings(&["--bogus"]),
+            strings(&["--json=1"]),
+            strings(&["--", "x"]),
+        ] {
+            let fail = skills_ls_in(&state, &raw, &mut || panic!("no sbx call"), &mut || {
+                panic!("no host read")
+            })
+            .unwrap_err();
+            assert_eq!(fail.code, EXIT_USAGE, "{raw:?}");
+        }
+        let _ = std::fs::remove_dir_all(&state);
+    }
+
+    #[test]
+    fn skills_refusals_exit_2_before_anything_runs_or_is_written() {
+        assert!(is_subcommand("skills"));
+        assert!(!is_job_command(&["skills", "ls"]));
+        let state = scratch_state("skills-refusals");
+        let long = "x".repeat(129);
+        for raw in [
+            vec![],
+            strings(&["--global"]),
+            strings(&["box"]),
+            strings(&["box", "a b"]),
+            strings(&["box", ".hidden"]),
+            strings(&["box", "pdf", ""]),
+            strings(&["--global", "pdf", "../x"]),
+            strings(&["box", "pdf", "--", "docx"]),
+            strings(&["--global=yes", "pdf"]),
+            strings(&["box", "pdf", "--bogus"]),
+            strings(&["box", long.as_str()]),
+        ] {
+            for on in [true, false] {
+                let fail = skills_switch_in(
+                    &state,
+                    &raw,
+                    on,
+                    &mut |name| panic!("no sbx call before a refusal: {name}"),
+                    &mut || panic!("no store read before a refusal"),
+                )
+                .unwrap_err();
+                assert_eq!(fail.code, EXIT_USAGE, "{raw:?}");
+            }
+        }
+        let fail = skills_switch_in(
+            &state,
+            &strings(&["box", "a/b"]),
+            true,
+            &mut |_| Ok(()),
+            &mut || None,
+        )
+        .unwrap_err();
+        assert!(
+            fail.message.starts_with("\"a/b\" is not a skill name"),
+            "{}",
+            fail.message
+        );
+        for raw in [
+            vec![],
+            strings(&["box", "-x"]),
+            strings(&["box", "a/b"]),
+            strings(&["box", "--", "x"]),
+            strings(&["--global", "box"]),
+        ] {
+            let fail = skills_default_in(&state, &raw).unwrap_err();
+            assert_eq!(fail.code, EXIT_USAGE, "{raw:?}");
+        }
+        for raw in [
+            strings(&["yes"]),
+            strings(&["on", "off"]),
+            strings(&["--frob"]),
+            strings(&["on", "--", "off"]),
+        ] {
+            let fail = skills_auto_update_in(&state, &raw).unwrap_err();
+            assert_eq!(fail.code, EXIT_USAGE, "{raw:?}");
+        }
+        assert!(
+            !store_skills::config_path(&state).exists(),
+            "a refusal writes nothing"
+        );
+        for raw in [vec![], strings(&["frob"]), strings(&["on"])] {
+            assert_eq!(skills_cmd(&raw).unwrap_err().code, EXIT_USAGE, "{raw:?}");
+        }
+        let _ = std::fs::remove_dir_all(&state);
+    }
+
+    #[test]
+    fn skills_on_and_off_switch_for_every_sandbox_or_one() {
+        let state = scratch_state("skills-switch");
+        let path = store_skills::config_path(&state);
+        let mut known = |name: &str| match name {
+            "box" => Ok(()),
+            other => Err(Fail::sandbox(format!("no sandbox named {other}"))),
+        };
+        let mut held = || Some(strings(&["pdf", "docx"]));
+        let later = "(from the next start by aisbx run or the dashboard)";
+
+        let on = skills_switch_in(
+            &state,
+            &strings(&["--global", "pdf", "docx", "pdf"]),
+            true,
+            &mut known,
+            &mut held,
+        )
+        .unwrap();
+        assert_eq!(on.stdout, "");
+        assert_eq!(
+            on.stderr,
+            [format!("on for every sandbox: pdf, docx {later}")]
+        );
+        let saved = store_skills::load(&path).unwrap();
+        assert!(saved.global("pdf") && saved.global("docx"));
+
+        let off = skills_switch_in(
+            &state,
+            &strings(&["box", "pdf"]),
+            false,
+            &mut known,
+            &mut held,
+        )
+        .unwrap();
+        assert_eq!(off.stderr, [format!("off for box: pdf {later}")]);
+        let saved = store_skills::load(&path).unwrap();
+        assert_eq!(saved.own("box", "pdf"), Some(false));
+        assert_eq!(saved.linked("box"), ["docx"]);
+        assert_eq!(saved.linked("other"), ["docx", "pdf"]);
+
+        let again = skills_switch_in(
+            &state,
+            &strings(&["pdf", "--global"]),
+            true,
+            &mut known,
+            &mut held,
+        )
+        .unwrap();
+        assert_eq!(
+            again.stderr[1..],
+            [
+                "aisbx: note: an own switch keeps pdf off in box; `aisbx skills default NAME pdf` \
+              drops it"
+            ]
+        );
+
+        let mut only_docx = || Some(strings(&["docx"]));
+        let noted = skills_switch_in(
+            &state,
+            &strings(&["box", "pdf", "new-skill"]),
+            true,
+            &mut known,
+            &mut only_docx,
+        )
+        .unwrap();
+        assert_eq!(
+            noted.stderr.last().map(String::as_str),
+            Some(
+                "aisbx: note: the shared store does not hold pdf, new-skill yet; the switch \
+                 applies once it does (`sbx skills add REPO`)"
+            )
+        );
+        let saved = store_skills::load(&path).unwrap();
+        assert!(saved.is_on("box", "new-skill"), "written anyway");
+        assert_eq!(saved.own("box", "pdf"), None, "back on the switch for all");
+        let unread = skills_switch_in(
+            &state,
+            &strings(&["box", "zzz"]),
+            true,
+            &mut known,
+            &mut || None,
+        )
+        .unwrap();
+        assert_eq!(unread.stderr.len(), 1, "no note without the store list");
+
+        let before = std::fs::read_to_string(&path).unwrap();
+        let fail = skills_switch_in(
+            &state,
+            &strings(&["ghost", "pdf"]),
+            true,
+            &mut known,
+            &mut held,
+        )
+        .unwrap_err();
+        assert_eq!(fail.code, EXIT_SANDBOX);
+        assert_eq!(fail.message, "no sandbox named ghost");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+
+        std::fs::write(&path, "{").unwrap();
+        let broken = skills_switch_in(
+            &state,
+            &strings(&["--global", "pdf"]),
+            true,
+            &mut known,
+            &mut held,
+        )
+        .unwrap_err();
+        assert_eq!(broken.code, 1);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{",
+            "left as it was"
+        );
+        let _ = std::fs::remove_dir_all(&state);
+    }
+
+    #[test]
+    fn skills_default_drops_the_sandboxs_own_switches() {
+        let state = scratch_state("skills-default");
+        let path = store_skills::config_path(&state);
+        store_skills::update(&path, |s| {
+            for skill in ["pdf", "docx", "web"] {
+                s.set(Scope::Sandbox("box"), skill, true);
+            }
+            s.set(Scope::Sandbox("other"), "web", true);
+            Ok(())
+        })
+        .unwrap();
+        let one = skills_default_in(&state, &strings(&["box", "pdf"])).unwrap();
+        assert_eq!(one.stdout, "");
+        assert_eq!(
+            one.stderr,
+            strings(&["box follows the switches for every sandbox again for pdf"])
+        );
+        assert_eq!(
+            store_skills::load(&path).unwrap().linked("box"),
+            ["docx", "web"]
+        );
+        let all = skills_default_in(&state, &strings(&["box"])).unwrap();
+        assert_eq!(
+            all.stderr,
+            strings(&["box follows the switches for every sandbox again"])
+        );
+        let saved = store_skills::load(&path).unwrap();
+        assert!(!saved.sandboxes.contains_key("box"));
+        assert_eq!(
+            saved.linked("other"),
+            ["web"],
+            "another sandbox keeps its own"
+        );
+        let none = skills_default_in(&state, &strings(&["box", "web"])).unwrap();
+        assert_eq!(
+            none.stderr,
+            strings(&["box has no own switch for web; nothing changed"])
+        );
+        let _ = std::fs::remove_dir_all(&state);
+    }
+
+    #[test]
+    fn skills_auto_update_prints_and_sets_the_switch() {
+        let state = scratch_state("skills-auto-update");
+        let read = || skills_auto_update_in(&state, &[]).unwrap();
+        let shown = read();
+        assert_eq!(shown.stdout, "on\n", "absent means on");
+        assert!(shown.stderr.is_empty());
+        let set = skills_auto_update_in(&state, &strings(&["off"])).unwrap();
+        assert_eq!(set.stdout, "");
+        assert_eq!(set.stderr, strings(&["auto-update: off"]));
+        assert_eq!(read().stdout, "off\n");
+        let saved = store_skills::load(&store_skills::config_path(&state)).unwrap();
+        assert!(!saved.auto_update());
+        let set = skills_auto_update_in(&state, &strings(&["on"])).unwrap();
+        assert_eq!(set.stderr, strings(&["auto-update: on"]));
+        assert_eq!(read().stdout, "on\n");
+        let _ = std::fs::remove_dir_all(&state);
+    }
+
+    #[test]
+    fn up_takes_store_skill_switches_and_checks_them_first() {
+        let args = Args::parse(
+            &strings(&[
+                "--skill-on",
+                "pdf",
+                "--skill-off=web",
+                "--skill-on",
+                "docx",
+                "--skill-on",
+                "pdf",
+            ]),
+            &[],
+            &["skill-on", "skill-off"],
+        )
+        .unwrap();
+        assert_eq!(
+            store_switch_flags(&args).unwrap(),
+            [
+                ("pdf".to_string(), true),
+                ("docx".to_string(), true),
+                ("web".to_string(), false)
+            ]
+        );
+        for raw in [
+            strings(&["--skill-on", "a b"]),
+            strings(&["--skill-off", "../x"]),
+            strings(&["--skill-on", "pdf", "--skill-off", "pdf"]),
+            strings(&["--skill-on"]),
+        ] {
+            assert_eq!(up(&raw).expect_err("refused").code, EXIT_USAGE, "{raw:?}");
+        }
+        let both = up(&strings(&["--skill-off", "pdf", "--skill-on=pdf"])).unwrap_err();
+        assert_eq!(both.message, "--skill-on and --skill-off both name pdf");
+        let bad = up(&strings(&["--skill-off", ".x"])).unwrap_err();
+        assert!(
+            bad.message
+                .starts_with("--skill-off \".x\" is not a skill name"),
+            "{}",
+            bad.message
+        );
+        assert!(HELP.contains("\n        --skill-on SKILL "));
+        assert!(HELP.contains("\n        --skill-off SKILL "));
+    }
+
+    #[test]
+    fn up_records_the_switches_of_a_new_or_a_reused_sandbox() {
+        let state = scratch_state("up-switches");
+        let path = store_skills::config_path(&state);
+        store_skills::update(&path, |s| {
+            s.set(Scope::All, "pdf", true);
+            s.set(Scope::Sandbox("box"), "old", true);
+            s.set(Scope::Sandbox("other"), "web", true);
+            Ok(())
+        })
+        .unwrap();
+        let flags = vec![
+            ("pdf".to_string(), true),
+            ("docx".to_string(), true),
+            ("web".to_string(), false),
+        ];
+        let made = set_store_switches(&state, "box", &flags, true).unwrap();
+        assert_eq!(made.own("box", "docx"), Some(true));
+        assert_eq!(
+            made.own("box", "old"),
+            None,
+            "an earlier sandbox's switch goes"
+        );
+        assert_eq!(made.own("box", "pdf"), None, "on for every sandbox already");
+        assert_eq!(
+            made.own("box", "web"),
+            None,
+            "off for every sandbox already"
+        );
+        assert_eq!(made.linked("box"), ["docx", "pdf"]);
+        assert_eq!(made.own("other", "web"), Some(true));
+        assert_eq!(store_skills::load(&path).unwrap(), made);
+
+        let bare = set_store_switches(&state, "box", &[], true).unwrap();
+        assert!(
+            !bare.sandboxes.contains_key("box"),
+            "no flag, no own switch"
+        );
+
+        let reused =
+            set_store_switches(&state, "other", &[("docx".to_string(), true)], false).unwrap();
+        assert_eq!(
+            reused.linked("other"),
+            ["docx", "pdf", "web"],
+            "the others stay"
+        );
+
+        let gone = forget_store_switches(&state, "other").unwrap();
+        assert!(gone.sandboxes.is_empty(), "aisbx rm drops them");
+
+        std::fs::write(&path, "{").unwrap();
+        assert!(set_store_switches(&state, "box", &flags, true).is_err());
+        assert!(forget_store_switches(&state, "box").is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{",
+            "left as it was"
+        );
+        let _ = std::fs::remove_dir_all(&state);
+    }
+
+    #[test]
+    fn run_links_the_switched_store_skills_into_the_folders_its_kits_name() {
+        let catalog = Catalog::load().unwrap();
+        let dir = |kit: &str| catalog.kits_dir.join(kit).display().to_string();
+        let mut switches = Switches::default();
+        switches.set(Scope::All, "pdf", true);
+        switches.set(Scope::Sandbox("box"), "docx", true);
+        let claude = strings(&["/home/agent/.claude/skills"]);
+
+        let kits = vec![dir("claude-litellm"), dir("rtk")];
+        let argv = store_link_step("box", &kits, || Ok(switches.clone()));
+        assert_eq!(
+            argv,
+            Ok(Some(store_skills::link_argv(
+                "box",
+                &claude,
+                &strings(&["docx", "pdf"])
+            )))
+        );
+        let other = store_link_step("other", &kits, || Ok(switches.clone()));
+        assert_eq!(
+            other,
+            Ok(Some(store_skills::link_argv(
+                "other",
+                &claude,
+                &strings(&["pdf"])
+            )))
+        );
+        let off = store_link_step("box", &kits, || Ok(Switches::default()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            off[6..],
+            [
+                "skills-store.sh",
+                "--only",
+                "--",
+                "/home/agent/.claude/skills"
+            ],
+            "nothing switched on: the step still runs and links nothing"
+        );
+
+        let twice = store_link_step(
+            "box",
+            &[dir("claude-anthropic"), dir("claude-token")],
+            || Ok(Switches::default()),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(twice.iter().filter(|a| **a == claude[0]).count(), 1);
+        let agy = store_link_step("box", &[dir("agy")], || Ok(Switches::default()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            agy[agy.len() - 2..],
+            [
+                "/home/agent/.gemini/antigravity/skills",
+                "/home/agent/.gemini/antigravity-cli/skills"
+            ]
+        );
+
+        for kits in [vec![], vec![dir("rtk")], strings(&["/no/such/kit"])] {
+            let skipped = store_link_step("box", &kits, || panic!("not read without a folder"));
+            assert_eq!(skipped, Ok(None), "{kits:?}");
+        }
+        let unread = store_link_step("box", &kits, || {
+            Err(anyhow::anyhow!("store-skills.json does not parse"))
+        });
+        assert_eq!(unread, Err("store-skills.json does not parse".to_string()));
     }
 
     #[test]

@@ -11,8 +11,8 @@ use ratatui::Frame;
 use super::{panel, Hits};
 use crate::app::{
     AccountChoice, App, ApprovalRow, AuthRow, ConnMode, ConnRow, ConnSwitchRow, ConnectRow,
-    CreateForm, CreateRow, Empty, FoldersRow, Hit, KitsRow, SandboxFoldersRow, Screen, SecretRow,
-    SettingTone, SettingsRow, SkillRow, StartDirRow, TargetLaunch, TextInput,
+    CreateForm, CreateRow, Empty, FoldersRow, Hit, KitsRow, SandboxFoldersRow, SandboxSkillRow,
+    Screen, SecretRow, SettingTone, SettingsRow, SkillRow, StartDirRow, TargetLaunch, TextInput,
 };
 use crate::create::account_notes;
 use crate::model::{self, Auth};
@@ -721,6 +721,32 @@ fn workspace_rows(
             row_index(CreateRow::Skills),
         );
     }
+    if form.store_skills_offered(catalog) {
+        let open = form.wizard.skills_open;
+        out.row(
+            wizard::fold_spans(app, form, CreateRow::SkillsFold, "shared skills", open),
+            focused == Some(CreateRow::SkillsFold),
+            row_index(CreateRow::SkillsFold),
+        );
+        if open {
+            for (i, skill) in form.workspace.store_skills.iter().enumerate() {
+                let own = form.store_skill_own(i).then_some(Marker::Quiet("own"));
+                out.row(
+                    addon_spans(
+                        skill,
+                        "",
+                        form.store_skill_on(i),
+                        own,
+                        None,
+                        0,
+                        out.width as usize,
+                    ),
+                    focused == Some(CreateRow::StoreSkill(i)),
+                    row_index(CreateRow::StoreSkill(i)),
+                );
+            }
+        }
+    }
 
     let open = form.wizard.advanced_open;
     out.row(
@@ -1301,8 +1327,9 @@ fn help_strip(frame: &mut Frame, help: Option<Strip>, hidden: Hidden, area: Rect
 
 // --- skills ----------------------------------------------------------------------------------
 
-/// The shared agent-skills store: what it holds, who mounts it, and the commands that change it.
-/// Rows are drawn in [`App::skill_rows`] order, so a click box's index is the key handler's.
+/// The shared agent-skills store: its skills under where they came from, each with its switch
+/// for all sandboxes at the right, then the commands that change the store. Rows are drawn in
+/// [`App::skill_rows`] order, so a click box's index is the key handler's.
 pub(super) fn render_skills(frame: &mut Frame, app: &App, area: Rect) -> Hits {
     let Screen::Skills(form) = &app.screen else {
         return Hits::new();
@@ -1320,26 +1347,28 @@ pub(super) fn render_skills(frame: &mut Frame, app: &App, area: Rect) -> Hits {
     for line in app.skills_trust_lines() {
         out.note(line);
     }
+    for line in app.skills_intro() {
+        out.para(line);
+    }
     if !known {
         out.blank();
         out.note("reading `sbx skills ls`…");
     }
 
-    let mut section: Option<&'static str> = None;
+    let mut section: Option<(String, String)> = None;
     let mut close = rows.len();
+    let mut skills = 0;
     for (i, row) in rows.iter().enumerate() {
         if let SkillRow::Close = row {
             close = i;
             continue;
         }
-        let heading = App::skill_heading(row);
+        let heading = app.skill_heading(row);
         if heading != section {
             out.blank();
-            // An empty store has no skill rows to put the first heading over, so it is said.
-            if heading == Some("Change the store")
-                && !rows.iter().any(|r| matches!(r, SkillRow::Skill(_)))
-            {
-                out.section("Installed skills");
+            // An empty store has no skill rows to put a heading over, so it is said.
+            if matches!(row, SkillRow::Import) && skills == 0 {
+                out.section("Skills in the store");
                 out.note(if known {
                     "  nothing in the store yet — import this host's, or add from a repository"
                 } else {
@@ -1347,17 +1376,80 @@ pub(super) fn render_skills(frame: &mut Frame, app: &App, area: Rect) -> Hits {
                 });
                 out.blank();
             }
-            if let Some(title) = heading {
-                out.section(title);
+            if let Some((title, gloss)) = &heading {
+                heading_line(&mut out, title, gloss);
             }
             section = heading;
         }
-        out.row(skill_row_spans(app, row), focus == i, i);
-        let (name, _) = app.skill_view(row);
+        if matches!(row, SkillRow::Skill(_)) {
+            skills += 1;
+        }
+        let (name, meta) = app.skill_view(row);
+        let spans = switch_row(out.width as usize, &name, &meta, app.skill_switch(row));
+        out.row(spans, focus == i, i);
         out.explain_lines(focus == i, name, &app.skill_notes(row));
     }
     let buttons = [("Close", focus == close, Look::Plain, close)];
     framed(frame, area, "Shared agent skills", out, &buttons)
+}
+
+/// A heading and its muted gloss on one line, both owned: a skills heading is built per frame.
+fn heading_line(out: &mut Lines<'_>, title: &str, gloss: &str) {
+    let mut spans = vec![Span::styled(
+        title.to_string(),
+        theme::muted().add_modifier(Modifier::BOLD),
+    )];
+    if !gloss.is_empty() && title.chars().count() + 3 + gloss.chars().count() <= out.width as usize
+    {
+        spans.push(Span::styled(format!("   {gloss}"), theme::muted()));
+    }
+    out.lines.push(Line::from(spans));
+}
+
+/// The words of a switch at a row's right edge.
+fn switch_words(on: bool) -> &'static str {
+    if on {
+        "● on "
+    } else {
+        "○ off"
+    }
+}
+
+/// The farthest column a skills row's switch stands at: on a wide terminal it stays near the name.
+const SWITCH_EDGE: usize = 84;
+
+/// One skills row: the name in bold, a muted note after it, and the switch, where the row has
+/// one, at the right edge of `width`, or of [`SWITCH_EDGE`] when that is nearer.
+fn switch_row(width: usize, name: &str, meta: &str, switch: Option<bool>) -> Vec<Span<'static>> {
+    const NAME: usize = 30;
+    let width = width.min(SWITCH_EDGE);
+    let mut spans = vec![
+        Span::raw("   "),
+        Span::styled(
+            column(name, NAME),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+    ];
+    let Some(on) = switch else {
+        spans.push(Span::styled(meta.to_string(), theme::muted()));
+        return spans;
+    };
+    let words = switch_words(on);
+    let used = 3 + NAME.max(name.chars().count() + 2) + words.chars().count() + 2;
+    let room = width.saturating_sub(used);
+    spans.push(Span::styled(
+        format!("{:<room$}", super::clip(meta, room)),
+        theme::muted(),
+    ));
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled(
+        words,
+        match on {
+            true => Style::default().fg(theme::RUNNING),
+            false => theme::muted(),
+        },
+    ));
+    spans
 }
 
 /// `text` in a fixed column `width` cells wide, cut two cells short of it, so the next column
@@ -1366,18 +1458,49 @@ fn column(text: &str, width: usize) -> String {
     format!("{:<width$}", super::clip(text, width.saturating_sub(2)))
 }
 
-/// One line per row: the skill, or the command, and in a muted column what it reaches for.
-fn skill_row_spans(app: &App, row: &SkillRow) -> Vec<Span<'static>> {
-    const NAME: usize = 30;
-    let (name, note) = app.skill_view(row);
-    vec![
-        Span::raw("   "),
-        Span::styled(
-            column(&name, NAME),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(note, theme::muted()),
-    ]
+// --- one sandbox's skills ------------------------------------------------------------------------
+
+/// A sandbox's skills screen (`i`): the store's skills under where they came from, each with the
+/// sandbox's switch at the right, in [`App::sandbox_skill_rows`] order.
+pub(super) fn render_sandbox_skills(frame: &mut Frame, app: &App, area: Rect) -> Hits {
+    let Screen::SandboxSkills(form) = &app.screen else {
+        return Hits::new();
+    };
+    let sandbox = form.sandbox.as_str();
+    let rows = app.sandbox_skill_rows(sandbox);
+    let focus = form.focus.min(rows.len().saturating_sub(1));
+    let title = format!("Skills · {}", app.sandbox_label(sandbox));
+
+    let mut out = Lines::new(area);
+    for line in app.sandbox_skills_intro(sandbox) {
+        out.para(line);
+    }
+    let mut section: Option<(String, String)> = None;
+    let mut close = rows.len();
+    for (i, row) in rows.iter().enumerate() {
+        if let SandboxSkillRow::Close = row {
+            close = i;
+            continue;
+        }
+        let heading = app.sandbox_skill_heading(row);
+        if heading != section {
+            out.blank();
+            if let Some((title, gloss)) = &heading {
+                heading_line(&mut out, title, gloss);
+            }
+            section = heading;
+        }
+        let (name, meta) = app.sandbox_skill_view(sandbox, row);
+        let switch = app.sandbox_skill_switch(sandbox, row);
+        out.row(
+            switch_row(out.width as usize, &name, &meta, switch),
+            focus == i,
+            i,
+        );
+        out.explain_lines(focus == i, name, &app.sandbox_skill_notes(sandbox, row));
+    }
+    let buttons = [("Close", focus == close, Look::Plain, close)];
+    framed(frame, area, &title, out, &buttons)
 }
 
 // --- repo skills -----------------------------------------------------------------------------
@@ -1403,6 +1526,7 @@ pub(super) fn render_repo_skills(frame: &mut Frame, app: &App, area: Rect) -> Hi
     };
 
     let mut out = Lines::new(area);
+    out.warn(crate::compat::SKILL_REPOS_SCREEN);
     out.para(form.intro());
     if form.error.is_some() {
         out.blank();

@@ -187,9 +187,9 @@ skipped as `outside`, or as `unreachable` if its target is not mounted.
 
 ### What it never touches
 
-The kit removes only the links it made. **A skill in the sbx store wins over a host skill of the same name**
-(`clash`): remove the store copy (`K` → `d`) to get the live one. With `--skills readwrite`, the agent sees only the
-store.
+The kit removes only the links it made. **A switched-on skill of the sbx store wins over a host skill of the same
+name** (`clash`): switch the store copy off (`K`, or `i` for one sandbox) or remove it (`K` → `d`) to get the live
+one. With `--skills readwrite`, the agent sees only the store.
 
 ### Status of the skill links
 

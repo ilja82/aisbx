@@ -5,6 +5,7 @@
 pub mod actions;
 pub mod app;
 pub mod bindings;
+pub mod compat;
 pub mod create;
 #[cfg(test)]
 mod create_golden;
@@ -33,6 +34,7 @@ pub mod startdir;
 pub mod state;
 pub mod stats;
 pub mod step;
+pub mod store_skills;
 pub mod terminal;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testkit;

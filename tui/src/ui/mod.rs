@@ -46,6 +46,7 @@ pub(crate) fn draw_in(frame: &mut Frame, app: &mut App, caps: theme::Caps) {
         Screen::Secrets(_) => form::render_secrets(frame, app, body),
         Screen::Skills(_) => form::render_skills(frame, app, body),
         Screen::RepoSkills(_) => form::render_repo_skills(frame, app, body),
+        Screen::SandboxSkills(_) => form::render_sandbox_skills(frame, app, body),
         Screen::Connect(_) => form::render_connect(frame, app, body),
         Screen::StartDir(_) => form::render_start_dir(frame, app, body),
         Screen::Approvals(_) => form::render_approvals(frame, app, body),
@@ -218,7 +219,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, caps: theme::Caps) ->
                 };
                 hints.push(("A", label, KeyCode::Char('A')));
             }
-            hints.push(("i", "repo skills", KeyCode::Char('i')));
+            hints.push(("i", "sandbox skills", KeyCode::Char('i')));
             hints.extend(HOST_HINTS);
             if app.can_prune() {
                 hints.push(("P", "prune", KeyCode::Char('P')));
@@ -392,6 +393,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, caps: theme::Caps) ->
         ],
         Screen::Skills(_) => vec![
             ("↑↓", "move", KeyCode::Down),
+            ("space", "switch", KeyCode::Char(' ')),
             ("↵", "activate", KeyCode::Enter),
             ("i", "import", KeyCode::Char('i')),
             ("a", "add repo", KeyCode::Char('a')),
@@ -402,6 +404,12 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, caps: theme::Caps) ->
         Screen::RepoSkills(_) => vec![
             ("↑↓", "move", KeyCode::Down),
             ("space", "tick", KeyCode::Char(' ')),
+            ("↵", "activate", KeyCode::Enter),
+            ("esc", "back", KeyCode::Esc),
+        ],
+        Screen::SandboxSkills(_) => vec![
+            ("↑↓", "move", KeyCode::Down),
+            ("space", "switch", KeyCode::Char(' ')),
             ("↵", "activate", KeyCode::Enter),
             ("esc", "back", KeyCode::Esc),
         ],
@@ -865,7 +873,25 @@ pub(crate) mod tests_support {
             "Create — the skills mount".to_string(),
             render_at(&mut app, 80, 24),
         ));
+        // The store's skills for the new sandbox: one on for all, one switched on here.
         if let Screen::Create(form) = &mut app.screen {
+            form.workspace.skills = crate::sbx::SkillsMode::Readonly;
+            form.workspace.store_skills =
+                ["docx", "pdf", "web-research"].map(String::from).to_vec();
+            form.workspace.store_global = ["pdf".to_string()].into();
+            form.workspace.store_own.set("docx", true, false);
+            form.wizard.skills_open = true;
+            form.focus_field(&app.catalog, CreateRow::StoreSkill(0));
+        }
+        out.push((
+            "Create — shared skills for this sandbox".to_string(),
+            render(&mut app),
+        ));
+        if let Screen::Create(form) = &mut app.screen {
+            form.workspace.store_skills = Vec::new();
+            form.workspace.store_global = Default::default();
+            form.workspace.store_own = Default::default();
+            form.wizard.skills_open = false;
             form.workspace.skills = crate::sbx::SkillsMode::default();
             // The button line, where the footer offers left/right, not `space`.
             form.focus_wizard_row(&app.catalog, WizardRow::Next);
@@ -1036,6 +1062,40 @@ pub(crate) mod tests_support {
         app.skills = Some(crate::sbx::SkillsStore::default());
         app.screen = Screen::Skills(crate::app::SkillsForm::default());
         out.push(("Skills — empty store".to_string(), render(&mut app)));
+
+        // Skills from a host folder and a Git repository, some switched on, one sandbox's own.
+        app.skills = Some(crate::sbx::SkillsStore {
+            store:
+                "/Users/u/Library/Application Support/com.docker.sandboxes/sandboxes/agent-skills"
+                    .into(),
+            skills: ["ground-rules", "web-research", "pdf", "docx", "notes"]
+                .map(String::from)
+                .to_vec(),
+        });
+        app.host_skill_folders = vec![aisbx_core::store_skills::HostFolder {
+            dir: "~/.claude/skills".into(),
+            skills: ["ground-rules", "web-research"].map(String::from).into(),
+        }];
+        let from = |s: &str| {
+            (
+                s.to_string(),
+                aisbx_core::store_skills::Origin::Repo("anthropics/skills".into()),
+            )
+        };
+        app.switches.record([from("pdf"), from("docx")]);
+        let all = aisbx_core::store_skills::Scope::All;
+        app.switches.set(all, "ground-rules", true);
+        app.switches.set(all, "pdf", true);
+        let own = aisbx_core::store_skills::Scope::Sandbox("claude-anthropic-proj");
+        app.switches.set(own, "pdf", false);
+        app.switches.set(own, "docx", true);
+        app.screen = Screen::Skills(crate::app::SkillsForm::default());
+        out.push(("Skills — switches by origin".to_string(), render(&mut app)));
+        app.screen = Screen::SandboxSkills(crate::app::SandboxSkillsForm {
+            sandbox: "claude-anthropic-proj".into(),
+            focus: 3,
+        });
+        out.push(("Sandbox skills".to_string(), render(&mut app)));
 
         // Connecting an editor: a launchable target and one configured inside the app.
         for (title, focus) in [("terminal", 0usize), ("IntelliJ", 3)] {
@@ -2613,10 +2673,16 @@ mod tests {
                 name: "claude-anthropic-proj".into(),
                 // No start folder on the fixture, so this stays sbx's own `run --name` path.
                 start: None,
-                // A start hands over the label, then updates the agent — see `sbx::label_argv`
-                // and `kits::agent_update`.
+                // A start hands over the label, links the switched-on store skills, then updates
+                // the agent — see `sbx::label_argv`, `store_skills::link_argv` and
+                // `kits::agent_update`.
                 prelude: vec![
                     crate::sbx::label_argv("claude-anthropic-proj", "claude-anthropic-proj"),
+                    aisbx_core::store_skills::link_argv(
+                        "claude-anthropic-proj",
+                        &["/home/agent/.claude/skills".to_string()],
+                        &[],
+                    ),
                     crate::sbx::exec_argv("claude-anthropic-proj", &["claude", "update"]),
                 ],
             }),
@@ -4454,7 +4520,7 @@ mod tests {
                     "connect",
                     "start folder",
                     "account",
-                    "repo skills",
+                    "sandbox skills",
                     "secrets",
                     "skills",
                     "folders",
@@ -4808,6 +4874,98 @@ mod tests {
         assert!(screen.contains("  Create only  "), "{screen}");
     }
 
+    /// A store with a skill from a host folder, two from a repository and one of no known
+    /// origin; `pdf` on for all sandboxes and off for `claude-anthropic-proj`.
+    fn switched_store(app: &mut App) {
+        use aisbx_core::store_skills::{HostFolder, Origin, Scope};
+        app.skills = Some(crate::sbx::SkillsStore {
+            store: "/store".into(),
+            skills: ["web", "pdf", "docx", "notes"].map(String::from).to_vec(),
+        });
+        app.host_skill_folders = vec![HostFolder {
+            dir: "~/.claude/skills".into(),
+            skills: ["web".to_string()].into(),
+        }];
+        let repo = |s: &str| (s.to_string(), Origin::Repo("anthropics/skills".into()));
+        app.switches.record([repo("pdf"), repo("docx")]);
+        app.switches.set(Scope::All, "pdf", true);
+        app.switches
+            .set(Scope::Sandbox("claude-anthropic-proj"), "pdf", false);
+    }
+
+    fn line_with(screen: &str, text: &str) -> String {
+        screen
+            .lines()
+            .find(|l| l.contains(text))
+            .unwrap_or_else(|| panic!("{text} is on screen:\n{screen}"))
+            .to_string()
+    }
+
+    #[test]
+    fn the_skills_screen_lists_each_skill_under_its_origin_with_its_switch() {
+        let mut app = app_with(populated());
+        switched_store(&mut app);
+        app.screen = Screen::Skills(crate::app::SkillsForm::default());
+        let screen = super::tests_support::render_at(&mut app, 110, 40);
+        let at = |text: &str| {
+            screen
+                .find(text)
+                .unwrap_or_else(|| panic!("{text}:\n{screen}"))
+        };
+        assert!(line_with(&screen, "~/.claude/skills").contains("imported from this host"));
+        assert!(line_with(&screen, "anthropics/skills").contains("added from Git"));
+        assert!(at("~/.claude/skills") < at(" web "), "{screen}");
+        assert!(at("anthropics/skills") < at(" docx ") && at(" docx ") < at(" pdf "));
+        assert!(at("Other skills") < at(" notes "), "{screen}");
+        assert!(line_with(&screen, " pdf ").contains("● on"), "{screen}");
+        assert!(
+            line_with(&screen, " pdf ").contains("off in 1 sandbox"),
+            "{screen}"
+        );
+        assert!(line_with(&screen, " docx ").contains("○ off"), "{screen}");
+        assert!(
+            line_with(&screen, "Update daily").contains("● on"),
+            "{screen}"
+        );
+        assert!(!line_with(&screen, "Import this host's skills").contains("○ off"));
+        assert!(!screen.contains("Repo skills"), "none in use: {screen}");
+        let switch_at = line_with(&screen, " docx ").find("○ off").unwrap();
+        assert!(
+            switch_at < 90,
+            "the switch stays near the name: {switch_at}"
+        );
+
+        let plain = crate::theme::Caps {
+            color: false,
+            unicode: false,
+        };
+        let screen = super::tests_support::render_with(&mut app, 110, 40, plain);
+        assert!(line_with(&screen, " pdf ").contains("* on"), "{screen}");
+        assert!(line_with(&screen, " docx ").contains("o off"), "{screen}");
+    }
+
+    #[test]
+    fn the_sandbox_skills_screen_marks_its_own_switches() {
+        let mut app = app_with(populated());
+        switched_store(&mut app);
+        app.cursor = 0;
+        app.on_key(KeyEvent::from(KeyCode::Char('i')));
+        let screen = super::tests_support::render_at(&mut app, 110, 40);
+        assert!(screen.contains("Skills · "), "{screen}");
+        let pdf = line_with(&screen, " pdf ");
+        assert!(
+            pdf.contains("own · on for all sandboxes") && pdf.contains("○ off"),
+            "{screen}"
+        );
+        assert!(line_with(&screen, " web ").contains("○ off"), "{screen}");
+        assert!(screen.contains("Follow all sandboxes"), "{screen}");
+        assert!(screen.contains("space switch"), "{screen}");
+        app.on_key(KeyEvent::from(KeyCode::Char(' ')));
+        let screen = super::tests_support::render_at(&mut app, 110, 40);
+        assert!(line_with(&screen, " web ").contains("own · off for all sandboxes"));
+        assert!(line_with(&screen, " web ").contains("● on"), "{screen}");
+    }
+
     #[test]
     fn the_repo_skills_screens_render() {
         use crate::repo_skills_ui::{RepoScope, RepoSkillsForm, RepoView};
@@ -4860,6 +5018,10 @@ mod tests {
         ));
         let screen = super::tests_support::render_at(&mut app, 110, 40);
         assert!(screen.contains("Repo skills · box"), "{screen}");
+        assert!(
+            screen.contains("Deprecated: skill repositories"),
+            "{screen}"
+        );
         assert!(line_of(&screen, "[x] alpha").contains("global"), "{screen}");
         assert!(!line_of(&screen, "[x] beta").contains("global"), "{screen}");
         assert!(line_of(&screen, "o/s").contains("not fetched"), "{screen}");

@@ -3,8 +3,8 @@
 
 // At the crate root, so the renderer names these as `crate::app`, `crate::sbx` and so on.
 use aisbx_core::{
-    actions, app, create, find, folders, geom, headless, input, insight, job, kits, litellm, model,
-    models, repo_skills_ui, roster, sbx, startdir, state, stats,
+    actions, app, compat, create, find, folders, geom, headless, input, insight, job, kits,
+    litellm, model, models, repo_skills_ui, roster, sbx, startdir, state, stats,
 };
 // Only the tests use it: create_wizard_golden removes the token kit it writes.
 #[cfg(test)]
@@ -35,8 +35,10 @@ aisbx — Docker Sandboxes dashboard for the aisbx kits
 
 USAGE:
     aisbx [OPTIONS]                        the dashboard
-    aisbx up|run|step|status|stop|rm …     headless, for scripts (below)
-    aisbx skill-repo add|rm|ls|fetch …     the configured skill repositories (below)
+    aisbx up|run|step|status|stop|rm ...   headless, for scripts (below)
+    aisbx skills ls|on|off|default ...     the shared store's skills per sandbox (below)
+    aisbx skill-repo add|rm|ls|fetch ...   deprecated: the skill repositories (below)
+    aisbx skill add|rm|ls|sync ...         deprecated: repo skills per sandbox (below)
 
 OPTIONS:
     -a, --all        start with the other folders' sandboxes expanded (the default)

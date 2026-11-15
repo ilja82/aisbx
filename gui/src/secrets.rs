@@ -141,6 +141,7 @@ pub fn show_secrets(ui: &mut egui::Ui, app: &mut App) {
                             meta: &secret.note,
                             state: Some(State { text, color, value }),
                             actions: &labels,
+                            switch: None,
                             reserve,
                             selected: list.is_focused(*i),
                             rule: n > 0,

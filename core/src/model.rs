@@ -2943,7 +2943,8 @@ mod checkout_tests {
 
         // A user kit in its own folder is an addon, and flags no other checkout.
         let mut catalog = catalog;
-        let root = std::env::temp_dir().join(format!("aisbx-user-kits-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("aisbx-model-user-kits-{}", std::process::id()));
         let tools = root.join("proj-tools");
         std::fs::create_dir_all(&tools).unwrap();
         std::fs::write(tools.join("proj-tools.yaml"), "kind: mixin\n").unwrap();

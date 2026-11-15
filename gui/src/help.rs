@@ -70,7 +70,7 @@ pub fn keys(action: Action) -> Vec<String> {
         | Action::Connect
         | Action::StartDir
         | Action::Skills
-        | Action::RepoSkills
+        | Action::SandboxSkills
         | Action::Folders
         | Action::SandboxFolders
         | Action::Settings

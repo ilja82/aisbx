@@ -31,9 +31,10 @@ They use the same kits, sandbox names, LiteLLM connections and setup tokens, and
 | Command | What runs |
 | --- | --- |
 | `aisbx up` | writes the connection's generated kit on a LiteLLM backend, then `sbx create` with the backend and addon kits |
-| `aisbx run` | `sbx exec`: the agent update, the prompt upload, then the agent in print mode; after the run, `sbx policy approval respond` dismisses held requests |
+| `aisbx run` | `sbx exec`: the skill links, the agent update, the prompt upload, then the agent in print mode; after the run, `sbx policy approval respond` dismisses held requests |
 | `aisbx ls` | `sbx ls --json` |
 | `aisbx kits` | nothing: it reads the kit folders on this computer |
+| `aisbx skills` | `sbx skills ls --json`; `on` and `off` for one sandbox also `sbx ls --json`. The switches are a file in the aisbx state folder |
 | `aisbx status` | `sbx ls --json`, `sbx inspect --json` and `sbx policy approval ls --json` |
 | `aisbx stop` / `rm` | `sbx stop` / `sbx rm --force` |
 | `aisbx step` | `up` with `--deny-network`, `sbx policy ls`, `sbx policy check network` (in parallel), `sbx policy log`, the agent or checks through `sbx exec`, then `rm` and `sbx ls` to prove the removal ([The step protocol](step-protocol.md)) |
@@ -96,7 +97,8 @@ Give the workspace folder as the last argument: `aisbx up --backend <kit> [optio
 | `--local NAME` | the local engine, for a `*-local` backend (see below) |
 | `--clone` | clone mode: the agent works on its own clone, your repo is read-only |
 | `--skills MODE` | `off`, `readonly` or `readwrite`: how the sandbox mounts the [skills store](skills.md#shared-agent-skills); default the host's `skills.defaultMode` |
-| `--skill REPO[#SKILL]` | skills from a cached skill repo (repeatable; [Skills from skill repos](skills.md#skills-from-skill-repos-aisbx-skill)) |
+| `--skill-on SKILL`, `--skill-off SKILL` | the sandbox's own switch for a skill of the [skills store](skills.md#switches) (repeatable; see below) |
+| `--skill REPO[#SKILL]` | **deprecated**, use `--skill-on`: skills from a cached skill repo (repeatable; [Skills from skill repos](skills.md#skills-from-skill-repos-aisbx-skill), [Deprecations](deprecations.md#skill-repos)) |
 | `--deny-network HOST` | keeps the sandbox off a host (repeatable; a deny beats every allow) |
 | `--mount DIR[:ro]` | adds a host folder as an extra workspace (repeatable; see below) |
 | `--cpus N`, `--memory SIZE` | default 4 and `4g`; `auto` takes sbx's own ([CPU and memory limits](sandboxes.md#cpu-and-memory-limits)) |
@@ -124,6 +126,19 @@ When the sandbox exists, `up` compares the `--kit` addons with the kits `sbx ins
 - When `up` cannot read the sandbox's kit list, it exits 125.
 - Kits the sandbox has beyond `--kit` stay: `up` never removes a kit.
 - With no `--kit`, or nothing missing, `up` runs no `sbx kit add`.
+
+#### `up --skill-on` and `--skill-off`
+
+`--skill-on SKILL` and `--skill-off SKILL` give the sandbox its own switches for skills of the skills store, as
+[`aisbx skills on|off SANDBOX`](#aisbx-skills) does. Both are repeatable.
+
+- `up` checks every name before it creates anything. A refused name, or a name given to both flags, exits 2.
+- A new sandbox gets exactly these own switches. The own switches that an earlier sandbox of the same name left go,
+  also when you give no flag.
+- On an existing sandbox, `up` sets the given switches and keeps its other own switches.
+- A name that the store does not hold yet is kept, with a note on stderr.
+- When `up` cannot write the switches of a new sandbox, it warns on stderr and still prints the name. On an existing
+  sandbox, it exits 1 and prints no name.
 
 #### Extra folders
 
@@ -248,6 +263,64 @@ deny-all fallback, the user kit folders searched, and every kit found or skipped
   Run it when no other script creates sandboxes: it keeps images younger than one hour, but a create can reuse an
   older one.
 
+### `aisbx skills`
+
+`aisbx skills` sets which skills of the [sbx skills store](skills.md#the-sbx-skills-store) each sandbox gets, as `K`
+and `i` do in the dashboard. Every skill has a switch for all sandboxes, off until you switch it on. Each sandbox can
+switch single skills the other way ([Switches](skills.md#switches)). A change applies at the sandbox's next start
+([When the switches apply](skills.md#when-the-switches-apply)).
+
+| Command | What it does |
+| --- | --- |
+| `skills ls [SANDBOX] [--json]` | lists the store's skills and their switches (see below) |
+| `skills on --global SKILL...`, `skills off --global SKILL...` | switches skills on or off for all sandboxes |
+| `skills on SANDBOX SKILL...`, `skills off SANDBOX SKILL...` | switches skills on or off for one sandbox: its own switches |
+| `skills default SANDBOX [SKILL...]` | drops the sandbox's own switches, or only those of the named skills |
+| `skills auto-update [on\|off]` | prints `on` or `off`, or sets the daily update of the store's Git skills ([Updates](skills.md#updates)) |
+
+- `on`, `off` and `default` check every name first. A refused name exits 2, and nothing is written.
+- `on` and `off` for one sandbox exit 125 when sbx lists no sandbox of that name. `default` also takes the name of a
+  sandbox that is gone.
+- A sandbox's switch that matches the switch for all sandboxes is not kept: the sandbox follows that one.
+- A name that the store does not hold yet is kept, with a note on stderr. Its switch applies once the skill is in the
+  store (`sbx skills add REPO`).
+- After `on --global` or `off --global`, a note on stderr names the sandboxes whose own switch still differs.
+- `on`, `off`, `default` and `auto-update on|off` print nothing on stdout. Their result goes to stderr.
+  `auto-update` without an argument prints `on` or `off` on stdout.
+- When the switches file (`store-skills.json` in the aisbx state folder) cannot be read, the command exits 1 and
+  leaves the file as it is.
+
+`skills ls` prints one line per store skill. The skills are grouped by where they came from
+([Where a skill came from](skills.md#where-a-skill-came-from)): first your skills folders in the order
+`sbx skills import` reads them, then the repositories by name, then the others. A line has three tab-separated
+fields:
+
+1. the skill's name;
+2. its source: a skills folder such as `~/.claude/skills`, a repository such as `anthropics/skills`, or `-`;
+3. `on` or `off` for all sandboxes.
+
+With `SANDBOX`, a line has two more fields: `on` or `off` for that sandbox, then `own` where the sandbox has its own
+switch (else the field is empty). The last line on stderr is `auto-update: on` or `auto-update: off`. A tab or
+newline inside a field becomes a space.
+
+With `--json`, `skills ls` prints one JSON document on stdout and nothing on stderr. `all` is the switch for all
+sandboxes. `on` and `own` are there only with `SANDBOX`. `source` is `null` when aisbx does not know it. For
+example, with `SANDBOX` (the real output puts each key on its own line, in alphabetical order):
+
+```json
+{
+  "store": "/home/me/.local/state/sandboxes/sandboxes/agent-skills",
+  "auto_update": true,
+  "skills": [
+    { "name": "slides", "source": { "folder": "~/.claude/skills" }, "all": false, "on": true, "own": true },
+    { "name": "pdf", "source": { "repo": "anthropics/skills" }, "all": true, "on": true, "own": false },
+    { "name": "notes", "source": null, "all": false, "on": false, "own": false }
+  ]
+}
+```
+
+If sbx cannot list the store, `skills ls` prints one line to stderr, nothing to stdout, and exits 125.
+
 ## The contract and exit codes
 
 stdout carries only the agent's output (for `up`, the sandbox name). Everything aisbx and sbx have to say goes to
@@ -284,8 +357,11 @@ An exit code of 0 does not prove the agent succeeded. Read the agent's own outpu
   deny-all.
 - `run` updates the agent first, as `↵` does. `--no-update` skips it; use it right after `up`, because the kit's
   install hook just did the update.
-- On a sandbox with `host-skills`, `run` links the host's skills before the update, also with `--no-update`. A
-  failure is one stderr line, and the run goes on.
+- Before the update, `run` links the store skills that are on for the sandbox
+  ([When the switches apply](skills.md#when-the-switches-apply)). Then, on a sandbox with `host-skills`, it links
+  the host's skills. Both steps run also with `--no-update`. A failure is one stderr line, and the run goes on.
+  When `run` cannot read the switches, it says so on stderr and skips the store link: the sandbox keeps the links
+  of its last start.
 
 ## Why `run` works this way
 
@@ -313,8 +389,13 @@ These commands manage what the dashboard manages on its own screens. Each page d
 | `aisbx local discover \| add \| ls \| fetch \| rm` | the create wizard's Engine step, **Refresh models** (`L`) | [Local inference engines](local.md#in-scripts) |
 | `aisbx kits` | the create wizard's kit list | [Your own kits](kits.md#your-own-kits) |
 | `aisbx folders ls \| add \| rm` | **Host folders** (`F`) | [Host folders](sandboxes.md#host-folders-f-and-companionjson) |
-| `aisbx skill-repo add \| rm \| ls \| fetch \| auto-update` | **Skills** (`K`) | [Skill repositories](skills.md#skill-repositories-aisbx-skill-repo) |
-| `aisbx skill add \| rm \| ls \| sync` | **Repo skills** (`i`) | [Skills from skill repos](skills.md#skills-from-skill-repos-aisbx-skill) |
+| `aisbx skills ls \| on \| off \| default \| auto-update` | **Skills** (`K`), **Sandbox skills** (`i`) | [`aisbx skills`](#aisbx-skills), [Switches](skills.md#switches) |
+| `aisbx skill-repo add \| rm \| ls \| fetch \| auto-update` (deprecated) | *Repo skills (deprecated)* on `K` | [Skill repositories](skills.md#skill-repositories-aisbx-skill-repo) |
+| `aisbx skill add \| rm \| ls \| sync` (deprecated) | *Repo skills (deprecated)* on `i` | [Skills from skill repos](skills.md#skills-from-skill-repos-aisbx-skill) |
+
+`aisbx skill-repo`, `aisbx skill` and `up --skill` are deprecated. They keep working and warn once per run on
+stderr; stdout does not change. Put the skills into the store with `sbx skills add REPO`, then switch them with
+[`aisbx skills`](#aisbx-skills) ([Deprecations](deprecations.md#skill-repos)).
 
 `aisbx --help` prints every headless command with its options.
 
