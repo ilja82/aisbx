@@ -336,6 +336,12 @@ pub struct WorkspaceAnswers {
     /// How the host's shared agent-skills store is mounted. Opens on the host's own
     /// `skills.defaultMode`, and is always passed explicitly.
     pub skills: crate::sbx::SkillsMode,
+    /// The store's skills when the form opened, in the order the skills screen lists them.
+    pub store_skills: Vec<String>,
+    /// Which of them were on for all sandboxes then.
+    pub store_global: std::collections::BTreeSet<String>,
+    /// This sandbox's own switches against those ([`crate::store_skills::Own`]).
+    pub store_own: crate::store_skills::Own,
     /// Ports to publish at creation, in sbx's grammar, space- or comma-separated.
     pub ports: TextInput,
     /// Hosts this sandbox alone may not reach, in the same space-or-comma grammar as `ports`.
@@ -382,6 +388,8 @@ impl CreateRow {
             | CreateRow::Clone
             | CreateRow::GitGuard
             | CreateRow::Skills
+            | CreateRow::SkillsFold
+            | CreateRow::StoreSkill(_)
             | CreateRow::AdvancedFold
             | CreateRow::Ports
             | CreateRow::DenyNetwork
@@ -797,6 +805,8 @@ pub struct WizardState {
     /// The Workspace step shows the ports, the blocked hosts and the MCP servers
     /// ([`CreateRow::AdvancedFold`]).
     pub advanced_open: bool,
+    /// The Workspace step shows a switch per store skill ([`CreateRow::SkillsFold`]).
+    pub skills_open: bool,
     /// The form opened on the last create's answers ([`CreateForm::apply_defaults`]), which the
     /// Review's heading says.
     pub prefilled: bool,
@@ -814,6 +824,7 @@ impl Default for WizardState {
             models_open: false,
             files_open: false,
             advanced_open: false,
+            skills_open: false,
             prefilled: false,
         }
     }
@@ -883,8 +894,8 @@ pub fn skills_mode_name(mode: crate::sbx::SkillsMode) -> &'static str {
 pub fn skills_gloss(mode: crate::sbx::SkillsMode) -> &'static str {
     match mode {
         crate::sbx::SkillsMode::Off => "the agent gets none of the shared skills",
-        crate::sbx::SkillsMode::Readonly => "the agent uses the shared skills",
-        crate::sbx::SkillsMode::Readwrite => "the agent uses and changes the shared skills",
+        crate::sbx::SkillsMode::Readonly => "the agent gets the shared skills switched on for it",
+        crate::sbx::SkillsMode::Readwrite => "the agent gets and changes every shared skill",
     }
 }
 
@@ -1295,6 +1306,15 @@ impl CreateForm {
             let skills = skills_mode_name(ws.skills);
             let default = ws.skills == app.skills_default;
             answer(CreateStep::Workspace, "Skills", skills.into(), default);
+        }
+        if self.store_skills_offered(catalog) {
+            let on = self.store_skills_on();
+            let own = (0..ws.store_skills.len()).any(|i| self.store_skill_own(i));
+            let value = match on.is_empty() {
+                true => "none".to_string(),
+                false => on.join(", "),
+            };
+            answer(CreateStep::Workspace, "Shared skills", value, !own);
         }
         if !ws.ports.value.trim().is_empty() {
             let ports = ws.ports.value.trim().to_string();
@@ -1778,7 +1798,10 @@ impl CreateForm {
                 };
             }
             CreateRow::Folder(i) => return self.folder_key(catalog, i, key),
-            CreateRow::ModelsFold | CreateRow::FilesFold | CreateRow::AdvancedFold => {
+            CreateRow::ModelsFold
+            | CreateRow::FilesFold
+            | CreateRow::AdvancedFold
+            | CreateRow::SkillsFold => {
                 let open = match key.code {
                     KeyCode::Enter | KeyCode::Char(' ') => !self.fold_open(row),
                     KeyCode::Right => true,
@@ -1801,6 +1824,7 @@ impl CreateForm {
                     CreateRow::Addon(i) => self.toggle_addon(i),
                     CreateRow::Mcp(i) => self.toggle_mcp(i),
                     CreateRow::McpNone => self.toggle_no_mcp(),
+                    CreateRow::StoreSkill(i) => self.toggle_store_skill(i),
                     CreateRow::Clone => self.workspace.clone = !self.workspace.clone,
                     CreateRow::GitGuard => self.workspace.git_guard = !self.workspace.git_guard,
                     // Three values, so space walks them rather than flipping one — off →
@@ -1846,7 +1870,8 @@ impl CreateForm {
                     | CreateRow::FolderAdd
                     | CreateRow::ModelsFold
                     | CreateRow::FilesFold
-                    | CreateRow::AdvancedFold => {}
+                    | CreateRow::AdvancedFold
+                    | CreateRow::SkillsFold => {}
                 }
                 self.refresh_auto_name(catalog);
             }
@@ -1905,6 +1930,7 @@ impl CreateForm {
                 // same way an addon kit is.
                 CreateRow::Mcp(i) => self.toggle_mcp(i),
                 CreateRow::McpNone => self.toggle_no_mcp(),
+                CreateRow::StoreSkill(i) => self.toggle_store_skill(i),
                 CreateRow::Name
                 | CreateRow::TokenName
                 | CreateRow::Token
@@ -1918,7 +1944,8 @@ impl CreateForm {
                 | CreateRow::FolderAdd
                 | CreateRow::ModelsFold
                 | CreateRow::FilesFold
-                | CreateRow::AdvancedFold => {}
+                | CreateRow::AdvancedFold
+                | CreateRow::SkillsFold => {}
             },
             // The skills mode is the one answer here that is a small enum rather than a tick, so
             // ←→ pick between its values.
@@ -1979,6 +2006,16 @@ impl CreateForm {
                     .count();
                 if edited > 0 {
                     parts.push(format!("{edited} edited"));
+                }
+            }
+            CreateRow::SkillsFold => {
+                let on = self.store_skills_on();
+                let own = (0..ws.store_skills.len())
+                    .filter(|i| self.store_skill_own(*i))
+                    .count();
+                parts.push(format!("{} of {} on", on.len(), ws.store_skills.len()));
+                if own > 0 {
+                    parts.push(format!("{own} own"));
                 }
             }
             CreateRow::AdvancedFold => {
@@ -2218,6 +2255,7 @@ pub fn field_gloss(row: CreateRow) -> &'static str {
         CreateRow::ModelsFold => "the agent picks them itself unless you do",
         CreateRow::FilesFold => "for your review",
         CreateRow::AdvancedFold => "ports, blocked hosts, MCP servers",
+        CreateRow::SkillsFold => "which shared skills this sandbox gets",
         CreateRow::Ports => "for example 8080:3000",
         CreateRow::DenyNetwork => "for example api.example.com",
         CreateRow::McpNone => "the agent gets no MCP servers",
@@ -2536,18 +2574,42 @@ impl CreateForm {
             CreateRow::Skills => {
                 let text = match ws.skills {
                     crate::sbx::SkillsMode::Readonly => {
-                        "The agent uses the skills you share with every sandbox (K), but cannot \
+                        "The agent gets the shared skills that are switched on for it, but cannot \
                          change them."
                     }
                     crate::sbx::SkillsMode::Readwrite => {
-                        "The agent uses the shared skills and can change them; every other \
-                         sandbox gets its changes."
+                        "The agent gets every shared skill and can change them; every other \
+                         sandbox gets its changes. The skill switches do not apply."
                     }
                     crate::sbx::SkillsMode::Off => "The agent gets none of the shared skills.",
                 };
                 Help::new(
                     "share skills",
                     format!("{text} Changing this later rebuilds the sandbox."),
+                )
+            }
+            CreateRow::SkillsFold => Help::new(
+                "skills",
+                "Which skills of the shared store this sandbox gets. Each starts as Skills (K) \
+                 switches it for all sandboxes; a switch you change here is this sandbox's own.",
+            ),
+            CreateRow::StoreSkill(i) => {
+                let Some(skill) = ws.store_skills.get(i) else {
+                    return Help::new("", "");
+                };
+                let all = match ws.store_global.contains(skill) {
+                    true => "on",
+                    false => "off",
+                };
+                let own = match self.store_skill_own(i) {
+                    true => format!(" This switch is this sandbox's own; for all sandboxes it is {all}."),
+                    false => format!(" For all sandboxes it is {all} too."),
+                };
+                Help::new(
+                    skill.clone(),
+                    format!(
+                        "When on, the agent gets the skill {skill}. Otherwise, it does not.{own}"
+                    ),
                 )
             }
             CreateRow::AdvancedFold => Help::new(

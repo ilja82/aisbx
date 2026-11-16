@@ -285,7 +285,7 @@ impl Geometry {
     /// across what is between.
     fn new(rect: Rect, label: f32, out: f32) -> Self {
         let w = rect.width();
-        let label = label.clamp(120.0, w * 0.34);
+        let label = label.max(120.0).min(w * 0.34);
         let wall_w = wall_width(w);
         let earliest = rect.left() + label + 2.0 * GAP + ARROW;
         let latest = rect.right() - out - 2.0 * GAP - ARROW - wall_w;
@@ -1054,6 +1054,15 @@ mod tests {
         assert!(at(&narrow, "listed while it runs").right() < wall.left());
         assert!(at(&narrow, "through the sbx proxy").left() > wall.right());
         assert!(at(&narrow, "through the sbx proxy").right() <= 560.0);
+    }
+
+    /// A list dragged to its widest on the smallest window leaves the page under 200 points: the
+    /// map still draws its wall there.
+    #[test]
+    fn the_map_draws_on_a_page_narrower_than_its_labels() {
+        let sb = model::sample("box", Some("claude-anthropic"), &["rtk"]);
+        let (galleys, wall) = drawn(&sb, 190.0);
+        assert!(!galleys.is_empty() && wall.width() > 0.0, "{wall:?}");
     }
 
     /// Also at the narrowest page: the kits by label on as many lines as they take, under the

@@ -33,6 +33,9 @@ pub struct Kit {
     /// The kit declares where its agent reads skills (`agent-skills@1`), so sbx mounts the shared
     /// skills store for it (`--skills`) — see [`Backend::shares_skills`].
     pub skills: bool,
+    /// The agent skills folders its startup hook links the store into
+    /// ([`crate::store_skills::HOOK`]), in the descriptor's order.
+    pub skill_dirs: Vec<String>,
     /// The kit declares volumes (`volume@1`): what it keeps there outlives `sbx rm`, so a rebuild
     /// keeps it. On a workload, that is the agent's session history.
     pub volumes: bool,
@@ -881,6 +884,7 @@ impl Kit {
             harnesses: read_lines(dir, HARNESSES_FILE),
             volumes: caps.iter().any(|c| c.kind == "volume@1"),
             skills: caps.iter().any(|c| c.kind == "agent-skills@1"),
+            skill_dirs: store_link_dirs(&caps),
             requires: features(&doc, "requires"),
             provides: features(&doc, "provides"),
         })
@@ -977,6 +981,39 @@ pub fn capabilities(doc: &Yaml) -> Vec<Capability> {
             let optional = group["optional"].as_bool().unwrap_or(false);
             for member in group["capabilities"].as_vec().into_iter().flatten() {
                 out.push(one(member, optional));
+            }
+        }
+    }
+    out
+}
+
+/// The agent skills folders a workload kit folder's hook links the store into ([`Kit::skill_dirs`]);
+/// none for a mixin, or a folder whose descriptor does not read.
+pub fn skill_dirs_of(dir: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(descriptor_path(dir)) else {
+        return Vec::new();
+    };
+    match load_descriptor(&text) {
+        Ok(doc) if doc["kind"].as_str() == Some("workload") => store_link_dirs(&capabilities(&doc)),
+        _ => Vec::new(),
+    }
+}
+
+/// The folders the startup hooks hand the store's link hook: each `["sh", HOOK, <folder>]`.
+fn store_link_dirs(caps: &[Capability]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for cap in caps.iter().filter(|c| c.kind == "lifecycle@1") {
+        for hook in cap.config["startup"].as_vec().into_iter().flatten() {
+            let words: Vec<&str> = hook["command"]
+                .as_vec()
+                .into_iter()
+                .flatten()
+                .filter_map(Yaml::as_str)
+                .collect();
+            if let ["sh", script, dir] = words[..] {
+                if script == crate::store_skills::HOOK && !out.iter().any(|d| d == dir) {
+                    out.push(dir.to_string());
+                }
             }
         }
     }
@@ -1937,6 +1974,60 @@ mod tests {
                 backend.kit.name
             );
         }
+    }
+
+    /// Where each backend's hook links the store: the folders the pre-start step hands it.
+    #[test]
+    fn each_backend_names_the_folders_its_hook_links_the_store_into() {
+        let catalog = Catalog::load().unwrap();
+        let dirs = |name: &str| catalog.backend(name).unwrap().kit.skill_dirs.clone();
+        for name in [
+            "claude-litellm",
+            "claude-anthropic",
+            "claude-token",
+            "claude-local",
+            "claude-bare-local",
+        ] {
+            assert_eq!(dirs(name), ["/home/agent/.claude/skills"], "{name}");
+        }
+        for name in ["opencode-litellm", "opencode-local"] {
+            assert_eq!(
+                dirs(name),
+                ["/home/agent/.config/opencode/skills"],
+                "{name}"
+            );
+        }
+        for name in ["codex-openai", "pi-litellm", "pi-local"] {
+            assert_eq!(dirs(name), ["/home/agent/.agents/skills"], "{name}");
+        }
+        assert_eq!(
+            dirs("agy"),
+            [
+                "/home/agent/.gemini/antigravity/skills",
+                "/home/agent/.gemini/antigravity-cli/skills"
+            ]
+        );
+        for addon in catalog.all_addons() {
+            assert!(addon.kit.skill_dirs.is_empty(), "{}", addon.kit.name);
+            assert!(
+                skill_dirs_of(&addon.kit.dir).is_empty(),
+                "{}",
+                addon.kit.name
+            );
+        }
+        for backend in &catalog.backends {
+            assert_eq!(skill_dirs_of(&backend.kit.dir), backend.kit.skill_dirs);
+        }
+        assert!(skill_dirs_of(Path::new("/no/such/kit")).is_empty());
+    }
+
+    #[test]
+    fn only_a_startup_hook_running_the_store_hook_names_a_folder() {
+        let doc = load_descriptor(
+            "kind: workload\ncapabilities:\n  - type: com.docker.sandbox/lifecycle@1\n    config:\n      install:\n        - command: [\"sh\", \"/usr/local/lib/aisbx/skills/skills-store.sh\", \"/i\"]\n      startup:\n        - command: [\"sh\", \"/usr/local/lib/aisbx/skills/skills-store.sh\", \"/a\"]\n        - command: [\"sh\", \"/usr/local/lib/aisbx/skills/other.sh\", \"/b\"]\n        - command: [\"sh\", \"/usr/local/lib/aisbx/skills/skills-store.sh\"]\n        - command: \"sh /usr/local/lib/aisbx/skills/skills-store.sh /c\"\n        - command: [\"sh\", \"/usr/local/lib/aisbx/skills/skills-store.sh\", \"/a\"]\n",
+        )
+        .unwrap();
+        assert_eq!(store_link_dirs(&capabilities(&doc)), ["/a"]);
     }
 
     /// The telemetry switches the Claude Code workloads' image sets: every `DISABLE_*`,

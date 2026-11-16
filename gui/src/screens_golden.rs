@@ -2,12 +2,13 @@
 //! keys as egui events reach the same confirmation and job as through core's `on_key`. Also the
 //! same-frame cases, the masked fields and the selected row's buttons.
 
-use aisbx_core::app::{App, FoldersRow, KitsRow, Modal, Screen};
+use aisbx_core::app::{App, FoldersRow, KitsRow, Modal, SandboxSkillRow, Screen, SkillRow};
 use aisbx_core::input::KeyCode;
 use aisbx_core::kits::Catalog;
 use aisbx_core::model::{self, Auth};
 use aisbx_core::repo_skills_ui::{RepoScope, RepoSkillsForm, RepoView};
 use aisbx_core::skill_select::Selection;
+use aisbx_core::store_skills::{Source, Switches};
 use aisbx_core::testkit;
 use eframe::egui::{self, Key, Modifiers};
 
@@ -21,6 +22,7 @@ fn focus(app: &App) -> usize {
         Screen::Secrets(f) => f.focus,
         Screen::Connection(f) => f.focus,
         Screen::Skills(f) => f.focus,
+        Screen::SandboxSkills(f) => f.focus,
         Screen::RepoSkills(f) => f.focus,
         Screen::Approvals(f) => f.focus,
         other => panic!("no S7 screen is open: {other:?}"),
@@ -39,6 +41,7 @@ fn at(app: &App, row: &str) -> usize {
         Screen::RepoSkills(f) => names(f.rows()),
         Screen::Secrets(_) => names(app.secret_rows()),
         Screen::Skills(_) => names(app.skill_rows()),
+        Screen::SandboxSkills(f) => names(app.sandbox_skill_rows(&f.sandbox)),
         other => panic!("no rows for {other:?}"),
     };
     let found = rows.iter().position(|r| r == row);
@@ -246,10 +249,20 @@ fn with_repo(app: &mut App) {
     }
 }
 
+/// [`on_login`] on a host that still uses skill repositories, so the deprecated rows show.
+fn with_skill_repos() -> App {
+    let mut app = on_login();
+    app.skill_repos_in_use = true;
+    app
+}
+
 #[test]
 fn repo_skills_tick_save_and_sync_through_the_window_are_the_same_job() {
-    let got = same(&on_login, &|d| {
+    let got = same(&with_skill_repos, &|d| {
         d.type_text("i");
+        assert!(matches!(d.app().screen, Screen::SandboxSkills(_)));
+        go(d, "RepoSkills");
+        d.press(KeyCode::Enter);
         with_repo(d.app_mut());
         let Screen::RepoSkills(f) = &d.app().screen else {
             panic!("the picker is open")
@@ -801,6 +814,365 @@ fn a_skills_remove_button_is_d() {
     let open = |d: &mut dyn Driver| d.type_text("K");
     let remove = button_is_key(&with_store, &open, KeyCode::Char('d'), "Remove");
     assert!(remove.starts_with("confirm"), "{remove}");
+}
+
+// --- the skills pages -----------------------------------------------------------------------
+
+/// A skill whose name runs past its line.
+const LONG: &str =
+    "a-skill-with-a-name-so-long-that-it-runs-past-the-end-of-its-line-in-the-window-and-the-window-cuts-it-short-with-an-ellipsis";
+
+/// A store with skills from two places: `web` from this host's `~/.claude/skills`; `docx`, `pdf`
+/// and [`LONG`] added from `anthropics/skills`. Only `pdf` is on for all sandboxes.
+fn with_store() -> App {
+    use aisbx_core::store_skills::{HostFolder, Origin, Scope};
+    let mut app = on_login();
+    let store = ["web", "docx", "pdf", LONG].map(String::from).to_vec();
+    app.skills = Some(aisbx_core::sbx::SkillsStore {
+        store: "/store".into(),
+        skills: store,
+    });
+    app.host_skill_folders = vec![HostFolder {
+        dir: "~/.claude/skills".into(),
+        skills: ["web".to_string()].into(),
+    }];
+    let repo = || Origin::Repo("anthropics/skills".into());
+    app.switches
+        .record(["docx", "pdf", LONG].map(|s| (s.to_string(), repo())));
+    app.switches.set(Scope::All, "pdf", true);
+    app
+}
+
+/// The page as the window draws it: the switches' words, pills and knobs on each skill's line.
+struct Lines<'w>(&'w Win);
+
+impl Lines<'_> {
+    /// Where the text `text` is drawn.
+    fn text(&self, text: &str) -> egui::Rect {
+        (self.0.drawn_at.iter())
+            .find(|(t, _)| t == text)
+            .unwrap_or_else(|| panic!("{text} is not drawn: {:?}", self.0.drawn))
+            .1
+    }
+
+    /// Where `text` is drawn on the line of the text `title`.
+    fn beside(&self, title: &str, text: &str) -> egui::Rect {
+        let y = self.text(title).center().y;
+        (self.0.drawn_at.iter())
+            .find(|(t, r)| t == text && (r.center().y - y).abs() < 4.0)
+            .unwrap_or_else(|| panic!("{text} beside {title}: {:?}", self.0.drawn_at))
+            .1
+    }
+
+    /// The switch's word on the line of `title`, and whether it says on.
+    fn word(&self, title: &str) -> (egui::Rect, bool) {
+        let y = self.text(title).center().y;
+        let words = [(crate::controls::ON, true), (crate::controls::OFF, false)];
+        (self.0.drawn_at.iter())
+            .filter(|(_, r)| (r.center().y - y).abs() < 4.0)
+            .find_map(|(t, r)| words.iter().find(|(w, _)| t == w).map(|(_, on)| (*r, *on)))
+            .unwrap_or_else(|| panic!("no switch beside {title}: {:?}", self.0.drawn_at))
+    }
+
+    /// The pill of the switch on the line of `title`: the rectangle right after its word.
+    fn pill(&self, title: &str) -> egui::Rect {
+        let (word, _) = self.word(title);
+        let near = |r: &egui::Rect| r.left() > word.right() && r.left() < word.right() + 16.0;
+        (self.0.fills.iter().map(|(r, _)| r))
+            .chain(self.0.rings.iter().map(|(r, _)| r))
+            .copied()
+            .find(|r| near(r) && (r.center().y - word.center().y).abs() < 4.0)
+            .unwrap_or_else(|| panic!("no pill beside {title}: {:?}", self.0.fills))
+    }
+
+    /// Whether the knob in the pill of `title` sits in its right half.
+    fn knob_right(&self, title: &str) -> bool {
+        let pill = self.pill(title);
+        let (knob, _) = (self.0.circles.iter())
+            .find(|(c, _)| pill.contains(*c))
+            .unwrap_or_else(|| panic!("no knob in the pill of {title}: {:?}", self.0.circles));
+        knob.x > pill.center().x
+    }
+}
+
+/// A window on the page `open` opens, tall enough for all of it.
+fn page(setup: &dyn Fn() -> App, open: &dyn Fn(&mut dyn Driver)) -> Win {
+    let mut w = Win::new(setup());
+    w.size = egui::vec2(1200.0, 1400.0);
+    open(&mut w);
+    w.frame(Vec::new());
+    w
+}
+
+/// Every skill is on its own line under the place it came from: the name at the left, then
+/// *Remove*, then its switch for all sandboxes at the right edge, which says *On* or *Off*, is
+/// filled while on and has its knob at the side of its state. A name too long for its line is
+/// cut before the buttons.
+#[test]
+fn the_store_lists_its_skills_where_they_came_from_each_with_its_switch() {
+    let open = |d: &mut dyn Driver| d.type_text("K");
+    let w = page(&with_store, &open);
+    let lines = Lines(&w);
+    let heading = |title: &str, gloss: &str| {
+        lines.beside(title, gloss);
+        lines.text(title).top()
+    };
+    let subtitle = (w.drawn.iter()).find(|t| t.starts_with("The store: /store."));
+    let subtitle = subtitle.unwrap_or_else(|| panic!("the subtitle: {:?}", w.drawn));
+    let shared = aisbx_core::app::skills_shared_line(w.app.skills_sharers());
+    let intro = w.app.skills_intro().join(" ");
+    assert!(
+        subtitle.contains(&format!("{shared} ")),
+        "who shares it: {subtitle}"
+    );
+    assert!(subtitle.ends_with(&format!("\n{intro}")), "{subtitle}");
+    let source = |s: Source| App::source_heading(&s);
+    let (host_title, host_gloss) = source(Source::Folder("~/.claude/skills".into()));
+    let (repo_title, repo_gloss) = source(Source::Repo("anthropics/skills".into()));
+    let host = heading(&host_title, &host_gloss);
+    let repo = heading(&repo_title, &repo_gloss);
+    let (change, _) = w.app.skill_heading(&SkillRow::Import).expect("a heading");
+    let store = lines.text(&change).top();
+    assert!(host < repo && repo < store, "{host} {repo} {store}");
+    let visuals = w.ctx.global_style().visuals.clone();
+    let (green, weak) = (
+        crate::theme::running(visuals.dark_mode),
+        visuals.weak_text_color(),
+    );
+    let colour = |rect: egui::Rect| {
+        (w.colored.iter().zip(&w.drawn_at))
+            .find(|(_, (_, r))| *r == rect)
+            .map(|((_, c), _)| *c)
+    };
+    let fill = |rect: egui::Rect| (w.fills.iter()).find(|(r, _)| *r == rect).map(|(_, c)| *c);
+    let edge = |rect: egui::Rect| (w.rings.iter()).find(|(r, _)| *r == rect).map(|(_, c)| *c);
+    for (name, on, under) in [
+        ("web", false, host),
+        ("docx", false, repo),
+        ("pdf", true, repo),
+    ] {
+        let title = lines.text(name);
+        assert!(title.top() > under, "{name} under its heading");
+        let remove = lines.beside(name, "Remove");
+        let (word, said) = lines.word(name);
+        let pill = lines.pill(name);
+        assert!(
+            title.right() < remove.left(),
+            "{name}: {title:?} {remove:?}"
+        );
+        assert!(
+            remove.right() < word.left() && word.right() < pill.left(),
+            "{name}"
+        );
+        assert_eq!(said, on, "{name}");
+        assert_eq!(lines.knob_right(name), on, "{name}'s knob");
+        match on {
+            true => {
+                assert_eq!(colour(word), Some(green), "{name}'s word");
+                assert_eq!(fill(pill), Some(green), "{name}'s pill is filled");
+            }
+            false => {
+                assert_eq!(colour(word), Some(weak), "{name}'s word");
+                assert_eq!(edge(pill), Some(weak), "{name}'s pill is hollow");
+                assert_eq!(fill(pill), Some(visuals.extreme_bg_color), "{name}'s pill");
+            }
+        }
+    }
+    let long = lines.text(LONG);
+    let remove = lines.beside(LONG, "Remove");
+    assert!(long.right() < remove.left(), "{long:?} {remove:?}");
+    assert!(w.elided.iter().any(|t| t == LONG), "cut: {:?}", w.elided);
+    assert!(!w.elided.iter().any(|t| t == "docx"), "{:?}", w.elided);
+    let pills: Vec<egui::Rect> = ["web", "docx", "pdf", LONG].map(|n| lines.pill(n)).to_vec();
+    assert!(
+        pills
+            .iter()
+            .all(|p| (p.right() - pills[0].right()).abs() < 0.5),
+        "the switches end in one column: {pills:?}"
+    );
+    let (daily, last) = w.app.skill_view(&SkillRow::AutoUpdate);
+    let (_, on) = lines.word(&daily);
+    assert!(on, "the daily update is on until switched off");
+    lines.beside(&daily, &last);
+    for button in ["Import…", "Add…", "Update…"] {
+        assert!(
+            w.drawn.iter().any(|t| t == button),
+            "{button}: {:?}",
+            w.drawn
+        );
+    }
+}
+
+/// After `open`, what a click on the switch of the line titled `title` does through the window,
+/// and what Space on the row `row` does through core: the same outcome and the same switches,
+/// which are returned.
+fn switch_is_space(
+    setup: &dyn Fn() -> App,
+    open: &dyn Fn(&mut dyn Driver),
+    row: &str,
+    title: &str,
+) -> Switches {
+    let mut core = Core(setup());
+    open(&mut core);
+    go(&mut core, row);
+    core.press(KeyCode::Char(' '));
+    let want = (outcome(&core.0), core.0.switches.clone());
+    let mut w = page(setup, open);
+    let at = Lines(&w).pill(title).center();
+    click(&mut w, at);
+    w.frame(Vec::new());
+    assert_eq!((outcome(&w.app), w.app.switches.clone()), want, "{title}");
+    assert_ne!(want.1, setup().switches, "{title}: the switch turned");
+    want.1
+}
+
+#[test]
+fn a_click_on_a_store_switch_turns_it_as_space_does() {
+    let open = |d: &mut dyn Driver| d.type_text("K");
+    let pdf = switch_is_space(&with_store, &open, "Skill(\"pdf\")", "pdf");
+    assert!(!pdf.global("pdf"), "pdf is off for all sandboxes");
+    let web = switch_is_space(&with_store, &open, "Skill(\"web\")", "web");
+    assert!(web.global("web"), "web is on for all sandboxes");
+    let (daily, _) = with_store().skill_view(&SkillRow::AutoUpdate);
+    let switched = switch_is_space(&with_store, &open, "AutoUpdate", &daily);
+    assert!(!switched.auto_update(), "the daily update is off");
+}
+
+/// A click on a skill's name only selects it, which shows core's notes under it.
+#[test]
+fn a_click_on_a_skills_name_selects_it_and_switches_nothing() {
+    let open = |d: &mut dyn Driver| d.type_text("K");
+    let mut w = page(&with_store, &open);
+    let before = w.app.switches.clone();
+    let pos = Lines(&w).text("docx").center();
+    click(&mut w, pos);
+    w.frame(Vec::new());
+    assert_eq!(focus(&w.app), at(&w.app, "Skill(\"docx\")"));
+    assert_eq!(w.app.switches, before);
+    let notes = w.app.skill_notes(&SkillRow::Skill("docx".into()));
+    assert!(w.drawn.contains(&notes.join(" ")), "{:?}", w.drawn);
+}
+
+/// The sandbox of [`on_login`].
+const SB: &str = "claude-anthropic-proj";
+
+/// A running sandbox with its own switch for `docx`, on, while only `pdf` is on for all.
+fn with_own_switch() -> App {
+    use aisbx_core::store_skills::Scope;
+    let mut app = on_login();
+    app.sandboxes[0].running = true;
+    app.skills = Some(aisbx_core::sbx::SkillsStore {
+        store: "/store".into(),
+        skills: vec!["pdf".into(), "docx".into()],
+    });
+    app.switches.set(Scope::All, "pdf", true);
+    app.switches.set(Scope::Sandbox(SB), "docx", true);
+    app
+}
+
+/// `i`: the sandbox's own page, titled with its label: what its switches do, the store's skills
+/// with the sandbox's switch each (*own* where it differs from all sandboxes), then *Apply now*
+/// and the reset, each with its button.
+#[test]
+fn a_sandboxs_skills_page_shows_its_switches_and_its_commands() {
+    let open = |d: &mut dyn Driver| d.type_text("i");
+    let w = page(&with_own_switch, &open);
+    assert!(matches!(&w.app.screen, Screen::SandboxSkills(_)));
+    let lines = Lines(&w);
+    lines.text(&format!("Skills · {}", w.app.sandbox_label(SB)));
+    lines.text(&w.app.sandbox_skills_intro(SB).join(" "));
+    let (other, gloss) = App::source_heading(&Source::Unknown);
+    lines.beside(&other, &gloss);
+    let meta = |skill: &str| {
+        let row = SandboxSkillRow::Skill(skill.into());
+        w.app.sandbox_skill_view(SB, &row).1
+    };
+    for name in ["docx", "pdf"] {
+        let (_, on) = lines.word(name);
+        assert!(on, "{name} is on for this sandbox");
+    }
+    lines.beside("docx", &meta("docx"));
+    assert_eq!(meta("pdf"), "", "pdf follows all sandboxes");
+    let (this, _) = (w.app.sandbox_skill_heading(&SandboxSkillRow::ApplyNow)).expect("a heading");
+    lines.text(&this);
+    for (row, button) in [
+        (SandboxSkillRow::ApplyNow, "Apply"),
+        (SandboxSkillRow::Reset, "Reset"),
+    ] {
+        let (title, meta) = w.app.sandbox_skill_view(SB, &row);
+        lines.beside(&title, &meta);
+        lines.beside(&title, button);
+    }
+    assert!(!w.drawn.iter().any(|t| t == "Remove"), "{:?}", w.drawn);
+}
+
+#[test]
+fn a_sandboxs_switch_and_buttons_act_as_their_keys_do() {
+    let open = |d: &mut dyn Driver| d.type_text("i");
+    let pdf = switch_is_space(&with_own_switch, &open, "Skill(\"pdf\")", "pdf");
+    assert_eq!(
+        pdf.own(SB, "pdf"),
+        Some(false),
+        "off for this sandbox alone"
+    );
+    assert!(pdf.global("pdf"), "on for all sandboxes still");
+    let docx = switch_is_space(&with_own_switch, &open, "Skill(\"docx\")", "docx");
+    assert_eq!(docx.own(SB, "docx"), None, "back with all sandboxes");
+    let on_apply = |d: &mut dyn Driver| {
+        d.type_text("i");
+        go(d, "ApplyNow");
+    };
+    let apply = button_is_key(&with_own_switch, &on_apply, KeyCode::Enter, "Apply");
+    assert!(apply.starts_with("job "), "{apply}");
+    let on_reset = |d: &mut dyn Driver| {
+        d.type_text("i");
+        go(d, "Reset");
+    };
+    let reset = button_is_key(&with_own_switch, &on_reset, KeyCode::Enter, "Reset");
+    assert!(
+        !reset.starts_with("job ") && !reset.starts_with("confirm"),
+        "{reset}"
+    );
+    let mut w = page(&with_own_switch, &on_reset);
+    let (title, _) = w.app.sandbox_skill_view(SB, &SandboxSkillRow::Reset);
+    let at = Lines(&w).beside(&title, "Reset").center();
+    click(&mut w, at);
+    assert!(
+        !w.app.switches.sandboxes.contains_key(SB),
+        "{:?}",
+        w.app.switches
+    );
+}
+
+/// The deprecated picker says so first, in the warning colour, above what it holds.
+#[test]
+fn the_repo_skills_page_says_first_that_it_is_deprecated() {
+    let open = |d: &mut dyn Driver| {
+        d.type_text("K");
+        go(d, "RepoSkills");
+        d.press(KeyCode::Enter);
+    };
+    let w = page(&with_skill_repos, &open);
+    assert!(matches!(&w.app.screen, Screen::RepoSkills(_)));
+    let lines = Lines(&w);
+    let line = lines.text(aisbx_core::compat::SKILL_REPOS_SCREEN);
+    let warn = crate::theme::warn(w.ctx.global_style().visuals.dark_mode);
+    let colour = (w.colored.iter()).find(|(t, _)| t == aisbx_core::compat::SKILL_REPOS_SCREEN);
+    assert_eq!(colour.map(|(_, c)| *c), Some(warn), "{:?}", w.colored);
+    let none = aisbx_core::repo_skills_ui::NO_REPOS;
+    let empty = lines.text(&none.replace('`', ""));
+    assert!(line.bottom() <= empty.top(), "{line:?} over {empty:?}");
+    assert!(line.width() <= crate::form::PARA_W, "{line:?}");
+    for (piece, code) in crate::theme::code_pieces(none) {
+        assert_eq!(
+            w.mono.iter().any(|m| m == piece),
+            code,
+            "{piece}: {:?}",
+            w.mono
+        );
+    }
+    let title = lines.text("Repo skills · all sandboxes");
+    assert!(title.bottom() <= line.top(), "under the title");
 }
 
 #[test]

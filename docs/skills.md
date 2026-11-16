@@ -2,36 +2,120 @@
 
 [← Back to the README](../README.md)
 
-Give the agents your skills: the sbx skills store, aisbx's own skill repositories, and the skills each sandbox
-takes from them.
+Give the agents your skills: the sbx skills store, a switch per skill for all sandboxes, and each sandbox's own
+switches.
 
 aisbx gives skills to a sandbox in three ways:
 
-- the sbx skills store, below: one store on the host, shared by the sandboxes;
+- the sbx skills store, below: one store on the host, and a switch per skill that decides which sandboxes get it;
 - the [`host-skills`](addons.md#host-skills-read-only) addon: the host's skills folders, live and read-only, on every
   backend;
-- [skill repositories](#skill-repositories-aisbx-skill-repo): Git repositories that aisbx mirrors, with
-  [skills picked per sandbox](#skills-from-skill-repos-aisbx-skill).
+- [skill repositories](#skill-repositories-aisbx-skill-repo): Git repositories that aisbx mirrors. **Deprecated:**
+  add those skills to the store instead ([Deprecations](deprecations.md#skill-repos)).
 
 ## The sbx skills store
 
 sbx keeps one skills store on the host and mounts it into each new sandbox. The store survives sandbox deletion.
+aisbx decides which of its skills each agent gets.
 
 ### The skills screen (`K`)
 
-Press `K` to see the store: its path, each skill, and how many sandboxes share it.
+Press `K` to see the store: its path, how many sandboxes share it, and its skills. The skills are grouped by where
+they came from ([Where a skill came from](#where-a-skill-came-from)). Each skill has a switch at the right:
+`● on` or `○ off`.
 
 | Key | Does |
 | --- | --- |
+| `space` or `↵` | switches the skill under the cursor on or off for all sandboxes |
 | `i` | imports your skill folders (`~/.agents/skills`, `~/.claude/skills`, `~/.config/opencode/skills`, ...) |
-| `a` | adds skills from a Git repository, from one line such as `anthropics/skills pdf docx` |
-| `u` | updates the skills that `a` added |
+| `a` | adds every skill of a Git repository, such as `anthropics/skills`, and keeps it in step ([Updates](#updates)) |
+| `u` | updates the skills that `a` added (*Update from repositories*) |
 | `d` | removes a skill |
 
-An import over a repository skill drops that skill's link to its repository.
+The same screen has the *Update daily* switch ([Updates](#updates)). An import over a repository skill drops that
+skill's link to its repository.
 
 Without the dashboard, use `sbx skills import`, `sbx skills add <repo> --skill <name>`, `sbx skills update` and
-`sbx skills ls`.
+`sbx skills ls`, and [`aisbx skills`](headless.md#aisbx-skills) for the switches.
+
+### Switches
+
+Every skill starts off: no sandbox gets it until you switch it on.
+
+- **On:** every sandbox gets the skill at its next start, except a sandbox that switches it off.
+- **Off:** only a sandbox that switches the skill on gets it.
+- A row on `K` says how many sandboxes switch a skill the other way, for example *off in 1 sandbox*.
+
+Each sandbox can switch single skills the other way:
+
+- Press `i` on a sandbox to see the store's skills and the sandbox's switches. A switch that differs from the
+  switch for all sandboxes is marked *own*.
+- Switch it back to follow the switch for all sandboxes again. *Follow all sandboxes* drops every own switch of the
+  sandbox.
+- On a running sandbox, *Apply now* links the switched-on skills at once. Otherwise the change arrives at the next
+  start.
+- In the create wizard, the *shared skills* fold under *share skills* sets the new sandbox's switches. It starts on
+  the switches for all sandboxes.
+
+A rebuild keeps a sandbox's switches. Deleting the sandbox with `d` or `aisbx rm` drops them. The switches are in
+`store-skills.json` in the aisbx state folder (`~/.local/state/aisbx`; on Windows `%LOCALAPPDATA%\aisbx\state`).
+
+### When the switches apply
+
+aisbx links the switched-on skills into the agent's skills folder before each agent start (`↵`, `aisbx run`), and
+removes the links of the others. *Apply now* does the same for a running sandbox. The sandbox keeps that choice for
+a later start with plain `sbx run`.
+
+- A sandbox that an older aisbx created links every store skill at a plain `sbx run`. Rebuild it (`R`) to keep the
+  choice there too. A start from the dashboard or with `aisbx run` uses the switches either way.
+- A new sandbox gets its switches at its first start through aisbx: *Create & start*, `↵`, *Apply now* or
+  `aisbx run`. After *Create only* or `aisbx up`, a plain `sbx run` before that links every store skill.
+- A sandbox with the store `readwrite` gets every store skill: its skills folder is the store itself, so the switches
+  do not apply.
+- A sandbox with skills `off` gets no store skill.
+- An agent that is running when a switch changes may find the change only at its next session.
+
+### Where a skill came from
+
+aisbx records where a skill came from when you import or add it on `K`:
+
+- an import: the first of your skills folders that holds the skill, in the order `sbx skills import` reads them;
+- an add: the repository, for each skill that the add brought into the store.
+
+A skill without a record is listed under the host folder that holds a skill of its name. Otherwise it is under
+*Other skills*: added with plain `sbx`, or imported from a folder that no longer holds it. sbx itself reports only
+the skill names.
+
+### Updates
+
+aisbx keeps each repository you add on `K` (`a`) in step with the store. It mirrors the repository on the host,
+compares its skills with the last update and changes the store:
+
+- **New skills** of a repository you added whole come into the store. They start off: switch them on.
+- **Changed skills** are replaced with the repository's version.
+- **Deleted skills** leave the store, with their switches.
+
+An add always takes every skill of the repository: they all start off, so you switch on only the ones you want, and
+skills the repository gains later come in the same way. The add replaces skills of the same name in the store and
+records them as the repository's. Later, a skill of the same name that you import or add from elsewhere is never
+changed or deleted by the update. A skill you removed with `d` does not come
+back. When you remove the last skill of a repository, aisbx stops updating it. A repository added with plain
+`sbx skills add` is not kept in step: add it on `K` instead.
+
+When it runs:
+
+- **Update daily** (on by default): while the dashboard runs, once every 24 hours. Switch it off on `K`, or with
+  `aisbx skills auto-update off`.
+- *Update from repositories* (`u`) runs it at once, then `sbx skills update` for skills added with plain `sbx`.
+- `aisbx skills update` runs it from a script ([`aisbx skills`](headless.md#aisbx-skills)).
+
+Each update reports what changed: on the status line, and under *Update daily* on `K` (*last update 2 hours ago:
+1 changed*, and the lines on the row). An update that fails for a repository says why and changes nothing of it;
+the next update tries again. A fetch never asks for credentials: a private repository needs your SSH key, the GitHub
+CLI or `GITHUB_TOKEN`, as for [skill repositories](#sources-and-methods). An imported skill changes only when you
+import it again.
+
+**A skill's scripts are code: an update brings new code into every sandbox that has the skill on.**
 
 ### Share modes
 
@@ -42,8 +126,8 @@ after creation; a rebuild keeps it.
 
 | Mode | The sandbox |
 | --- | --- |
-| `readonly` (default) | reads the shared skills, but cannot change them |
-| `readwrite` | can also change the skills that every other sharing sandbox loads |
+| `readonly` (default) | reads the skills that are switched on for it, but cannot change them |
+| `readwrite` | reads every shared skill, and can change the skills that every other sharing sandbox loads |
 | `off` | gets no store |
 
 **`readwrite` puts every sharing sandbox behind one trust boundary.**
@@ -63,10 +147,16 @@ An `agy` or Pi sandbox that an older aisbx created has no store. Rebuild it (`R`
 
 ### How the store reaches the agent
 
-The kits link each store skill into the agent's skills folder at creation and at every start. A skill added to the
-store reaches a running sandbox at its next start. The agent's skills folder stays writable.
+The kits link each switched-on store skill into the agent's skills folder. An edit to a skill in the store reaches
+the sandboxes that have it at once, through the link. A skill added to the store and switched on reaches a running
+sandbox at its next start, or with *Apply now*. The agent's skills folder stays writable, and the agent's own skills
+in it stay.
 
 ## Skill repositories (`aisbx skill-repo`)
+
+**Deprecated:** add the repository on `K` instead (`a`): every skill comes in, off, and the repository is kept in
+step. Then switch them on ([Switches](#switches)). The commands below keep working and warn on stderr. See
+[Deprecations](deprecations.md#skill-repos).
 
 aisbx keeps a list of skill repositories, public or private, and a local mirror of each. Sandboxes take skills from
 the mirrors, never from the remote. Manage the list from the command line:
@@ -85,8 +175,7 @@ Run `aisbx skill-repo fetch` to get a newer commit. Then pick the skills per san
 
 ### Files
 
-The list is `skill-repos.json` and the mirrors are `skill-cache/<id>/`, in the aisbx state folder
-(`~/.local/state/aisbx`; on Windows `%LOCALAPPDATA%\aisbx\state`).
+The list is `skill-repos.json` and the mirrors are `skill-cache/<id>/`, in the aisbx state folder.
 
 ### Sources and methods
 
@@ -126,7 +215,8 @@ acme-agent-skills-1a2b3c4d:   probe: next start installs pdf; updates docx; remo
 
 ### Auto-update
 
-`auto-update on|off` is one switch for every sandbox. It is on by default.
+`auto-update on|off` is one switch for every sandbox. It is on by default. It does not fetch: only
+`aisbx skill-repo fetch` does.
 
 - **On:** the next start of each sandbox brings its installed skills to the fetched commit.
 - **Off:** a start keeps each installed skill as it is. New picks still arrive and removed picks still go.
@@ -136,14 +226,18 @@ To pin one repo instead, add it with `--ref <tag>`.
 
 ## Skills from skill repos (`aisbx skill`)
 
+**Deprecated** with the skill repositories ([Deprecations](deprecations.md#skill-repos)).
+
 Choose per sandbox which skills of the mirrored repos it gets. Global picks go to every sandbox. You need no kit and
 no rebuild.
 
 ### In the dashboard
 
-- Press `i` on a sandbox to pick its skills. Global picks show ticked and marked *global*; you change them only in
-  the global picks.
-- Press `K`, then *Repo skills for all sandboxes*, to edit the global picks.
+The dashboard offers these screens only while skill repositories are in use.
+
+- Press `i` on a sandbox, then *Repo skills (deprecated)*, to pick its skills. Global picks show ticked and marked
+  *global*; you change them only in the global picks.
+- Press `K`, then *Repo skills (deprecated)*, to edit the global picks.
 - Press `space` to tick a repo (*all skills*) or one skill. Then choose *Save*.
 - Choose *Sync now* to copy the skills in at once. Otherwise they arrive at the next start.
 
@@ -165,8 +259,8 @@ aisbx state folder.
 
 ### Global picks
 
-Global picks reach every sandbox, also one made with plain `sbx`, at its next start. A sandbox cannot drop a global
-pick.
+Global picks reach every sandbox, also one made with plain `sbx`, at its next start through aisbx. A sandbox cannot
+drop a global pick.
 
 ### What counts as a skill
 

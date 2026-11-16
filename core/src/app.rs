@@ -33,6 +33,7 @@ use crate::skill_select;
 use crate::skill_source;
 use crate::state::Registry;
 use crate::stats::Histories;
+use crate::store_skills::{self, Switches};
 use crate::terminal;
 use crate::tokens;
 
@@ -46,6 +47,64 @@ fn mounts_state() -> PathBuf {
         std::env::temp_dir().join("aisbx-tests-no-mounts")
     } else {
         crate::state::state_dir()
+    }
+}
+
+/// Where the store-skill switches are kept: `store-skills.json` in the state folder.
+fn switches_path() -> PathBuf {
+    store_skills::config_path(&crate::state::state_dir())
+}
+
+/// Whether the deprecated skill repositories are in use here: repositories configured, skills
+/// picked from them, or one of their files unreadable (its screen says why).
+fn skill_repos_in_use(state: &Path) -> bool {
+    let repos = crate::skill_repos::load(&crate::skill_repos::config_path(state))
+        .map_or(true, |c| !c.repos.is_empty());
+    let picks = skill_select::load(&skill_select::selection_path(state))
+        .map_or(true, |s| !s.global.is_empty() || !s.sandboxes.is_empty());
+    repos || picks
+}
+
+/// The *Update daily* row's muted note: when the last update ran, and how many repositories it
+/// changed and could not update (its report lines, [`crate::store_skills::report_line`]).
+fn update_meta(ago: &str, report: &[String]) -> String {
+    let failed = report
+        .iter()
+        .filter(|l| l.contains(": not updated: "))
+        .count();
+    let changed = report.len() - failed;
+    let mut parts: Vec<String> = Vec::new();
+    if changed > 0 {
+        parts.push(format!("{changed} changed"));
+    }
+    if failed > 0 {
+        parts.push(format!("{failed} failed"));
+    }
+    match parts.is_empty() {
+        true => format!("last update {ago}, no change"),
+        false => format!("last update {ago}: {}", parts.join(", ")),
+    }
+}
+
+/// What the daily update of the store's Git skills says when it changed nothing.
+const DAILY_UPDATED: &str = "the skills added from Git are up to date (daily update)";
+
+/// …and when it could not run at all.
+const DAILY_FAILED: &str = "the daily update of the skills added from Git did not run — Update \
+     from repositories in Skills (K) shows why";
+
+/// The status line after the daily update: what `aisbx skills update` reported, one part per
+/// repository (an error when one failed), or that nothing changed. The full report stays on
+/// Skills (K).
+fn daily_message(ok: bool, report: &str) -> (bool, String) {
+    let lines: Vec<&str> = report.lines().filter(|l| !l.trim().is_empty()).collect();
+    match (ok, lines.is_empty()) {
+        (true, true) => (false, DAILY_UPDATED.to_string()),
+        (false, true) => (true, DAILY_FAILED.to_string()),
+        (ok, false) => (
+            !ok,
+            format!("skills from Git, daily update: {}", lines.join(" · ")),
+        ),
     }
 }
 
@@ -88,6 +147,18 @@ const STATUS_TTL: Duration = Duration::from_secs(6);
 /// What saving the Repo skills screen's global scope says; the screen says it before the save.
 const GLOBAL_SAVED: &str = "saved for every sandbox — existing sandboxes get the change at \
      their next start, new ones at their first";
+/// What an add of skills says when skill names follow the repository: it always takes them all.
+const ADD_WHOLE_REPO: &str = "type only the repository: every skill of it comes in, off until you \
+     switch it on, so you pick the ones you want on Skills (K)";
+
+/// The first line under the skills screen's title.
+pub const SKILLS_INTRO: &str = "A switch on gives the skill to every sandbox at its next start. A \
+     sandbox can switch single skills the other way (Sandbox skills, i).";
+
+/// The line under a sandbox skills screen's title, where the switches reach the sandbox.
+pub const SANDBOX_SKILLS_INTRO: &str = "On: the agent gets the skill at the sandbox's next start. \
+     A switch that differs from all sandboxes is this sandbox's own (own).";
+
 /// Two clicks on the same row inside this window start the sandbox.
 const DOUBLE_CLICK: Duration = Duration::from_millis(450);
 
@@ -389,6 +460,7 @@ impl CreateRow {
             | CreateRow::ModelPick(..)
             | CreateRow::ModelOn(_) => Some(CreateRow::ModelsFold),
             CreateRow::ConfigFile(_) => Some(CreateRow::FilesFold),
+            CreateRow::StoreSkill(_) => Some(CreateRow::SkillsFold),
             CreateRow::Ports | CreateRow::DenyNetwork | CreateRow::McpNone | CreateRow::Mcp(_) => {
                 Some(CreateRow::AdvancedFold)
             }
@@ -452,6 +524,12 @@ pub enum CreateRow {
     /// How the host's shared agent-skills store is mounted (`--skills`). Only where sbx mounts it
     /// for the backend's base agent.
     Skills,
+    /// Shows or hides a switch per store skill under it ([`WizardState::skills_open`]). Only
+    /// while the store is shared read-only and holds a skill.
+    SkillsFold,
+    /// One of the store's skills, by index into [`WorkspaceAnswers::store_skills`]: on, the
+    /// sandbox gets it.
+    StoreSkill(usize),
     /// Shows or hides the options seldom needed under it: ports, blocked hosts and the MCP
     /// servers ([`WizardState::advanced_open`]).
     AdvancedFold,
@@ -538,6 +616,9 @@ impl CreateForm {
                 folders: Default::default(),
                 extra_folders: Vec::new(),
                 skills: skills_default,
+                store_skills: Vec::new(),
+                store_global: Default::default(),
+                store_own: Default::default(),
                 ports: TextInput::default(),
                 deny_network: TextInput::default(),
                 static_mcp: vec![false; mcp.len()],
@@ -667,6 +748,49 @@ impl CreateForm {
             .is_some_and(Backend::shares_skills)
     }
 
+    /// Are the store-skill switches offered ([`CreateRow::SkillsFold`])? Only where the backend's
+    /// hook links the store, the store is shared read-only and holds a skill: off, the sandbox
+    /// gets no store; read-write, every skill.
+    pub fn store_skills_offered(&self, catalog: &Catalog) -> bool {
+        self.workspace.skills == sbx::SkillsMode::Readonly
+            && !self.workspace.store_skills.is_empty()
+            && (self.effective_backend(catalog)).is_some_and(|b| !b.kit.skill_dirs.is_empty())
+    }
+
+    /// Whether the new sandbox gets store skill `i`: its own switch, else the one for all
+    /// sandboxes.
+    pub fn store_skill_on(&self, i: usize) -> bool {
+        let Some(skill) = self.workspace.store_skills.get(i) else {
+            return false;
+        };
+        (self.workspace.store_own.get(skill))
+            .unwrap_or_else(|| self.workspace.store_global.contains(skill))
+    }
+
+    /// Whether store skill `i`'s switch here is the sandbox's own, not the one for all.
+    pub fn store_skill_own(&self, i: usize) -> bool {
+        (self.workspace.store_skills.get(i))
+            .is_some_and(|skill| self.workspace.store_own.get(skill).is_some())
+    }
+
+    /// Space, ↵ and a click on a store skill's row: switch it the other way for this sandbox.
+    pub(crate) fn toggle_store_skill(&mut self, i: usize) {
+        let on = !self.store_skill_on(i);
+        let Some(skill) = self.workspace.store_skills.get(i).cloned() else {
+            return;
+        };
+        let global = self.workspace.store_global.contains(&skill);
+        self.workspace.store_own.set(&skill, on, global);
+    }
+
+    /// The store skills the new sandbox gets, in the form's order.
+    pub fn store_skills_on(&self) -> Vec<String> {
+        (0..self.workspace.store_skills.len())
+            .filter(|i| self.store_skill_on(*i))
+            .map(|i| self.workspace.store_skills[i].clone())
+            .collect()
+    }
+
     /// Can this backend's agent be started somewhere other than the workspace root? Every one can:
     /// `sbx run --workdir` needs nothing from the agent.
     pub fn start_dir_offered(&self, catalog: &Catalog) -> bool {
@@ -769,6 +893,10 @@ impl CreateForm {
         }
         if self.skills_offered(catalog) {
             rows.push(CreateRow::Skills);
+            if self.store_skills_offered(catalog) {
+                rows.push(CreateRow::SkillsFold);
+                rows.extend((0..self.workspace.store_skills.len()).map(CreateRow::StoreSkill));
+            }
         }
         rows.push(CreateRow::AdvancedFold);
         rows.push(CreateRow::Ports);
@@ -790,6 +918,7 @@ impl CreateForm {
             CreateRow::ModelsFold => self.wizard.models_open,
             CreateRow::FilesFold => self.wizard.files_open,
             CreateRow::AdvancedFold => self.wizard.advanced_open,
+            CreateRow::SkillsFold => self.wizard.skills_open,
             _ => true,
         }
     }
@@ -801,6 +930,7 @@ impl CreateForm {
             CreateRow::ModelsFold => wizard.models_open = open,
             CreateRow::FilesFold => wizard.files_open = open,
             CreateRow::AdvancedFold => wizard.advanced_open = open,
+            CreateRow::SkillsFold => wizard.skills_open = open,
             _ => {}
         }
     }
@@ -1943,7 +2073,7 @@ pub struct SkillsForm {
 /// on every render, like [`SecretRow`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkillRow {
-    /// One skill in the store, by name — all `sbx skills ls --json` reports about it.
+    /// One skill in the store, by name, with its switch for all sandboxes.
     Skill(String),
     /// `sbx skills import --force`: copy this host's own agent skills in.
     Import,
@@ -1951,7 +2081,31 @@ pub enum SkillRow {
     AddRepo,
     /// `sbx skills update`: refresh everything that came from a repository.
     Update,
-    /// The Repo skills screen for every sandbox: the configured skill repos' global picks.
+    /// The switch of the daily update of the skills added from Git.
+    AutoUpdate,
+    /// Deprecated: the Repo skills screen for every sandbox, the skill repos' global picks. Only
+    /// while skill repositories are in use ([`App::skill_repos_in_use`]).
+    RepoSkills,
+    Close,
+}
+
+/// The skills screen of one sandbox (`i`): which store skills it gets.
+#[derive(Debug, Clone)]
+pub struct SandboxSkillsForm {
+    pub sandbox: String,
+    pub focus: usize,
+}
+
+/// A focusable line on a sandbox's skills screen, derived on every render like [`SkillRow`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SandboxSkillRow {
+    /// One store skill, with this sandbox's switch for it.
+    Skill(String),
+    /// Link the switched-on skills into the running sandbox now.
+    ApplyNow,
+    /// Drop this sandbox's own switches: it follows the switches for all sandboxes again.
+    Reset,
+    /// Deprecated: this sandbox's Repo skills screen. Only while skill repositories are in use.
     RepoSkills,
     Close,
 }
@@ -2544,11 +2698,10 @@ impl Ask {
             ],
             Ask::SetSecret(_) => &[],
             Ask::AddSkills => &[
-                "owner/repo (GitHub) or a Git URL, then optionally the skills to take:",
-                "  anthropics/skills              every SKILL.md the repository holds",
-                "  anthropics/skills pdf docx     only those two",
-                "A skill of the same name already in the store is replaced (--force), and",
-                "every sandbox sharing the store sees it at its next agent session.",
+                "owner/repo (GitHub) or a Git URL, for example anthropics/skills. Every skill of",
+                "the repository comes in, off until you switch it on; skills it gains later come",
+                "in with the daily update. A skill of the same name already in the store is",
+                "replaced (--force).",
             ],
         };
         lines.iter().map(|l| (*l).to_string()).collect()
@@ -2651,6 +2804,17 @@ pub struct Registered {
     /// The host folders picked for this sandbox alone, as `sbx create` took them
     /// ([`folders::Folder::sbx_spec`]).
     pub extra_folders: Vec<String>,
+    /// Its own store-skill switches, from the form ([`store_skills::Own`]).
+    pub store_skills: store_skills::Own,
+}
+
+/// Where the skills of a finished store job came from, recorded once the store is read again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OriginRecord {
+    /// `sbx skills import` ran: a skill a host folder holds came from the first such folder.
+    Import,
+    /// `sbx skills add <repo>` ran while the store held `before`.
+    Added { repo: String, before: Vec<String> },
 }
 
 /// What to record once a job succeeds.
@@ -2714,6 +2878,10 @@ pub struct PostJob {
     /// A sandbox is gone or was rebuilt: remove the kit images no sandbox runs any more, in the
     /// background (`aisbx prune-images`).
     pub prune_kit_images: bool,
+    /// Skills arrived in the store: record where they came from, once the store is read again.
+    pub record_origins: Option<OriginRecord>,
+    /// A skill left the store: drop its switches and its origin.
+    pub forget_store_skill: Option<String>,
     // No field for detached mode: `sbx ls --json` reports it (`detached`).
 }
 
@@ -2780,8 +2948,10 @@ pub enum Screen {
     Secrets(SecretsForm),
     /// The shared agent-skills store: what is in it, and the commands that change it.
     Skills(SkillsForm),
-    /// Skills of the configured skill repos, for every sandbox or for one.
+    /// Skills of the configured skill repos, for every sandbox or for one. Deprecated.
     RepoSkills(RepoSkillsForm),
+    /// Which store skills one sandbox gets (`i`).
+    SandboxSkills(SandboxSkillsForm),
     /// Connecting an editor or desktop app to a sandbox over SSH.
     Connect(ConnectForm),
     /// Which directory inside the workspace the agent opens in.
@@ -2879,6 +3049,25 @@ pub struct App {
     /// The host's `skills.defaultMode`: what a new create form opens its skills row on. sbx's
     /// built-in value until the first refresh answers, and where the read fails.
     pub skills_default: sbx::SkillsMode,
+    /// Which store skills each sandbox gets, where each came from and when the store's Git skills
+    /// were last updated (`store-skills.json`): read with each snapshot and after each change.
+    /// Under `cargo test` they live here only.
+    pub switches: Switches,
+    /// Why `store-skills.json` cannot be read. No switch changes while it is set.
+    pub switches_error: Option<String>,
+    /// This host's skills folders, read with each snapshot: where a skill came from when aisbx did
+    /// not see it arrive.
+    pub host_skill_folders: Vec<store_skills::HostFolder>,
+    /// Skill repositories are configured, or skills picked from them: the deprecated Repo skills
+    /// screens are offered. Read with each snapshot.
+    pub skill_repos_in_use: bool,
+    /// What a finished import or add of skills waits for: the next snapshot's store list.
+    pending_origins: Vec<OriginRecord>,
+    /// Under `cargo test`, how many daily updates of the store's Git skills would have started.
+    #[cfg(any(test, feature = "test-support"))]
+    pub skill_updates: usize,
+    #[cfg(not(any(test, feature = "test-support")))]
+    skill_updates: usize,
     /// `Some(true)` while the host's global network policy is uninitialized: every `sbx create`
     /// then fails, and the create form refuses to submit. `None` (not answered yet) is fine.
     pub policy_needs_init: Option<bool>,
@@ -2977,6 +3166,12 @@ impl App {
             mcp: Vec::new(),
             skills: None,
             skills_default: sbx::SkillsMode::default(),
+            switches: Switches::default(),
+            switches_error: None,
+            host_skill_folders: Vec::new(),
+            skill_repos_in_use: false,
+            pending_origins: Vec::new(),
+            skill_updates: 0,
             policy_needs_init: None,
             approvals: Vec::new(),
             ssh_ready: sbx::ssh_configured(),
@@ -3081,7 +3276,22 @@ impl App {
             self.skills_default,
         );
         self.refresh_form_folders(&mut form);
+        self.fill_form_skills(&mut form);
         form
+    }
+
+    /// Hand the create form the store's skills and their switches for all sandboxes, as they are
+    /// now. None while the switches cannot be read: then the form offers no switch.
+    fn fill_form_skills(&self, form: &mut CreateForm) {
+        if self.switches_error.is_some() {
+            return;
+        }
+        form.workspace.store_skills = self
+            .skill_sources()
+            .into_iter()
+            .flat_map(|(_, s)| s)
+            .collect();
+        form.workspace.store_global = self.switches.on.clone();
     }
 
     /// Read again what the create form shows of its mounted folder: whether it has a `.git`
@@ -3294,9 +3504,13 @@ impl App {
                         self.secrets = Some(names);
                     }
                     self.mcp = std::mem::take(&mut snapshot.mcp);
-                    if let Some(store) = snapshot.skills.take() {
-                        self.skills = Some(store);
-                    }
+                    let store_read = match snapshot.skills.take() {
+                        Some(store) => {
+                            self.skills = Some(store);
+                            true
+                        }
+                        None => false,
+                    };
                     self.skills_default = snapshot.skills_default;
                     if snapshot.policy_needs_init.is_some() {
                         self.policy_needs_init = snapshot.policy_needs_init;
@@ -3319,6 +3533,11 @@ impl App {
                     let _ = self.registry.save();
                     self.recompute_cells(keep.as_deref());
                     self.start_due_fetches();
+                    self.read_skill_state();
+                    if store_read && !stale {
+                        self.record_pending_origins();
+                    }
+                    self.start_due_skill_update();
                 }
                 Err(e) => self.set_error(format!("{e:#}")),
             }
@@ -3405,6 +3624,178 @@ impl App {
         }
     }
 
+    // --- store-skill switches ------------------------------------------------------------------
+
+    /// With each snapshot: the switches file, this host's skills folders and whether skill
+    /// repositories are in use. None of it is read under `cargo test`.
+    fn read_skill_state(&mut self) {
+        if cfg!(any(test, feature = "test-support")) {
+            return;
+        }
+        self.reload_switches();
+        self.host_skill_folders = (self.host_home.as_deref())
+            .map(store_skills::host_folders)
+            .unwrap_or_default();
+        self.skill_repos_in_use = skill_repos_in_use(&crate::state::state_dir());
+    }
+
+    /// Read `store-skills.json` again. Not under `cargo test`.
+    fn reload_switches(&mut self) {
+        if cfg!(any(test, feature = "test-support")) {
+            return;
+        }
+        match store_skills::load(&switches_path()) {
+            Ok(switches) => {
+                self.switches = switches;
+                self.switches_error = None;
+            }
+            Err(e) => self.switches_error = Some(format!("{e:#}")),
+        }
+    }
+
+    /// The switches as the file holds them now: another dashboard or `aisbx skills` may have
+    /// changed them since the last snapshot. Under `cargo test`, the ones held here.
+    fn fresh_switches(&self) -> Result<Switches, String> {
+        if cfg!(any(test, feature = "test-support")) {
+            return match &self.switches_error {
+                Some(why) => Err(why.clone()),
+                None => Ok(self.switches.clone()),
+            };
+        }
+        store_skills::load(&switches_path()).map_err(|e| format!("{e:#}"))
+    }
+
+    /// Change the switches: in the file, under its lock, then here. `Ok(false)` when `f` changed
+    /// nothing; an error while the file cannot be read. Under `cargo test`, here only.
+    fn change_switches(&mut self, f: impl FnOnce(&mut Switches) -> bool) -> Result<bool, String> {
+        if let Some(why) = &self.switches_error {
+            return Err(format!("the skill switches cannot be read: {why}"));
+        }
+        if cfg!(any(test, feature = "test-support")) {
+            return Ok(f(&mut self.switches));
+        }
+        let mut changed = false;
+        let saved = store_skills::update(&switches_path(), |s| {
+            changed = f(s);
+            Ok(())
+        })
+        .map_err(|e| format!("{e:#}"))?;
+        self.switches = saved;
+        Ok(changed)
+    }
+
+    /// Record where the skills of the finished imports and adds came from, now that the store
+    /// was read again.
+    fn record_pending_origins(&mut self) {
+        if self.pending_origins.is_empty() {
+            return;
+        }
+        let store: Vec<String> = self.skills.iter().flat_map(|s| s.skills.clone()).collect();
+        let mut found = Vec::new();
+        for record in std::mem::take(&mut self.pending_origins) {
+            match record {
+                OriginRecord::Import => {
+                    found.extend(store_skills::imported(&store, &self.host_skill_folders))
+                }
+                OriginRecord::Added { repo, before } => {
+                    found.extend(store_skills::added(&repo, &before, &store))
+                }
+            }
+        }
+        let recorded = self.change_switches(|s| s.record(found));
+        if let Err(e) = recorded {
+            self.set_error(e);
+        }
+    }
+
+    /// Start the daily update of the store's Git skills once it is due
+    /// ([`Switches::update_due`]): marked in the file first, under its lock, so a second
+    /// dashboard does not start one too. Under `cargo test` it is only counted.
+    fn start_due_skill_update(&mut self) {
+        let now = crate::state::now_epoch();
+        if self.switches_error.is_some() || !self.switches.update_due(now) {
+            return;
+        }
+        let marked = self.change_switches(|s| {
+            let due = s.update_due(now);
+            if due {
+                s.updated_at = Some(now);
+            }
+            due
+        });
+        if marked != Ok(true) {
+            return;
+        }
+        self.skill_updates += 1;
+        if cfg!(any(test, feature = "test-support")) {
+            return;
+        }
+        let tx = self.notice_tx.clone();
+        let argv = crate::headless::job_argv(&["skills", "update"]);
+        std::thread::spawn(move || {
+            let out = std::process::Command::new(&argv[0])
+                .args(&argv[1..])
+                .stdin(std::process::Stdio::null())
+                .output();
+            let _ = tx.send(match out {
+                Ok(out) => {
+                    daily_message(out.status.success(), &String::from_utf8_lossy(&out.stdout))
+                }
+                Err(e) => (true, format!("{DAILY_FAILED} ({e})")),
+            });
+        });
+    }
+
+    /// [`App::store_link_step`] for the first session of a sandbox the create form makes: on the
+    /// form's backend, store mode and own switches, as the snapshot does not list it yet.
+    fn new_store_link_step(
+        &self,
+        name: &str,
+        backend: &Backend,
+        mode: Option<sbx::SkillsMode>,
+        own: &store_skills::Own,
+    ) -> Option<Vec<String>> {
+        let dirs = &backend.kit.skill_dirs;
+        (mode == Some(sbx::SkillsMode::Readonly)
+            && !dirs.is_empty()
+            && self.switches_error.is_none())
+        .then(|| store_skills::link_argv(name, dirs, &self.switches.linked_with(own)))
+    }
+
+    /// The pre-start step that links the store skills switched on for a sandbox
+    /// ([`store_skills::link_argv`]). `None` where its backend links no store, where it mounts
+    /// none or mounts it read-write (every skill, no switch applies), and while the switches
+    /// cannot be read.
+    fn store_link_step(&self, name: &str) -> Option<Vec<String>> {
+        let sb = self.sandboxes.iter().find(|s| s.name == name)?;
+        match sb.skills {
+            None
+            | Some(model::Skills::Known(sbx::SkillsMode::Off | sbx::SkillsMode::Readwrite)) => {
+                return None
+            }
+            Some(model::Skills::Known(sbx::SkillsMode::Readonly) | model::Skills::Unrecorded) => {}
+        }
+        let backend = self.catalog.backend(sb.backend.as_deref()?)?;
+        if backend.kit.skill_dirs.is_empty() {
+            return None;
+        }
+        let switches = match self.fresh_switches() {
+            Ok(switches) => switches,
+            Err(why) => {
+                let _ = self.notice_tx.send((
+                    true,
+                    format!("the skill switches cannot be read ({why}) — {name} keeps its links"),
+                ));
+                return None;
+            }
+        };
+        Some(store_skills::link_argv(
+            name,
+            &backend.kit.skill_dirs,
+            &switches.linked(name),
+        ))
+    }
+
     /// The second half of a job that stored a connection's key: write the connection's files,
     /// then start the job that needs them. A failed write starts nothing.
     fn start_next(&mut self, post: &PostJob) {
@@ -3474,6 +3865,29 @@ impl App {
                 form.read();
             }
         }
+        if let Some(record) = &post.record_origins {
+            self.pending_origins.push(record.clone());
+        }
+        if let Some(skill) = &post.forget_store_skill {
+            let left: Vec<String> = (self.skills.iter())
+                .flat_map(|s| s.skills.clone())
+                .filter(|s| s != skill)
+                .collect();
+            let forgot = self.change_switches(|s| {
+                let repo = match s.origins.get(skill.as_str()) {
+                    Some(store_skills::Origin::Repo(repo)) => Some(repo.clone()),
+                    _ => None,
+                };
+                let mut changed = s.forget_skill(skill);
+                if let Some(repo) = repo {
+                    changed |= s.untrack_if_gone(&repo, &left);
+                }
+                changed
+            });
+            if let Err(e) = forgot {
+                self.set_error(e);
+            }
+        }
         if let Some(name) = &post.drop_connection {
             if let Err(e) = crate::litellm::remove_in(&self.litellm_root, name) {
                 self.set_error(format!("{e:#}"));
@@ -3510,6 +3924,9 @@ impl App {
                 self.set_error(format!("{e:#}"));
             }
             self.drop_skill_selection(name);
+            if let Err(e) = self.change_switches(|s| s.forget_sandbox(name)) {
+                self.set_error(e);
+            }
         }
         if let Some(token) = &post.drop_token_kit {
             if let Err(e) = tokens::remove_kit(token) {
@@ -3519,6 +3936,10 @@ impl App {
         if let Some(made) = &post.register {
             // A new sandbox never inherits the selection of an earlier one of its name.
             self.drop_skill_selection(&made.name);
+            let own = made.store_skills.clone();
+            if let Err(e) = self.change_switches(|s| s.replace_own(&made.name, own)) {
+                self.set_error(e);
+            }
             self.registry
                 .set_display_name(&made.name, Some(made.label.clone()));
             self.registry.set_clone(&made.name, made.clone);
@@ -3894,6 +4315,7 @@ impl App {
             Screen::Secrets(_) => self.secrets_key(key),
             Screen::Skills(_) => self.skills_key(key),
             Screen::RepoSkills(_) => self.repo_skills_key(key),
+            Screen::SandboxSkills(_) => self.sandbox_skills_key(key),
             Screen::Connect(_) => self.connect_key(key),
             Screen::StartDir(_) => self.start_dir_key(key),
             Screen::Approvals(_) => self.approvals_key(key),
@@ -4140,6 +4562,7 @@ impl App {
             Screen::Secrets(_) => self.secret_rows().len(),
             Screen::Skills(_) => self.skill_rows().len(),
             Screen::RepoSkills(f) => f.rows().len(),
+            Screen::SandboxSkills(f) => self.sandbox_skill_rows(&f.sandbox).len(),
             Screen::Connect(f) => f.rows().len(),
             Screen::StartDir(f) => f.rows().len(),
             Screen::Approvals(_) => self.approval_rows().len(),
@@ -4160,6 +4583,7 @@ impl App {
             Screen::Secrets(f) => f.focus = index,
             Screen::Skills(f) => f.focus = index,
             Screen::RepoSkills(f) => f.focus = index,
+            Screen::SandboxSkills(f) => f.focus = index,
             Screen::Connect(f) => f.focus = index,
             Screen::StartDir(f) => f.focus = index,
             Screen::Approvals(f) => f.focus = index,
@@ -4174,9 +4598,10 @@ impl App {
     fn activate_form_row(&mut self, index: usize) {
         let catalog = Arc::clone(&self.catalog);
         // Read before the mutable borrow below: these screens derive their rows from the app.
-        let secret_rows = match self.screen {
+        let secret_rows = match &self.screen {
             Screen::Secrets(_) => self.secret_rows().len(),
             Screen::Skills(_) => self.skill_rows().len(),
+            Screen::SandboxSkills(f) => self.sandbox_skill_rows(&f.sandbox).len(),
             Screen::Approvals(_) => self.approval_rows().len(),
             _ => 0,
         };
@@ -4245,6 +4670,13 @@ impl App {
             }
             Screen::RepoSkills(form) => {
                 if index >= form.rows().len() {
+                    return;
+                }
+                form.focus = index;
+                self.on_key(KeyEvent::from(KeyCode::Enter));
+            }
+            Screen::SandboxSkills(form) => {
+                if index >= secret_rows {
                     return;
                 }
                 form.focus = index;
@@ -5865,7 +6297,7 @@ impl App {
                 }
                 Ok(())
             }
-            Action::RepoSkills => selected.map(|_| ()).ok_or_else(|| {
+            Action::SandboxSkills => selected.map(|_| ()).ok_or_else(|| {
                 Refusal::Error("the cursor is on + New sandbox — press i on a sandbox".into())
             }),
             Action::RefreshModels => {
@@ -5992,7 +6424,7 @@ impl App {
             Action::Folders => self.open_folders(None),
             Action::SandboxFolders => self.action_sandbox_folders(),
             Action::Settings => self.open_settings(),
-            Action::RepoSkills => self.action_sandbox_repo_skills(),
+            Action::SandboxSkills => self.action_sandbox_skills(),
             Action::Approvals => self.action_approvals(),
             Action::KeepRunning => self.action_keep_running(),
             Action::RefreshModels => self.action_refresh_models(),
@@ -6099,6 +6531,7 @@ impl App {
         let label = self.registry.display_name(name).unwrap_or(name);
         let mut prelude = vec![sbx::label_argv(name, label)];
         // Not skipped by `--no-update`: local work that the agent's first skill scan needs.
+        prelude.extend(self.store_link_step(name));
         let addons = self
             .sandboxes
             .iter()
@@ -7000,21 +7433,24 @@ impl App {
                     "sbx skills import --force",
                     sbx::skills_import_argv(true),
                 )],
-                post: PostJob::default(),
+                post: PostJob {
+                    record_origins: Some(OriginRecord::Import),
+                    ..Default::default()
+                },
                 fallback: None,
                 fallback_hint: None,
             },
         }));
     }
 
-    /// Every line on the skills screen, in the order it draws them: the store's skills, the
-    /// actions that change it, and the Close button. `Update` only while the store holds a skill.
+    /// Every line on the skills screen, in the order it draws them: the store's skills under
+    /// where they came from, the actions that change the store, the daily update's switch, the
+    /// deprecated Repo skills while skill repositories are in use, and the Close button. `Update`
+    /// only while the store holds a skill.
     pub fn skill_rows(&self) -> Vec<SkillRow> {
-        let mut rows: Vec<SkillRow> = self
-            .skills
-            .iter()
-            .flat_map(|s| s.skills.iter())
-            .map(|name| SkillRow::Skill(name.clone()))
+        let mut rows: Vec<SkillRow> = (self.skill_sources().into_iter())
+            .flat_map(|(_, skills)| skills)
+            .map(SkillRow::Skill)
             .collect();
         let any = !rows.is_empty();
         rows.push(SkillRow::Import);
@@ -7022,9 +7458,73 @@ impl App {
         if any {
             rows.push(SkillRow::Update);
         }
-        rows.push(SkillRow::RepoSkills);
+        rows.push(SkillRow::AutoUpdate);
+        if self.skill_repos_in_use {
+            rows.push(SkillRow::RepoSkills);
+        }
         rows.push(SkillRow::Close);
         rows
+    }
+
+    /// The store's skills under where they came from ([`store_skills::groups`]): what aisbx
+    /// recorded, else the host folder that holds a skill of the name.
+    pub fn skill_sources(&self) -> Vec<(store_skills::Source, Vec<String>)> {
+        let store: Vec<String> = self.skills.iter().flat_map(|s| s.skills.clone()).collect();
+        store_skills::groups(&store, &self.switches.origins, &self.host_skill_folders)
+    }
+
+    /// Where one store skill came from, as [`App::skill_sources`] groups it.
+    pub fn skill_source(&self, skill: &str) -> store_skills::Source {
+        (self.skill_sources().into_iter())
+            .find(|(_, skills)| skills.iter().any(|s| s == skill))
+            .map_or(store_skills::Source::Unknown, |(source, _)| source)
+    }
+
+    /// The heading of the skills that came from `source`: its name, and in a muted second part
+    /// how they came.
+    pub fn source_heading(source: &store_skills::Source) -> (String, String) {
+        match source {
+            store_skills::Source::Folder(dir) => (dir.clone(), "imported from this host".into()),
+            store_skills::Source::Repo(repo) => (repo.clone(), "added from Git".into()),
+            store_skills::Source::Unknown => (
+                "Other skills".into(),
+                "where they came from is not recorded".into(),
+            ),
+        }
+    }
+
+    /// The lines under the skills screen's title: what a switch does, who it reaches, and why
+    /// nothing can be switched while the switches file cannot be read.
+    pub fn skills_intro(&self) -> Vec<String> {
+        let mut out = vec![SKILLS_INTRO.to_string()];
+        if let Some(why) = &self.switches_error {
+            out.push(format!(
+                "The skill switches cannot be read: {why}. Nothing can be switched until you fix \
+                 or remove the file."
+            ));
+        }
+        match self.skills_writers() {
+            0 => {}
+            1 => out.push(
+                "1 sandbox mounts the store read-write: it gets every skill, whatever the switch \
+                 says."
+                    .into(),
+            ),
+            n => out.push(format!(
+                "{n} sandboxes mount the store read-write: they get every skill, whatever the \
+                 switch says."
+            )),
+        }
+        out
+    }
+
+    /// How many sandboxes have their own switch for `skill`, one that differs from the switch
+    /// for all sandboxes.
+    fn own_switches(&self, skill: &str) -> usize {
+        let global = self.switches.global(skill);
+        (self.switches.sandboxes.values())
+            .filter(|own| own.get(skill).is_some_and(|on| on != global))
+            .count()
     }
 
     /// How many sandboxes here mount the store, read-only ones included: who sees a change to it.
@@ -7072,20 +7572,43 @@ impl App {
         }
     }
 
-    /// The heading a skills-screen row is listed under; `None` for the button.
-    pub fn skill_heading(row: &SkillRow) -> Option<&'static str> {
+    /// The heading a skills-screen row is listed under, and its muted second part; `None` for
+    /// the button. A skill is listed under where it came from.
+    pub fn skill_heading(&self, row: &SkillRow) -> Option<(String, String)> {
         match row {
-            SkillRow::Skill(_) => Some("Installed skills"),
-            SkillRow::Import | SkillRow::AddRepo | SkillRow::Update => Some("Change the store"),
-            SkillRow::RepoSkills => Some("Skills from configured skill repos"),
+            SkillRow::Skill(skill) => Some(Self::source_heading(&self.skill_source(skill))),
+            SkillRow::Import | SkillRow::AddRepo | SkillRow::Update | SkillRow::AutoUpdate => {
+                Some(("Change the store".into(), String::new()))
+            }
+            SkillRow::RepoSkills => Some(("Skill repositories".into(), "deprecated".into())),
             SkillRow::Close => None,
+        }
+    }
+
+    /// The switch a skills-screen row shows at its right: a skill's for all sandboxes, and the
+    /// daily update's. `None` for a row without one.
+    pub fn skill_switch(&self, row: &SkillRow) -> Option<bool> {
+        match row {
+            SkillRow::Skill(skill) => Some(self.switches.global(skill)),
+            SkillRow::AutoUpdate => Some(self.switches.auto_update()),
+            _ => None,
         }
     }
 
     /// One skills-screen row: the skill or the command, and what it reaches for.
     pub fn skill_view(&self, row: &SkillRow) -> (String, String) {
         match row {
-            SkillRow::Skill(name) => (name.clone(), String::new()),
+            SkillRow::Skill(name) => {
+                let own = self.own_switches(name);
+                let meta = match (own, self.switches.global(name)) {
+                    (0, _) => String::new(),
+                    (1, true) => "off in 1 sandbox".into(),
+                    (n, true) => format!("off in {n} sandboxes"),
+                    (1, false) => "on in 1 sandbox".into(),
+                    (n, false) => format!("on in {n} sandboxes"),
+                };
+                (name.clone(), meta)
+            }
             SkillRow::Import => ("Import this host's skills".to_string(), {
                 let sources = sbx::host_skill_sources();
                 match sources.is_empty() {
@@ -7101,9 +7624,16 @@ impl App {
                 "Update from repositories".to_string(),
                 "the skills added from a repository".to_string(),
             ),
+            SkillRow::AutoUpdate => (
+                "Update daily".to_string(),
+                match self.switches.updated_at {
+                    Some(at) => update_meta(&crate::state::ago(at), &self.switches.last_report),
+                    None => "the skills added from Git, every 24 hours".to_string(),
+                },
+            ),
             SkillRow::RepoSkills => (
-                "Repo skills for all sandboxes".to_string(),
-                "picked from your skill repos".to_string(),
+                crate::compat::SKILL_REPOS_ROW.to_string(),
+                "for all sandboxes".to_string(),
             ),
             SkillRow::Close => (String::new(), String::new()),
         }
@@ -7113,11 +7643,35 @@ impl App {
     pub fn skill_notes(&self, row: &SkillRow) -> Vec<String> {
         // Whole sentences naming what acts, as the secrets' notes do.
         match row {
-            SkillRow::Skill(name) => vec![format!(
-                "Remove deletes {name} from the store; Update refreshes it from its repository, \
-                 if it came from one (sbx does not report which). An imported skill is refreshed \
-                 by importing again. Nothing else is remembered about it."
-            )],
+            SkillRow::Skill(name) => {
+                let from = match self.skill_source(name) {
+                    store_skills::Source::Repo(repo) if self.switches.repos.contains_key(&repo) => {
+                        format!(
+                            "It came from {repo}: the daily update and Update from repositories \
+                             keep it in step, and remove it when the repository deletes it."
+                        )
+                    }
+                    store_skills::Source::Repo(repo) => {
+                        format!("It came from {repo}: Update from repositories refreshes it.")
+                    }
+                    store_skills::Source::Folder(dir) => {
+                        format!("It is in {dir} on this host: import again to refresh it.")
+                    }
+                    store_skills::Source::Unknown => {
+                        "Where it came from is not recorded: aisbx records it when you add or \
+                         import here."
+                            .to_string()
+                    }
+                };
+                vec![
+                    format!(
+                        "When on, every sandbox gets {name} at its next start, except one that \
+                         switches it off. Otherwise, only a sandbox that switches it on gets it \
+                         (Sandbox skills, i). Remove deletes it from the store."
+                    ),
+                    from,
+                ]
+            }
             SkillRow::Import => vec![
                 "Runs `sbx skills import --force`: copies every skill in those directories into \
                  the store, replacing a skill of the same name whole. Asks first."
@@ -7134,9 +7688,24 @@ impl App {
                 self.skills_sharers(),
                 if self.skills_sharers() == 1 { "" } else { "es" }
             )],
+            SkillRow::AutoUpdate => {
+                let mut notes = vec![
+                    "When on, the dashboard brings the skills added from Git in step with their \
+                     repositories once a day while it runs: new skills come in (off until you \
+                     switch them on), changed ones are replaced, deleted ones leave the store. \
+                     Otherwise, only Update from repositories does. A skill's scripts are code, \
+                     so an update brings new code into every sandbox that has the skill."
+                        .into(),
+                ];
+                if !self.switches.last_report.is_empty() {
+                    notes.push("The last update:".into());
+                    notes.extend(self.switches.last_report.iter().cloned());
+                }
+                notes
+            }
             SkillRow::RepoSkills => vec![
-                "Picks skills of the repos `aisbx skill-repo` configured for every sandbox, \
-                 existing and new; Repo skills (i) on a sandbox picks them for that sandbox alone."
+                "Picks skills of the repos `aisbx skill-repo` configured for every sandbox. \
+                 Deprecated: add the skills to the store instead and switch them on here."
                     .into(),
             ],
             SkillRow::Close => Vec::new(),
@@ -7162,13 +7731,11 @@ impl App {
             KeyCode::End | KeyCode::Char('G') => form.focus = rows.len() - 1,
             KeyCode::Enter | KeyCode::Char(' ') => match row {
                 SkillRow::Close => self.screen = Screen::List,
-                // A skill row has no action of its own — the two that apply are on their keys.
-                SkillRow::Skill(name) => self.set_info(format!(
-                    "{name}: d removes it; u refreshes it if it came from a repository"
-                )),
+                SkillRow::Skill(name) => self.switch_store_skill(store_skills::Scope::All, &name),
                 SkillRow::Import => self.action_import_skills(),
                 SkillRow::AddRepo => self.ask(Ask::AddSkills, String::new(), String::new()),
                 SkillRow::Update => self.action_update_skills(),
+                SkillRow::AutoUpdate => self.switch_auto_update(),
                 SkillRow::RepoSkills => self.open_repo_skills(RepoScope::Global),
             },
             KeyCode::Char('d') | KeyCode::Delete => {
@@ -7185,6 +7752,305 @@ impl App {
         }
     }
 
+    /// Space or ↵ on a store skill: switch it the other way for `scope`, in the file at once.
+    fn switch_store_skill(&mut self, scope: store_skills::Scope, skill: &str) {
+        let on = !self.switches.shown(scope, skill);
+        match self.change_switches(|s| s.set(scope, skill, on)) {
+            Ok(_) => {
+                let state = if on { "on" } else { "off" };
+                let msg = match scope {
+                    store_skills::Scope::All => format!(
+                        "{skill} is {state} for all sandboxes — each gets the change at its next \
+                         start"
+                    ),
+                    store_skills::Scope::Sandbox(name) => format!(
+                        "{skill} is {state} for {} — at its next start, or now with Apply now",
+                        self.sandbox_label(name)
+                    ),
+                };
+                self.set_info(msg);
+            }
+            Err(why) => self.set_error(why),
+        }
+    }
+
+    /// ↵ on *Update daily*: switch the daily update of the store's Git skills the other way.
+    fn switch_auto_update(&mut self) {
+        let on = !self.switches.auto_update();
+        match self.change_switches(|s| {
+            let before = s.auto_update;
+            s.auto_update = (!on).then_some(false);
+            s.auto_update != before
+        }) {
+            Ok(_) => self.set_info(match on {
+                true => "the skills added from Git now update once a day",
+                false => "the skills added from Git now update only with Update from repositories",
+            }),
+            Err(why) => self.set_error(why),
+        }
+    }
+
+    // --- one sandbox's skills ----------------------------------------------------------------
+
+    /// `i` on a sandbox: which store skills it gets.
+    fn action_sandbox_skills(&mut self) {
+        let Some(sb) = self.selected() else { return };
+        let name = sb.name.clone();
+        self.open_sandbox_skills(&name);
+    }
+
+    fn open_sandbox_skills(&mut self, name: &str) {
+        self.reload_switches();
+        self.screen = Screen::SandboxSkills(SandboxSkillsForm {
+            sandbox: name.to_string(),
+            focus: 0,
+        });
+    }
+
+    /// How a sandbox mounts the store, as far as the switches care: `None` for a backend that
+    /// mounts no store.
+    fn store_mode(&self, sandbox: &str) -> Option<model::Skills> {
+        self.sandboxes.iter().find(|s| s.name == sandbox)?.skills
+    }
+
+    /// Whether the switches reach this sandbox: it mounts the store read-only, or nobody
+    /// recorded how.
+    pub fn switches_apply(&self, sandbox: &str) -> bool {
+        matches!(
+            self.store_mode(sandbox),
+            Some(model::Skills::Known(sbx::SkillsMode::Readonly) | model::Skills::Unrecorded)
+        )
+    }
+
+    /// Every line on a sandbox's skills screen, in drawing order: the store's skills under where
+    /// they came from (only while the switches reach it), *Apply now* while it runs, *Reset*
+    /// while it has its own switches, the deprecated Repo skills, and *Close*.
+    pub fn sandbox_skill_rows(&self, sandbox: &str) -> Vec<SandboxSkillRow> {
+        let mut rows: Vec<SandboxSkillRow> = Vec::new();
+        if self.switches_apply(sandbox) && self.switches_error.is_none() {
+            rows.extend(
+                (self.skill_sources().into_iter())
+                    .flat_map(|(_, skills)| skills)
+                    .map(SandboxSkillRow::Skill),
+            );
+            let running = self
+                .sandboxes
+                .iter()
+                .any(|s| s.name == sandbox && s.running);
+            if running && self.store_link_step(sandbox).is_some() {
+                rows.push(SandboxSkillRow::ApplyNow);
+            }
+            if self.switches.sandboxes.contains_key(sandbox) {
+                rows.push(SandboxSkillRow::Reset);
+            }
+        }
+        if self.skill_repos_in_use {
+            rows.push(SandboxSkillRow::RepoSkills);
+        }
+        rows.push(SandboxSkillRow::Close);
+        rows
+    }
+
+    /// The heading a sandbox skills row is listed under, and its muted second part; `None` for
+    /// the button.
+    pub fn sandbox_skill_heading(&self, row: &SandboxSkillRow) -> Option<(String, String)> {
+        match row {
+            SandboxSkillRow::Skill(skill) => Some(Self::source_heading(&self.skill_source(skill))),
+            SandboxSkillRow::ApplyNow | SandboxSkillRow::Reset => {
+                Some(("This sandbox".into(), String::new()))
+            }
+            SandboxSkillRow::RepoSkills => Some(("Skill repositories".into(), "deprecated".into())),
+            SandboxSkillRow::Close => None,
+        }
+    }
+
+    /// The switch a sandbox skills row shows at its right: whether the sandbox gets the skill.
+    pub fn sandbox_skill_switch(&self, sandbox: &str, row: &SandboxSkillRow) -> Option<bool> {
+        match row {
+            SandboxSkillRow::Skill(skill) => Some(self.switches.is_on(sandbox, skill)),
+            _ => None,
+        }
+    }
+
+    /// One sandbox skills row: its title, and in a muted column whether the switch is the
+    /// sandbox's own.
+    pub fn sandbox_skill_view(&self, sandbox: &str, row: &SandboxSkillRow) -> (String, String) {
+        match row {
+            SandboxSkillRow::Skill(skill) => {
+                let all = match self.switches.global(skill) {
+                    true => "on",
+                    false => "off",
+                };
+                let meta = match self.switches.own(sandbox, skill) {
+                    Some(_) => format!("own · {all} for all sandboxes"),
+                    None => String::new(),
+                };
+                (skill.clone(), meta)
+            }
+            SandboxSkillRow::ApplyNow => (
+                "Apply now".into(),
+                "link the switched-on skills into the running sandbox".into(),
+            ),
+            SandboxSkillRow::Reset => (
+                "Follow all sandboxes".into(),
+                "drops this sandbox's own switches".into(),
+            ),
+            SandboxSkillRow::RepoSkills => (
+                crate::compat::SKILL_REPOS_ROW.to_string(),
+                "for this sandbox".into(),
+            ),
+            SandboxSkillRow::Close => (String::new(), String::new()),
+        }
+    }
+
+    /// What ↵ does to the focused sandbox skills row, in whole sentences.
+    pub fn sandbox_skill_notes(&self, sandbox: &str, row: &SandboxSkillRow) -> Vec<String> {
+        match row {
+            SandboxSkillRow::Skill(skill) => {
+                let all = match self.switches.global(skill) {
+                    true => "on",
+                    false => "off",
+                };
+                let own = match self.switches.own(sandbox, skill) {
+                    Some(_) => format!(
+                        "This switch is this sandbox's own: for all sandboxes it is {all}. \
+                         Switching it back follows all sandboxes again."
+                    ),
+                    None => format!(
+                        "It follows the switch for all sandboxes ({all}, in Skills, K) until \
+                         you switch it here."
+                    ),
+                };
+                vec![
+                    format!(
+                        "When on, the agent gets {skill} at the sandbox's next start. Otherwise, \
+                         it does not."
+                    ),
+                    own,
+                ]
+            }
+            SandboxSkillRow::ApplyNow => vec![
+                "Links exactly the switched-on skills into the agent's skills folder now. An \
+                 agent session that runs already may find them only when it starts again."
+                    .into(),
+            ],
+            SandboxSkillRow::Reset => vec![
+                "Every skill then follows its switch for all sandboxes again (Skills, K).".into(),
+            ],
+            SandboxSkillRow::RepoSkills => vec![
+                "Picks skills of the repos `aisbx skill-repo` configured for this sandbox. \
+                 Deprecated: add the skills to the store instead and switch them on here."
+                    .into(),
+            ],
+            SandboxSkillRow::Close => Vec::new(),
+        }
+    }
+
+    /// The lines under a sandbox skills screen's title: what the switches do here, or why they
+    /// do not reach this sandbox.
+    pub fn sandbox_skills_intro(&self, sandbox: &str) -> Vec<String> {
+        if let Some(why) = &self.switches_error {
+            return vec![format!(
+                "The skill switches cannot be read: {why}. Nothing can be switched until you fix \
+                 or remove the file."
+            )];
+        }
+        let text = match self.store_mode(sandbox) {
+            None => "This sandbox's backend mounts no shared skills store, so no store skill \
+                     reaches it."
+                .to_string(),
+            Some(model::Skills::Known(sbx::SkillsMode::Off)) => {
+                "This sandbox was created with skills off: no store skill reaches it, and a \
+                 rebuild keeps that."
+                    .to_string()
+            }
+            Some(model::Skills::Known(sbx::SkillsMode::Readwrite)) => {
+                "This sandbox mounts the store read-write: it gets every store skill, and the \
+                 switches do not apply."
+                    .to_string()
+            }
+            Some(_) if self.skills.as_ref().is_none_or(|s| s.skills.is_empty()) => {
+                "The shared store holds no skill yet: add or import skills in Skills (K)."
+                    .to_string()
+            }
+            Some(_) => SANDBOX_SKILLS_INTRO.to_string(),
+        };
+        vec![text]
+    }
+
+    fn sandbox_skills_key(&mut self, key: KeyEvent) {
+        let Screen::SandboxSkills(form) = &self.screen else {
+            return;
+        };
+        let sandbox = form.sandbox.clone();
+        let rows = self.sandbox_skill_rows(&sandbox);
+        let Screen::SandboxSkills(form) = &mut self.screen else {
+            return;
+        };
+        form.focus = form.focus.min(rows.len() - 1);
+        let row = rows[form.focus].clone();
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.screen = Screen::List,
+            KeyCode::Up | KeyCode::BackTab | KeyCode::Char('k') => {
+                form.focus = (form.focus + rows.len() - 1) % rows.len()
+            }
+            KeyCode::Down | KeyCode::Tab | KeyCode::Char('j') => {
+                form.focus = (form.focus + 1) % rows.len()
+            }
+            KeyCode::Home | KeyCode::Char('g') => form.focus = 0,
+            KeyCode::End | KeyCode::Char('G') => form.focus = rows.len() - 1,
+            KeyCode::Enter | KeyCode::Char(' ') => match row {
+                SandboxSkillRow::Skill(skill) => {
+                    self.switch_store_skill(store_skills::Scope::Sandbox(&sandbox), &skill)
+                }
+                SandboxSkillRow::ApplyNow => self.apply_store_skills_now(&sandbox),
+                SandboxSkillRow::Reset => self.reset_store_skills(&sandbox),
+                SandboxSkillRow::RepoSkills => {
+                    self.open_repo_skills(RepoScope::Sandbox(sandbox.clone()))
+                }
+                SandboxSkillRow::Close => self.screen = Screen::List,
+            },
+            KeyCode::F(5) => self.refresh(),
+            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => self.refresh(),
+            _ => {}
+        }
+    }
+
+    /// *Apply now*: the pre-start link step as a job, for a running sandbox.
+    fn apply_store_skills_now(&mut self, sandbox: &str) {
+        let Some(argv) = self.store_link_step(sandbox) else {
+            self.set_info("nothing to link here — the switches apply at the next start");
+            return;
+        };
+        let label = self.sandbox_label(sandbox);
+        self.start_job(PendingJob {
+            title: format!("Linking the switched-on skills into {label}"),
+            steps: vec![Step::new(
+                format!("link the switched-on store skills into {sandbox}"),
+                argv,
+            )],
+            post: PostJob::default(),
+            fallback: None,
+            fallback_hint: None,
+        });
+    }
+
+    /// *Follow all sandboxes*: drop the sandbox's own switches.
+    fn reset_store_skills(&mut self, sandbox: &str) {
+        match self.change_switches(|s| s.reset(sandbox, &[])) {
+            Ok(_) => {
+                let label = self.sandbox_label(sandbox);
+                self.set_info(format!(
+                    "{label} follows the switches for all sandboxes again — from its next start"
+                ));
+                if let Screen::SandboxSkills(form) = &mut self.screen {
+                    form.focus = 0;
+                }
+            }
+            Err(why) => self.set_error(why),
+        }
+    }
+
     // --- repo skills -----------------------------------------------------------------------
 
     /// Open the Repo skills screen. It reads the repo list, the caches and the selection file
@@ -7198,24 +8064,18 @@ impl App {
         self.screen = Screen::RepoSkills(form);
     }
 
-    /// `i` on a sandbox: the selected sandbox's own repo skills.
-    fn action_sandbox_repo_skills(&mut self) {
-        let Some(sb) = self.selected() else { return };
-        let name = sb.name.clone();
-        self.open_repo_skills(RepoScope::Sandbox(name));
-    }
-
     /// Where Esc and *Close* go: the store screen the global scope was opened from, else the
     /// grid.
     fn close_repo_skills(&mut self) {
-        let (global, dirty) = match &self.screen {
-            Screen::RepoSkills(form) => (form.scope == RepoScope::Global, form.dirty),
+        let (scope, dirty) = match &self.screen {
+            Screen::RepoSkills(form) => (form.scope.clone(), form.dirty),
             _ => return,
         };
-        self.screen = if global {
-            Screen::Skills(SkillsForm::default())
-        } else {
-            Screen::List
+        self.screen = match scope {
+            RepoScope::Global => Screen::Skills(SkillsForm::default()),
+            RepoScope::Sandbox(sandbox) => {
+                Screen::SandboxSkills(SandboxSkillsForm { sandbox, focus: 0 })
+            }
         };
         if dirty {
             self.set_info("closed without saving — nothing was changed");
@@ -7327,17 +8187,34 @@ impl App {
             self.set_info("the shared store is empty — nothing to update");
             return;
         }
+        let tracked = self.switches.repos.len();
         let mut body = vec![
-            "Runs `sbx skills update`: every skill that was added from a Git repository is fetched"
+            "Brings the skills added from Git in step with their repositories: new skills of a"
                 .into(),
-            "again and replaced with the repository's current version.".into(),
+            "repository added whole come in (off until you switch them on), changed skills are"
+                .into(),
+            "replaced, and skills the repository deleted leave the store.".into(),
             String::new(),
-            "Skills copied from this host with `import` have no repository and are left alone —"
-                .into(),
-            "import again to refresh those.".into(),
+            match tracked {
+                0 => "No repository was added here yet: only `sbx skills update` runs.".into(),
+                1 => "1 repository was added here.".into(),
+                n => format!("{n} repositories were added here."),
+            },
+            "Then `sbx skills update` refreshes skills added with plain sbx.".into(),
+            String::new(),
+            "Skills copied from this host with `import` are left alone: import again to".into(),
+            "refresh those.".into(),
         ];
         body.push(String::new());
         body.push(self.skills_sharers_line());
+        let mut steps = Vec::new();
+        if tracked > 0 {
+            steps.push(Step::new(
+                "update the skills of the repositories added here",
+                crate::headless::job_argv(&["skills", "update"]),
+            ));
+        }
+        steps.push(Step::new("sbx skills update", sbx::skills_update_argv(&[])));
         self.modal = Some(Modal::Confirm(Confirm {
             title: "Update skills from their repositories".into(),
             body,
@@ -7346,7 +8223,7 @@ impl App {
             yes: false,
             job: PendingJob {
                 title: "Updating agent skills".into(),
-                steps: vec![Step::new("sbx skills update", sbx::skills_update_argv(&[]))],
+                steps,
                 post: PostJob::default(),
                 fallback: None,
                 fallback_hint: None,
@@ -7377,7 +8254,10 @@ impl App {
                     format!("sbx skills rm {name} --force"),
                     sbx::skills_rm_argv(&[name.to_string()]),
                 )],
-                post: PostJob::default(),
+                post: PostJob {
+                    forget_store_skill: Some(name.to_string()),
+                    ..Default::default()
+                },
                 fallback: None,
                 fallback_hint: None,
             },
@@ -7818,26 +8698,38 @@ impl App {
             Ask::AddSkills => {
                 let mut parts = value.split_whitespace();
                 let repo = parts.next().unwrap_or_default().to_string();
-                let skills: Vec<String> = parts.map(str::to_string).collect();
-                if !sbx::skills_repo_ok(&repo) {
-                    self.set_error(
-                        "name the repository as owner/repo or a Git URL, then optionally the \
-                         skills to take",
-                    );
+                if parts.next().is_some() {
+                    self.set_error(ADD_WHOLE_REPO);
                     return;
                 }
+                if !sbx::skills_repo_ok(&repo) {
+                    self.set_error("name the repository as owner/repo or a Git URL");
+                    return;
+                }
+                let before: Vec<String> =
+                    self.skills.iter().flat_map(|s| s.skills.clone()).collect();
                 self.start_job(PendingJob {
                     title: format!("Adding skills from {repo}"),
-                    steps: vec![Step::new(
-                        format!("sbx skills add {repo} --force"),
-                        sbx::skills_add_argv(&repo, &skills),
-                    )],
-                    post: PostJob::default(),
+                    steps: vec![
+                        Step::new(
+                            format!("sbx skills add {repo} --force"),
+                            sbx::skills_add_argv(&repo, &[]),
+                        ),
+                        Step::new(
+                            format!("keep {repo} in step from now on"),
+                            crate::headless::job_argv(&["skills", "update", "--track", &repo]),
+                        ),
+                    ],
+                    post: PostJob {
+                        record_origins: Some(OriginRecord::Added {
+                            repo: repo.clone(),
+                            before,
+                        }),
+                        ..Default::default()
+                    },
                     fallback: None,
                     fallback_hint: Some(
-                        "owner/repo is GitHub shorthand; any HTTPS or SSH Git URL works too. A \
-                         --skill name has to match a directory holding a SKILL.md in the \
-                         repository."
+                        "owner/repo is GitHub shorthand; any HTTPS or SSH Git URL works too."
                             .into(),
                     ),
                 });
@@ -9424,6 +10316,7 @@ impl App {
             workspace,
             git_guard,
             typed_folders,
+            store_own,
         ) = {
             let Screen::Create(form) = &self.screen else {
                 return;
@@ -9469,6 +10362,11 @@ impl App {
                 form.workspace_root(&self.cwd),
                 form.git_guard_offered() && form.workspace.git_guard,
                 form.workspace.extra_folders.clone(),
+                // Only what the form offered: switches set before the mode changed must not follow.
+                match form.store_skills_offered(&catalog) {
+                    true => form.workspace.store_own.clone(),
+                    false => store_skills::Own::default(),
+                },
             )
         };
         // Checked first: sbx would refuse the create only at the very end.
@@ -9641,6 +10539,7 @@ impl App {
                     start_dir: start_dir.clone(),
                     static_mcp: static_mcp.clone(),
                     extra_folders,
+                    store_skills: store_own.clone(),
                 }),
                 auth: use_token.then(|| AuthRecord::named(&name, &token_name)),
                 attach_start: attach
@@ -9648,7 +10547,10 @@ impl App {
                     .flatten(),
                 // The create drops any selection left under this name, so only the addons count.
                 attach_skill_steps: match attach {
-                    true => skill_source::install_steps_with(&name, &addons, false),
+                    true => (self.new_store_link_step(&name, backend, skills, &store_own))
+                        .into_iter()
+                        .chain(skill_source::install_steps_with(&name, &addons, false))
+                        .collect(),
                     false => Vec::new(),
                 },
                 attach_config: attach
@@ -10581,6 +11483,12 @@ impl App {
             mcp: Vec::new(),
             skills: None,
             skills_default: sbx::SkillsMode::default(),
+            switches: Switches::default(),
+            switches_error: None,
+            host_skill_folders: Vec::new(),
+            skill_repos_in_use: false,
+            pending_origins: Vec::new(),
+            skill_updates: 0,
             policy_needs_init: None,
             approvals: Vec::new(),
             // `acme`'s key, stored for its host — so no form warns about a missing one.
@@ -10856,6 +11764,13 @@ fn join_labels(kits: &[String]) -> String {
 mod tests {
     use super::*;
     use crate::kits::{Catalog, HOST_SKILLS};
+
+    const CLAUDE_SKILLS: &str = "/home/agent/.claude/skills";
+
+    /// The store's link step a start runs right after the label, with no skill switched on.
+    fn no_store_skills(name: &str, dir: &str) -> Vec<String> {
+        store_skills::link_argv(name, &[dir.to_string()], &[])
+    }
 
     #[test]
     fn the_test_form_finds_every_host_cache_whatever_the_runner_has() {
@@ -12079,10 +12994,12 @@ mod tests {
         );
         let picker = app.config_push("claude-litellm-proj").expect("the picker");
         assert!(picker.contains(&crate::litellm::CLAUDE_SETTINGS_PATH.to_string()));
+        let store = no_store_skills("claude-litellm-proj", CLAUDE_SKILLS);
         assert_eq!(
             handoff.prelude(),
             [
                 label("claude-litellm-proj"),
+                store.clone(),
                 picker.clone(),
                 sbx::exec_argv("claude-litellm-proj", &["claude", "update"]),
             ],
@@ -12097,10 +13014,13 @@ mod tests {
             crate::litellm::Agent::Opencode,
         )
         .unwrap();
+        let opencode_store =
+            no_store_skills("opencode-proj", "/home/agent/.config/opencode/skills");
         assert_eq!(
             start(&mut app, 1).prelude(),
             [
                 label("opencode-proj"),
+                opencode_store.clone(),
                 push.clone(),
                 sbx::exec_argv(
                     "opencode-proj",
@@ -12117,12 +13037,18 @@ mod tests {
         // `--no-update`: no update step; the label and the config writes are local and stay.
         app.auto_update = false;
         let handoff = start(&mut app, 0);
-        assert_eq!(handoff.prelude(), [label("claude-litellm-proj"), picker]);
+        assert_eq!(
+            handoff.prelude(),
+            [label("claude-litellm-proj"), store, picker]
+        );
         assert_eq!(
             handoff.argv(),
             sbx::attach_argv("claude-litellm-proj", None)
         );
-        assert_eq!(start(&mut app, 1).prelude(), [label("opencode-proj"), push]);
+        assert_eq!(
+            start(&mut app, 1).prelude(),
+            [label("opencode-proj"), opencode_store, push]
+        );
     }
 
     #[test]
@@ -12143,14 +13069,16 @@ mod tests {
         let label = |n: &str| sbx::label_argv(n, n);
 
         let handoff = start(&mut app, 0);
+        let store = |n: &str| no_store_skills(n, CLAUDE_SKILLS);
         assert_eq!(
             handoff.prelude(),
             [
                 label("claude-anthropic-proj"),
+                store("claude-anthropic-proj"),
                 sbx::host_skills_argv("claude-anthropic-proj"),
                 sbx::exec_argv("claude-anthropic-proj", &["claude", "update"]),
             ],
-            "label, the host-skills sync, then the update"
+            "label, the store's links, the host-skills sync, then the update"
         );
         let hook = sbx::host_skills_argv("claude-anthropic-proj");
         assert_eq!(hook[..3], ["sbx", "exec", "claude-anthropic-proj"]);
@@ -12163,6 +13091,7 @@ mod tests {
             start(&mut app, 1).prelude(),
             [
                 label("claude-anthropic-other"),
+                store("claude-anthropic-other"),
                 sbx::exec_argv("claude-anthropic-other", &["claude", "update"]),
             ],
             "no sync without the addon"
@@ -12173,13 +13102,17 @@ mod tests {
             start(&mut app, 0).prelude(),
             [
                 label("claude-anthropic-proj"),
+                store("claude-anthropic-proj"),
                 sbx::host_skills_argv("claude-anthropic-proj"),
             ],
-            "--no-update drops the update, not the sync"
+            "--no-update drops the update, not the syncs"
         );
         assert_eq!(
             start(&mut app, 1).prelude(),
-            [label("claude-anthropic-other")]
+            [
+                label("claude-anthropic-other"),
+                store("claude-anthropic-other")
+            ]
         );
     }
 
@@ -12216,21 +13149,30 @@ mod tests {
             app.apply_post(&post);
             let handoff = app.handoff.take().expect("a session was handed over");
             let label = sbx::label_argv(&name, app.registry.display_name(&name).unwrap_or(&name));
-            let want: Vec<Vec<String>> = [label].into_iter().chain(post.attach_config).collect();
+            let dir = match backend {
+                "claude-litellm" => CLAUDE_SKILLS,
+                _ => "/home/agent/.config/opencode/skills",
+            };
+            let want: Vec<Vec<String>> = [label, no_store_skills(&name, dir)]
+                .into_iter()
+                .chain(post.attach_config)
+                .collect();
             assert_eq!(handoff.prelude(), want, "{backend}");
             if picker {
-                assert!(want[1].contains(&crate::litellm::CLAUDE_SETTINGS_PATH.to_string()));
+                assert!(want[2].contains(&crate::litellm::CLAUDE_SETTINGS_PATH.to_string()));
             }
         }
 
         let post = create_and_start(&mut app, "claude-anthropic");
-        assert!(
-            post.attach_skill_steps.is_empty(),
-            "no host-skills addon was ticked"
+        let name = post.attach.clone().unwrap();
+        assert_eq!(
+            post.attach_skill_steps,
+            [no_store_skills(&name, CLAUDE_SKILLS)],
+            "no host-skills addon was ticked: the store's links alone"
         );
         app.apply_post(&post);
         let handoff = app.handoff.take().unwrap();
-        assert_eq!(handoff.prelude().len(), 1, "{:?}", handoff.prelude());
+        assert_eq!(handoff.prelude().len(), 2, "{:?}", handoff.prelude());
     }
 
     #[test]
@@ -12465,9 +13407,10 @@ mod tests {
             handoff.prelude(),
             [
                 sbx::label_argv("claude-litellm-proj", "claude-litellm-proj"),
+                no_store_skills("claude-litellm-proj", CLAUDE_SKILLS),
                 picker
             ],
-            "the label step and nothing for the folder"
+            "the label step, the store's links and nothing for the folder"
         );
         assert_eq!(
             handoff.argv(),
@@ -12500,8 +13443,8 @@ mod tests {
         );
         assert_eq!(
             handoff.prelude().len(),
-            2,
-            "the label step, the model list, and nothing for the folder"
+            3,
+            "the label step, the store's links, the model list, and nothing for the folder"
         );
         assert_eq!(
             handoff.argv(),
@@ -12939,26 +13882,29 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                SkillRow::Skill("pdf".into()),
                 SkillRow::Skill("frontend-design".into()),
+                SkillRow::Skill("pdf".into()),
                 SkillRow::Import,
                 SkillRow::AddRepo,
                 SkillRow::Update,
-                SkillRow::RepoSkills,
+                SkillRow::AutoUpdate,
                 SkillRow::Close,
-            ]
+            ],
+            "no skill repository here: no Repo skills row"
         );
         app.on_key(KeyEvent::from(KeyCode::Esc));
         assert!(matches!(app.screen, Screen::List));
 
         // An empty store: nothing to update, so the row is not offered — and `u` says so.
         app.skills = Some(store(&[]));
+        app.skill_repos_in_use = true;
         let rows = open_skills(&mut app);
         assert_eq!(
             rows,
             vec![
                 SkillRow::Import,
                 SkillRow::AddRepo,
+                SkillRow::AutoUpdate,
                 SkillRow::RepoSkills,
                 SkillRow::Close
             ]
@@ -12984,14 +13930,14 @@ mod tests {
         };
         assert!(matches!(prompt.ask, Ask::AddSkills));
         assert!(!prompt.masked(), "a repository is not a secret");
-        prompt.input = TextInput::new("anthropics/skills pdf docx");
+        prompt.input = TextInput::new("anthropics/skills");
         app.on_key(KeyEvent::from(KeyCode::Enter));
         let Some(Modal::Running(_, pending)) = &app.modal else {
             panic!("the add runs as a job")
         };
         assert_eq!(
             pending.steps[0].argv,
-            sbx::skills_add_argv("anthropics/skills", &["pdf".into(), "docx".into()])
+            sbx::skills_add_argv("anthropics/skills", &[])
         );
         app.modal = None;
 
@@ -14794,6 +15740,7 @@ mod tests {
     #[test]
     fn repo_skills_open_in_both_scopes() {
         let mut app = App::for_test(Catalog::load().unwrap(), Vec::new());
+        app.skill_repos_in_use = true;
         app.on_key(KeyEvent::from(KeyCode::Char('i')));
         assert!(matches!(app.screen, Screen::List));
         assert!(app.status.as_ref().is_some_and(|(_, err, _)| *err));
@@ -14808,10 +15755,617 @@ mod tests {
         let mut sb = model::sample(SB, Some("claude-anthropic"), &[]);
         sb.workspace = PathBuf::from("/proj");
         let mut app = App::for_test(Catalog::load().unwrap(), vec![sb]);
+        app.skill_repos_in_use = true;
         app.on_key(KeyEvent::from(KeyCode::Char('i')));
+        assert!(
+            matches!(app.screen, Screen::SandboxSkills(_)),
+            "i opens the sandbox's skills"
+        );
+        focus_sandbox_skill(&mut app, &SandboxSkillRow::RepoSkills);
+        app.on_key(KeyEvent::from(KeyCode::Enter));
         assert_eq!(repo_form(&mut app).scope, RepoScope::Sandbox(SB.into()));
         app.on_key(KeyEvent::from(KeyCode::Esc));
+        assert!(
+            matches!(&app.screen, Screen::SandboxSkills(f) if f.sandbox == SB),
+            "back where it came from"
+        );
+        app.on_key(KeyEvent::from(KeyCode::Esc));
         assert!(matches!(app.screen, Screen::List));
+    }
+
+    fn focus_sandbox_skill(app: &mut App, row: &SandboxSkillRow) {
+        let Screen::SandboxSkills(form) = &app.screen else {
+            panic!("the sandbox skills screen is open")
+        };
+        let at = app
+            .sandbox_skill_rows(&form.sandbox)
+            .iter()
+            .position(|r| r == row)
+            .unwrap_or_else(|| panic!("{row:?} is on the screen"));
+        let Screen::SandboxSkills(form) = &mut app.screen else {
+            unreachable!()
+        };
+        form.focus = at;
+    }
+
+    fn folder(dir: &str, skills: &[&str]) -> store_skills::HostFolder {
+        store_skills::HostFolder {
+            dir: dir.into(),
+            skills: skills.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn k_lists_skills_under_where_they_came_from_and_switches_them_for_all() {
+        let mut app = App::for_test(Catalog::load().unwrap(), Vec::new());
+        app.skills = Some(store(&["web", "pdf", "docx", "lost"]));
+        app.host_skill_folders = vec![folder("~/.claude/skills", &["web"])];
+        app.switches.record([
+            (
+                "pdf".to_string(),
+                store_skills::Origin::Repo("anthropics/skills".into()),
+            ),
+            (
+                "docx".to_string(),
+                store_skills::Origin::Repo("anthropics/skills".into()),
+            ),
+        ]);
+        let rows = open_skills(&mut app);
+        let skills: Vec<&SkillRow> = rows.iter().take(4).collect();
+        assert_eq!(
+            skills,
+            [
+                &SkillRow::Skill("web".into()),
+                &SkillRow::Skill("docx".into()),
+                &SkillRow::Skill("pdf".into()),
+                &SkillRow::Skill("lost".into()),
+            ]
+        );
+        let heading = |app: &App, s: &str| app.skill_heading(&SkillRow::Skill(s.into())).unwrap();
+        assert_eq!(
+            heading(&app, "web"),
+            (
+                "~/.claude/skills".to_string(),
+                "imported from this host".to_string()
+            )
+        );
+        assert_eq!(heading(&app, "pdf").0, "anthropics/skills");
+        assert_eq!(heading(&app, "lost").0, "Other skills");
+
+        // Every skill starts off; space switches it for all sandboxes, in the file at once.
+        assert_eq!(
+            app.skill_switch(&SkillRow::Skill("pdf".into())),
+            Some(false)
+        );
+        focus_skill(&mut app, &SkillRow::Skill("pdf".into()));
+        app.on_key(KeyEvent::from(KeyCode::Char(' ')));
+        assert_eq!(app.skill_switch(&SkillRow::Skill("pdf".into())), Some(true));
+        assert!(app.switches.global("pdf"));
+        assert!(app
+            .status
+            .as_ref()
+            .is_some_and(|(m, err, _)| !err && m.contains("pdf is on for all sandboxes")));
+        assert!(app.modal.is_none(), "a switch runs no job");
+        app.on_key(KeyEvent::from(KeyCode::Enter));
+        assert!(!app.switches.global("pdf"), "↵ switches it back");
+
+        // A sandbox's own switch shows beside the skill.
+        app.switches
+            .set(store_skills::Scope::Sandbox("box"), "pdf", true);
+        assert_eq!(
+            app.skill_view(&SkillRow::Skill("pdf".into())).1,
+            "on in 1 sandbox"
+        );
+
+        // An unreadable file switches nothing, and says why.
+        app.switches_error = Some("store-skills.json does not parse".into());
+        focus_skill(&mut app, &SkillRow::Skill("web".into()));
+        app.on_key(KeyEvent::from(KeyCode::Char(' ')));
+        assert!(!app.switches.global("web"));
+        assert!(app
+            .status
+            .as_ref()
+            .is_some_and(|(m, err, _)| *err && m.contains("cannot be read")));
+        assert!(app
+            .skills_intro()
+            .iter()
+            .any(|l| l.contains("does not parse")));
+    }
+
+    #[test]
+    fn the_daily_update_switch_and_the_update_when_it_is_due() {
+        let mut app = App::for_test(Catalog::load().unwrap(), Vec::new());
+        app.skills = Some(store(&["pdf"]));
+        open_skills(&mut app);
+        assert_eq!(
+            app.skill_switch(&SkillRow::AutoUpdate),
+            Some(true),
+            "on by default"
+        );
+        assert_eq!(
+            app.skill_view(&SkillRow::AutoUpdate).1,
+            "the skills added from Git, every 24 hours"
+        );
+
+        app.start_due_skill_update();
+        assert_eq!(app.skill_updates, 0, "no repository added here");
+        app.switches.track("anthropics/skills");
+        app.start_due_skill_update();
+        assert_eq!(app.skill_updates, 1, "due: never updated");
+        assert!(app.switches.updated_at.is_some(), "marked first");
+        app.start_due_skill_update();
+        assert_eq!(app.skill_updates, 1, "not again within a day");
+        assert!(app
+            .skill_view(&SkillRow::AutoUpdate)
+            .1
+            .starts_with("last update "));
+
+        app.switches.updated_at = Some(0);
+        focus_skill(&mut app, &SkillRow::AutoUpdate);
+        app.on_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.skill_switch(&SkillRow::AutoUpdate), Some(false));
+        assert_eq!(app.switches.auto_update, Some(false));
+        app.start_due_skill_update();
+        assert_eq!(app.skill_updates, 1, "switched off");
+        app.on_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.switches.auto_update, None, "on again: the key is gone");
+    }
+
+    #[test]
+    fn the_last_update_shows_on_k_and_as_a_message() {
+        let mut app = App::for_test(Catalog::load().unwrap(), Vec::new());
+        app.switches.updated_at = Some(crate::state::now_epoch());
+        app.switches.last_report = vec![
+            "o/a: new x (off until you switch it on)".into(),
+            "o/b: not updated: offline".into(),
+        ];
+        assert_eq!(
+            app.skill_view(&SkillRow::AutoUpdate).1,
+            "last update just now: 1 changed, 1 failed"
+        );
+        let notes = app.skill_notes(&SkillRow::AutoUpdate);
+        assert_eq!(
+            notes[1..],
+            [
+                "The last update:",
+                "o/a: new x (off until you switch it on)",
+                "o/b: not updated: offline"
+            ]
+        );
+        app.switches.last_report.clear();
+        assert_eq!(
+            app.skill_view(&SkillRow::AutoUpdate).1,
+            "last update just now, no change"
+        );
+
+        assert_eq!(daily_message(true, ""), (false, DAILY_UPDATED.to_string()));
+        assert_eq!(daily_message(false, "\n"), (true, DAILY_FAILED.to_string()));
+        assert_eq!(
+            daily_message(true, "o/a: deleted old\n"),
+            (
+                false,
+                "skills from Git, daily update: o/a: deleted old".to_string()
+            )
+        );
+        assert_eq!(
+            daily_message(false, "o/a: deleted old\no/b: not updated: offline\n"),
+            (
+                true,
+                "skills from Git, daily update: o/a: deleted old · o/b: not updated: offline"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn an_add_tracks_its_repository_and_removing_its_last_skill_untracks_it() {
+        let mut app = App::for_test(Catalog::load().unwrap(), Vec::new());
+        app.skills = Some(store(&["web", "pdf", "docx"]));
+        app.switches.track("o/a");
+        app.switches.record(
+            ["pdf", "docx"].map(|s| (s.to_string(), store_skills::Origin::Repo("o/a".into()))),
+        );
+
+        let remove = |app: &mut App, skill: &str| {
+            app.apply_post(&PostJob {
+                forget_store_skill: Some(skill.into()),
+                ..Default::default()
+            });
+            let left: Vec<String> = (app.skills.iter())
+                .flat_map(|s| s.skills.clone())
+                .filter(|s| s != skill)
+                .collect();
+            let refs: Vec<&str> = left.iter().map(String::as_str).collect();
+            app.skills = Some(store(&refs));
+        };
+        remove(&mut app, "pdf");
+        assert!(
+            app.switches.repos.contains_key("o/a"),
+            "docx still comes from it"
+        );
+        remove(&mut app, "docx");
+        assert!(
+            !app.switches.repos.contains_key("o/a"),
+            "nothing of it is left: no more updates"
+        );
+    }
+
+    #[test]
+    fn update_from_repositories_updates_the_added_repositories_first() {
+        let mut app = App::for_test(Catalog::load().unwrap(), Vec::new());
+        app.skills = Some(store(&["pdf"]));
+        open_skills(&mut app);
+        app.on_key(KeyEvent::from(KeyCode::Char('u')));
+        let Some(Modal::Confirm(confirm)) = app.modal.take() else {
+            panic!("u asks first")
+        };
+        let argvs: Vec<Vec<String>> = confirm.job.steps.iter().map(|s| s.argv.clone()).collect();
+        assert_eq!(
+            argvs,
+            [sbx::skills_update_argv(&[])],
+            "no repository added here"
+        );
+
+        app.switches.track("o/a");
+        app.on_key(KeyEvent::from(KeyCode::Char('u')));
+        let Some(Modal::Confirm(confirm)) = app.modal.take() else {
+            panic!("u asks first")
+        };
+        assert_eq!(confirm.job.steps.len(), 2);
+        assert_eq!(&confirm.job.steps[0].argv[1..], ["skills", "update"]);
+        assert_eq!(confirm.job.steps[1].argv, sbx::skills_update_argv(&[]));
+        assert!(confirm
+            .body
+            .iter()
+            .any(|l| l.contains("1 repository was added here")));
+    }
+
+    #[test]
+    fn imports_and_adds_record_where_their_skills_came_from() {
+        let mut app = App::for_test(Catalog::load().unwrap(), Vec::new());
+        app.skills = Some(store(&["web"]));
+        app.host_skill_folders = vec![
+            folder("~/.agents/skills", &["web"]),
+            folder("~/.claude/skills", &["web", "slides"]),
+        ];
+        open_skills(&mut app);
+        app.on_key(KeyEvent::from(KeyCode::Char('a')));
+        let Some(Modal::Prompt(prompt)) = &mut app.modal else {
+            panic!("a opens the repository prompt")
+        };
+        prompt.input = TextInput::new("anthropics/skills pdf");
+        app.on_key(KeyEvent::from(KeyCode::Enter));
+        assert!(
+            app.status
+                .as_ref()
+                .is_some_and(|(m, err, _)| *err && m == ADD_WHOLE_REPO),
+            "skill names are refused: the whole repository comes in"
+        );
+        app.on_key(KeyEvent::from(KeyCode::Char('a')));
+        let Some(Modal::Prompt(prompt)) = &mut app.modal else {
+            panic!("a opens the repository prompt")
+        };
+        prompt.input = TextInput::new("anthropics/skills");
+        app.on_key(KeyEvent::from(KeyCode::Enter));
+        let Some(Modal::Running(_, pending)) = app.modal.take() else {
+            panic!("the add runs as a job")
+        };
+        assert_eq!(
+            pending.steps[0].argv,
+            sbx::skills_add_argv("anthropics/skills", &[])
+        );
+        assert_eq!(
+            pending.steps[1].argv[1..],
+            ["skills", "update", "--track", "anthropics/skills"],
+            "the add keeps the repository in step at once"
+        );
+        assert_eq!(
+            pending.post.record_origins,
+            Some(OriginRecord::Added {
+                repo: "anthropics/skills".into(),
+                before: vec!["web".into()],
+            })
+        );
+        app.apply_post(&pending.post);
+        app.apply_post(&PostJob {
+            record_origins: Some(OriginRecord::Import),
+            ..Default::default()
+        });
+        assert!(
+            app.switches.origins.is_empty(),
+            "nothing until the store is read again"
+        );
+        app.skills = Some(store(&["web", "slides", "pdf", "other"]));
+        app.record_pending_origins();
+        assert_eq!(
+            app.switches.origins,
+            [
+                (
+                    "other".to_string(),
+                    store_skills::Origin::Repo("anthropics/skills".into())
+                ),
+                (
+                    "pdf".to_string(),
+                    store_skills::Origin::Repo("anthropics/skills".into())
+                ),
+                (
+                    "slides".to_string(),
+                    store_skills::Origin::Folder("~/.claude/skills".into())
+                ),
+                (
+                    "web".to_string(),
+                    store_skills::Origin::Folder("~/.agents/skills".into())
+                ),
+            ]
+            .into()
+        );
+
+        // Removing a skill drops its switches and its origin.
+        app.switches.set(store_skills::Scope::All, "pdf", true);
+        focus_skill(&mut app, &SkillRow::Skill("pdf".into()));
+        app.on_key(KeyEvent::from(KeyCode::Char('d')));
+        let Some(Modal::Confirm(confirm)) = app.modal.take() else {
+            panic!("d asks first")
+        };
+        assert_eq!(confirm.job.post.forget_store_skill.as_deref(), Some("pdf"));
+        app.apply_post(&confirm.job.post);
+        assert!(!app.switches.global("pdf"));
+        assert!(!app.switches.origins.contains_key("pdf"));
+    }
+
+    #[test]
+    fn i_switches_store_skills_for_one_sandbox() {
+        let mut sb = model::sample(SB, Some("claude-anthropic"), &[]);
+        sb.workspace = PathBuf::from("/proj");
+        sb.running = true;
+        let mut app = App::for_test(Catalog::load().unwrap(), vec![sb]);
+        app.skills = Some(store(&["pdf", "docx"]));
+        app.switches.set(store_skills::Scope::All, "pdf", true);
+        app.on_key(KeyEvent::from(KeyCode::Char('i')));
+        let rows = app.sandbox_skill_rows(SB);
+        assert_eq!(
+            rows,
+            [
+                SandboxSkillRow::Skill("docx".into()),
+                SandboxSkillRow::Skill("pdf".into()),
+                SandboxSkillRow::ApplyNow,
+                SandboxSkillRow::Close,
+            ]
+        );
+        let pdf = SandboxSkillRow::Skill("pdf".into());
+        assert_eq!(
+            app.sandbox_skill_switch(SB, &pdf),
+            Some(true),
+            "on for all sandboxes"
+        );
+        assert_eq!(app.sandbox_skill_view(SB, &pdf).1, "", "not its own");
+
+        focus_sandbox_skill(&mut app, &pdf);
+        app.on_key(KeyEvent::from(KeyCode::Char(' ')));
+        assert_eq!(app.sandbox_skill_switch(SB, &pdf), Some(false));
+        assert_eq!(app.switches.own(SB, "pdf"), Some(false));
+        assert!(app.switches.global("pdf"), "the switch for all stays");
+        assert_eq!(
+            app.sandbox_skill_view(SB, &pdf).1,
+            "own · on for all sandboxes"
+        );
+        assert!(app.sandbox_skill_rows(SB).contains(&SandboxSkillRow::Reset));
+
+        // Apply now runs the start's link step as a job, with the sandbox's own choice.
+        focus_sandbox_skill(&mut app, &SandboxSkillRow::ApplyNow);
+        app.on_key(KeyEvent::from(KeyCode::Enter));
+        let Some(Modal::Running(_, pending)) = app.modal.take() else {
+            panic!("Apply now runs a job")
+        };
+        assert_eq!(pending.steps[0].argv, no_store_skills(SB, CLAUDE_SKILLS));
+        app.switches
+            .set(store_skills::Scope::Sandbox(SB), "docx", true);
+        assert_eq!(
+            app.store_link_step(SB).unwrap(),
+            store_skills::link_argv(SB, &[CLAUDE_SKILLS.to_string()], &["docx".to_string()])
+        );
+
+        focus_sandbox_skill(&mut app, &SandboxSkillRow::Reset);
+        app.on_key(KeyEvent::from(KeyCode::Enter));
+        assert!(!app.switches.sandboxes.contains_key(SB));
+        assert_eq!(app.sandbox_skill_switch(SB, &pdf), Some(true));
+        app.on_key(KeyEvent::from(KeyCode::Esc));
+        assert!(matches!(app.screen, Screen::List));
+    }
+
+    #[test]
+    fn skill_texts_have_no_stray_backslash_or_run_of_spaces() {
+        let mut sb = model::sample(SB, Some("claude-anthropic"), &[]);
+        sb.running = true;
+        let mut off = model::sample("claude-anthropic-off", Some("claude-anthropic"), &[]);
+        off.skills = Some(model::Skills::Known(sbx::SkillsMode::Off));
+        let mut app = App::for_test(Catalog::load().unwrap(), vec![sb, off]);
+        app.skills = Some(store(&["pdf"]));
+        app.skill_repos_in_use = true;
+        app.switches
+            .set(store_skills::Scope::Sandbox(SB), "pdf", true);
+        let mut texts: Vec<String> = app.skills_intro();
+        for row in app.skill_rows() {
+            texts.extend(app.skill_notes(&row));
+            let (title, meta) = app.skill_view(&row);
+            texts.extend([title, meta]);
+        }
+        for name in [SB, "claude-anthropic-off"] {
+            texts.extend(app.sandbox_skills_intro(name));
+            for row in app.sandbox_skill_rows(name) {
+                texts.extend(app.sandbox_skill_notes(name, &row));
+                let (title, meta) = app.sandbox_skill_view(name, &row);
+                texts.extend([title, meta]);
+            }
+        }
+        texts.extend([SKILLS_INTRO.to_string(), SANDBOX_SKILLS_INTRO.to_string()]);
+        app.switches_error = Some("bad".into());
+        texts.extend(app.skills_intro());
+        texts.extend(app.sandbox_skills_intro(SB));
+        for text in &texts {
+            assert!(!text.contains('\\'), "{text}");
+            assert!(!text.contains("  "), "{text}");
+        }
+        assert!(texts.len() > 20, "{}", texts.len());
+    }
+
+    #[test]
+    fn the_switches_do_not_reach_a_sandbox_without_a_read_only_store() {
+        let mut off = model::sample("claude-anthropic-off", Some("claude-anthropic"), &[]);
+        off.skills = Some(model::Skills::Known(sbx::SkillsMode::Off));
+        let mut rw = model::sample("claude-anthropic-rw", Some("claude-anthropic"), &[]);
+        rw.skills = Some(model::Skills::Known(sbx::SkillsMode::Readwrite));
+        let mut foreign = model::sample("shell-lab", None, &[]);
+        foreign.agent = "shell".into();
+        let mut unrecorded = model::sample("claude-anthropic-old", Some("claude-anthropic"), &[]);
+        unrecorded.skills = Some(model::Skills::Unrecorded);
+        let mut app = App::for_test(Catalog::load().unwrap(), vec![off, rw, foreign, unrecorded]);
+        app.skills = Some(store(&["pdf"]));
+        for (name, says) in [
+            ("claude-anthropic-off", "created with skills off"),
+            ("claude-anthropic-rw", "read-write"),
+            ("shell-lab", "mounts no shared skills store"),
+        ] {
+            assert_eq!(
+                app.sandbox_skill_rows(name),
+                [SandboxSkillRow::Close],
+                "{name}"
+            );
+            assert!(app.sandbox_skills_intro(name)[0].contains(says), "{name}");
+            assert_eq!(app.store_link_step(name), None, "{name}");
+        }
+        assert!(
+            app.switches_apply("claude-anthropic-old"),
+            "unrecorded: the hook decides"
+        );
+        assert_eq!(
+            app.store_link_step("claude-anthropic-old"),
+            Some(no_store_skills("claude-anthropic-old", CLAUDE_SKILLS))
+        );
+        app.switches_error = Some("bad".into());
+        assert_eq!(
+            app.store_link_step("claude-anthropic-old"),
+            None,
+            "unreadable: no step"
+        );
+        assert_eq!(
+            app.sandbox_skill_rows("claude-anthropic-old"),
+            [SandboxSkillRow::Close]
+        );
+    }
+
+    #[test]
+    fn the_create_form_switches_store_skills_for_the_new_sandbox() {
+        let mut app = App::for_test(Catalog::load().unwrap(), Vec::new());
+        app.skills = Some(store(&["pdf", "docx"]));
+        app.switches.set(store_skills::Scope::All, "pdf", true);
+        app.skills_default = sbx::SkillsMode::Readonly;
+        app.open_create();
+        let catalog = Arc::clone(&app.catalog);
+        let Screen::Create(form) = &mut app.screen else {
+            panic!("the create form is open")
+        };
+        let idx = (catalog.backends.iter())
+            .position(|b| b.kit.name == "claude-anthropic")
+            .unwrap();
+        form.harness.backend = idx;
+        let rows = form.rows(&catalog);
+        let at = rows
+            .iter()
+            .position(|r| *r == CreateRow::SkillsFold)
+            .expect("the fold row");
+        assert_eq!(
+            rows[at + 1..at + 3],
+            [CreateRow::StoreSkill(0), CreateRow::StoreSkill(1)]
+        );
+        assert!(!form.row_shown(CreateRow::StoreSkill(0)), "folded at first");
+        assert_eq!(form.workspace.store_skills, ["docx", "pdf"]);
+        assert!(
+            !form.store_skill_on(0) && form.store_skill_on(1),
+            "as for all sandboxes"
+        );
+        form.toggle_store_skill(0);
+        form.toggle_store_skill(1);
+        assert_eq!(form.store_skills_on(), ["docx"]);
+        assert!(form.store_skill_own(0) && form.store_skill_own(1));
+        form.toggle_store_skill(1);
+        assert!(!form.store_skill_own(1), "back to the switch for all");
+        assert_eq!(form.store_skills_on(), ["docx", "pdf"]);
+        form.toggle_store_skill(1);
+        assert_eq!(form.store_skills_on(), ["docx"]);
+        let form = form.clone();
+        let review = form.review(&app);
+        let shared = (review.answers.iter())
+            .find(|a| a.label == "Shared skills")
+            .expect("the review names them");
+        assert_eq!(shared.value, "docx");
+
+        // Read-write or off: no switch is offered, and none is registered.
+        let Screen::Create(form) = &mut app.screen else {
+            unreachable!()
+        };
+        form.workspace.skills = sbx::SkillsMode::Readwrite;
+        assert!(!form.rows(&catalog).contains(&CreateRow::SkillsFold));
+        form.workspace.skills = sbx::SkillsMode::Readonly;
+
+        wizard_on(&mut app, CreateStep::Review, WizardRow::CreateStart);
+        app.on_key(KeyEvent::from(KeyCode::Enter));
+        let Some(Modal::Running(_, pending)) = app.modal.take() else {
+            panic!("a create job was started")
+        };
+        let made = pending.post.register.clone().expect("registered");
+        assert_eq!(made.store_skills.on, ["docx".to_string()].into());
+        assert_eq!(made.store_skills.off, ["pdf".to_string()].into());
+        let name = pending.post.attach.clone().unwrap();
+        assert_eq!(
+            pending.post.attach_skill_steps,
+            [store_skills::link_argv(
+                &name,
+                &[CLAUDE_SKILLS.to_string()],
+                &["docx".to_string()]
+            )],
+            "the first session gets exactly the form's choice"
+        );
+    }
+
+    #[test]
+    fn a_create_replaces_the_switches_an_earlier_sandbox_left() {
+        let mut app = App::for_test(Catalog::load().unwrap(), Vec::new());
+        app.switches
+            .set(store_skills::Scope::Sandbox("box"), "x", true);
+        let own = store_skills::Own {
+            on: ["docx".to_string()].into(),
+            off: Default::default(),
+        };
+        app.apply_post(&PostJob {
+            register: Some(Registered {
+                name: "box".into(),
+                label: "box".into(),
+                clone: false,
+                skills: Some(sbx::SkillsMode::Readonly),
+                start_dir: None,
+                static_mcp: Vec::new(),
+                extra_folders: Vec::new(),
+                store_skills: own.clone(),
+            }),
+            ..Default::default()
+        });
+        assert_eq!(app.switches.sandboxes.get("box"), Some(&own));
+    }
+
+    #[test]
+    fn a_delete_drops_the_sandboxs_switches() {
+        let mut app = App::for_test(Catalog::load().unwrap(), Vec::new());
+        app.switches
+            .set(store_skills::Scope::Sandbox("box"), "x", true);
+        app.switches
+            .set(store_skills::Scope::Sandbox("other"), "x", true);
+        app.apply_post(&PostJob {
+            forget: Some("box".into()),
+            ..Default::default()
+        });
+        assert!(!app.switches.sandboxes.contains_key("box"));
+        assert!(app.switches.sandboxes.contains_key("other"));
     }
 
     #[test]
@@ -16095,6 +17649,10 @@ mod tests {
         let handoff = app.handoff.take().expect("a session was handed over");
         assert_eq!(
             handoff.prelude()[1],
+            no_store_skills("pi-litellm-proj", "/home/agent/.agents/skills")
+        );
+        assert_eq!(
+            handoff.prelude()[2],
             crate::litellm::push_argv_in(
                 &app.litellm_root,
                 "pi-litellm-proj",
@@ -18690,16 +20248,21 @@ mod screen_decision_tests {
             app.skill_view(&SkillRow::AddRepo).0,
             "Add from a Git repository"
         );
+        let notes = app.skill_notes(&SkillRow::Skill("pdf".into()));
         assert!(
-            app.skill_notes(&SkillRow::Skill("pdf".into()))[0].starts_with("Remove deletes pdf")
+            notes[0].starts_with("When on, every sandbox gets pdf"),
+            "{notes:?}"
         );
+        assert!(notes[0].contains("Remove deletes it"), "{notes:?}");
+        assert!(notes[1].contains("not recorded"), "{notes:?}");
         assert!(app.skill_notes(&SkillRow::Update)[0].contains("0 sandboxes here"));
+        assert!(app.skill_notes(&SkillRow::AutoUpdate)[0].starts_with("When on, the dashboard"));
         assert!(app.skill_notes(&SkillRow::Close).is_empty());
         assert_eq!(
-            App::skill_heading(&SkillRow::Update),
-            Some("Change the store")
+            app.skill_heading(&SkillRow::Update),
+            Some(("Change the store".to_string(), String::new()))
         );
-        assert_eq!(App::skill_heading(&SkillRow::Close), None);
+        assert_eq!(app.skill_heading(&SkillRow::Close), None);
     }
 }
 

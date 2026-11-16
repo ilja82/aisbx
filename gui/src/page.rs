@@ -1,6 +1,7 @@
 //! The frame of every page but the list and the create wizard: one centred column of readable
 //! width under the page's title, and the page's buttons in a bar along the window's foot. Pages
-//! that list things use its groups ([`group`]) of items ([`item`]), each with its own buttons.
+//! that list things use its groups ([`group`]) of items ([`item`]), each with its own buttons
+//! and, where it is on or off, its switch.
 
 use eframe::egui::{
     self, Color32, CursorIcon, FontId, Galley, Pos2, Rect, RichText, Role, Sense, Stroke, Vec2,
@@ -9,7 +10,7 @@ use eframe::egui::{
 use std::sync::Arc;
 
 use crate::form::{self, Look};
-use crate::theme;
+use crate::{controls, theme};
 
 /// The column's widest, and the room the window keeps at either side of it.
 pub const COLUMN: f32 = 760.0;
@@ -139,7 +140,9 @@ pub struct Item<'a> {
     pub state: Option<State>,
     /// The buttons that act on it, as `(label, look)`; an inert one is drawn disabled.
     pub actions: &'a [(&'a str, Look)],
-    /// The room kept for buttons at the right edge, at least its own: the widest of its group's
+    /// Its switch at the right edge, after the buttons ([`controls::switch`]): on or off.
+    pub switch: Option<bool>,
+    /// The room kept for its buttons, at least their own: the widest of its group's
     /// ([`actions_width`]), so the states of a group's items end in one column.
     pub reserve: f32,
     /// Core's cursor is on it.
@@ -163,6 +166,8 @@ pub struct Picked {
     pub item: bool,
     /// One of its buttons was, by its place in [`Item::actions`].
     pub action: Option<usize>,
+    /// Its switch was: turn it the other way.
+    pub switch: bool,
 }
 
 /// An item's height, and the room at its sides and between its parts.
@@ -198,6 +203,21 @@ pub fn item(
 
     let mut right = rect.right() - PAD;
     let mut picked = Picked::default();
+    if let Some(on) = item.switch {
+        let at = Rect::from_min_max(
+            Pos2::new(right - controls::switch_width(ui), rect.top()),
+            Pos2::new(right, rect.bottom()),
+        );
+        let mut cell = ui.new_child(egui::UiBuilder::new().max_rect(at));
+        let switch = controls::Switch {
+            label: item.title,
+            on,
+            enabled: true,
+        };
+        picked.switch = controls::switch(&mut cell, switch, ITEM_H).clicked();
+        right = at.left() - GAP;
+    }
+    let edge = right;
     for (n, (label, look)) in item.actions.iter().enumerate().rev() {
         let size = button_size(ui, label);
         let at = Rect::from_min_size(
@@ -218,7 +238,7 @@ pub fn item(
     }
     let buttons = actions_width(ui, item.actions).max(item.reserve);
     if buttons > 0.0 {
-        right = rect.right() - PAD - buttons - GAP;
+        right = edge - buttons - GAP;
     }
     if let Some(state) = &item.state {
         let font = match state.value {
@@ -259,7 +279,7 @@ pub fn item(
         let pos = Pos2::new(x + title_w + 10.0, rect.center().y - meta.size().y / 2.0);
         ui.painter().galley(pos, meta, weak);
     }
-    picked.item = response.clicked() && picked.action.is_none();
+    picked.item = response.clicked() && picked.action.is_none() && !picked.switch;
 
     let mut whole = rect;
     if item.selected {
@@ -373,6 +393,7 @@ mod tests {
                         meta: it.meta,
                         state: None,
                         actions: it.actions,
+                        switch: it.switch,
                         reserve: it.reserve,
                         selected: it.selected,
                         rule: it.rule,
@@ -420,6 +441,7 @@ mod tests {
                         value: false,
                     }),
                     actions: &[],
+                    switch: None,
                     reserve: 0.0,
                     selected: false,
                     rule: false,
@@ -472,6 +494,7 @@ mod tests {
                             value: true,
                         }),
                         actions,
+                        switch: None,
                         reserve,
                         selected: false,
                         rule: n > 0,
@@ -540,6 +563,7 @@ mod tests {
                 meta: "",
                 state: None,
                 actions: &actions,
+                switch: None,
                 reserve: 0.0,
                 selected: false,
                 rule: false,
@@ -550,6 +574,7 @@ mod tests {
                 meta: "",
                 state: None,
                 actions: &actions,
+                switch: None,
                 reserve: 0.0,
                 selected: false,
                 rule: true,
@@ -565,7 +590,8 @@ mod tests {
             picked[0],
             Picked {
                 item: true,
-                action: None
+                action: None,
+                switch: false
             }
         );
         let picked = click(&ctx, &items, delete(2.0 + ITEM_H / 2.0));
@@ -573,11 +599,56 @@ mod tests {
             picked[0],
             Picked {
                 item: false,
-                action: Some(1)
+                action: Some(1),
+                switch: false
             }
         );
         let picked = click(&ctx, &items, delete(second + ITEM_H / 2.0));
         assert_eq!(picked[1].action, Some(1), "{picked:?}");
         assert_eq!(picked[0], Picked::default());
+    }
+
+    /// The switch takes a click on the item's whole height at its right edge; its buttons sit
+    /// before it and keep their own clicks.
+    #[test]
+    fn a_switch_at_the_right_edge_takes_its_own_click() {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let actions = [("Remove", Look::Danger)];
+        let items = [Item {
+            title: "pdf",
+            mark: None,
+            meta: "on in 2 sandboxes",
+            state: None,
+            actions: &actions,
+            switch: Some(false),
+            reserve: 0.0,
+            selected: false,
+            rule: false,
+        }];
+        let mut width = 0.0;
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            width = controls::switch_width(ui);
+        });
+        output.textures_delta.clear();
+        frame(&ctx, &items, Vec::new());
+        let right = 900.0 - PAD;
+        let switch = Picked {
+            switch: true,
+            ..Picked::default()
+        };
+        for y in [4.0, 2.0 + ITEM_H / 2.0, ITEM_H] {
+            for x in [right - 4.0, right - width + 4.0] {
+                let picked = click(&ctx, &items, Pos2::new(x, y));
+                assert_eq!(picked[0], switch, "at {x}, {y}");
+            }
+        }
+        let line = 2.0 + ITEM_H / 2.0;
+        let remove = Pos2::new(right - width - GAP - 20.0, line);
+        let picked = click(&ctx, &items, remove);
+        assert_eq!(picked[0].action, Some(0), "{picked:?}");
+        assert!(!picked[0].switch);
+        let picked = click(&ctx, &items, Pos2::new(60.0, line));
+        assert!(picked[0].item && !picked[0].switch, "{picked:?}");
     }
 }

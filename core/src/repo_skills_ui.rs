@@ -350,11 +350,11 @@ impl RepoSkillsForm {
 }
 
 /// Where a pick for all sandboxes is changed, by the action's and the row's words.
-const CHANGE_GLOBAL: &str = "change it in Skills (K), under Repo skills for all sandboxes";
+const CHANGE_GLOBAL: &str = "change it in Skills (K), under Repo skills (deprecated)";
 
 /// The note under a row a global pick locks.
 pub const LOCKED_NOTE: &str =
-    "Ticked for all sandboxes: change it in Skills (K), under Repo skills for all sandboxes.";
+    "Ticked for all sandboxes: change it in Skills (K), under Repo skills (deprecated).";
 
 /// What the screen says when no skill repository is configured.
 pub const NO_REPOS: &str = "No skill repository yet. Add one in a terminal with `aisbx skill-repo \

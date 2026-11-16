@@ -270,6 +270,15 @@ pub fn on_accent(dark: bool) -> Color32 {
     }
 }
 
+/// A switch's knob on the [`running`] green of a switch that is on: the ground's dark on the light
+/// green of dark mode, white on the deep green of light mode.
+pub fn on_running(dark: bool) -> Color32 {
+    match dark {
+        true => Color32::from_rgb(0x14, 0x1b, 0x26),
+        false => Color32::WHITE,
+    }
+}
+
 /// Text on a [`danger`] fill: the confirming button of what cannot be undone.
 pub fn on_danger(dark: bool) -> Color32 {
     match dark {
@@ -535,6 +544,21 @@ mod tests {
                         "dark {dark}: {name} on the {colour:?} callout: {ratio:.2}"
                     );
                 }
+            }
+            for (name, mark, fill) in [
+                (
+                    "the knob of a switch that is on",
+                    on_running(dark),
+                    running(dark),
+                ),
+                (
+                    "an off switch on its field",
+                    v.weak_text_color(),
+                    v.extreme_bg_color,
+                ),
+            ] {
+                let ratio = contrast(mark, fill);
+                assert!(ratio >= 3.0, "dark {dark}: {name}: {ratio:.2}");
             }
             // egui writes a progress bar's text in the selection's stroke colour.
             let track = v.faint_bg_color;

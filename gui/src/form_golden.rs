@@ -89,6 +89,10 @@ pub(crate) struct Win {
     /// Every outlined rectangle of the last frame, with its outline's colour: a control's border,
     /// the ring core's cursor is drawn as.
     pub(crate) rings: Vec<(egui::Rect, egui::Color32)>,
+    /// Every filled circle of the last frame, with its fill: a switch's knob, a radio's dot.
+    pub(crate) circles: Vec<(egui::Pos2, egui::Color32)>,
+    /// Every text of the last frame cut short with `…` to fit its room.
+    pub(crate) elided: Vec<String>,
     /// The window's size, in points.
     pub(crate) size: egui::Vec2,
 }
@@ -109,6 +113,8 @@ impl Win {
             colored: Vec::new(),
             fills: Vec::new(),
             rings: Vec::new(),
+            circles: Vec::new(),
+            elided: Vec::new(),
             size: egui::vec2(1200.0, 760.0),
         };
         w.frame(Vec::new());
@@ -131,6 +137,8 @@ impl Win {
         self.colored.clear();
         self.fills.clear();
         self.rings.clear();
+        self.circles.clear();
+        self.elided.clear();
         for clipped in &output.shapes {
             collect(&clipped.shape, self);
         }
@@ -149,6 +157,9 @@ fn collect(shape: &egui::Shape, w: &mut Win) {
                 .filter(|c| *c != egui::Color32::PLACEHOLDER)
                 .unwrap_or(text.fallback_color);
             w.colored.push((text.galley.text().to_string(), color));
+            if text.galley.elided {
+                w.elided.push(text.galley.text().to_string());
+            }
             let mono = (job.sections.iter())
                 .filter(|s| s.format.font_id.family == egui::FontFamily::Monospace)
                 .map(|s| job.text[s.byte_range.start.0..s.byte_range.end.0].to_string());
@@ -161,6 +172,9 @@ fn collect(shape: &egui::Shape, w: &mut Win) {
             if rect.stroke.width > 0.0 {
                 w.rings.push((rect.rect, rect.stroke.color));
             }
+        }
+        egui::Shape::Circle(circle) if circle.fill.a() > 0 => {
+            w.circles.push((circle.center, circle.fill));
         }
         egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| collect(s, w)),
         _ => {}
@@ -1106,6 +1120,90 @@ fn a_click_on_a_fold_shows_what_it_holds() {
     w.frame(Vec::new());
     assert!(w.drawn.iter().any(|t| t == "Ports"), "{:?}", w.drawn);
     assert!(w.drawn.iter().any(|t| t == crate::controls::OPTIONAL));
+}
+
+/// Where the step draws exactly `text`: right of the rail, which names the answers too.
+fn step_text(w: &Win, text: &str) -> egui::Rect {
+    let edge = rail_edge(w);
+    (w.drawn_at.iter())
+        .find(|(t, r)| t == text && r.left() >= edge)
+        .unwrap_or_else(|| panic!("{text} is drawn on the step: {:?}", w.drawn_at))
+        .1
+}
+
+/// The store's skills under the Workspace step's *Shared skills* fold: closed at first, core's
+/// summary beside its title; open, a tick per skill, ticked where the new sandbox gets it, *Own*
+/// where its switch differs from the one for all sandboxes. A click ticks as Space does through
+/// core, and the create carries the same switches.
+#[test]
+fn the_shared_skills_fold_ticks_the_store_skills_as_core_does() {
+    let store = |app: &mut App| {
+        let skills = vec!["pdf".to_string(), "docx".to_string()];
+        app.skills = Some(sbx::SkillsStore {
+            store: "/store".into(),
+            skills,
+        });
+        let all = aisbx_core::store_skills::Scope::All;
+        app.switches.set(all, "pdf", true);
+        app.skills_default = sbx::SkillsMode::Readonly;
+    };
+    let mut w = Win::new(golden_app(&store));
+    w.size = egui::vec2(1200.0, 1100.0);
+    w.type_text("n");
+    run(&mut w, &[Do::Walk(CreateStep::Workspace)]);
+    w.frame(Vec::new());
+    let fold = step_text(&w, crate::wizard::SHARED_SKILLS);
+    let summary = |w: &Win| form(&w.app).fold_summary(&w.app, CreateRow::SkillsFold);
+    let first = summary(&w).expect("the fold says what is on");
+    let beside = step_text(&w, &first);
+    assert!(
+        (beside.center().y - fold.center().y).abs() < 4.0,
+        "beside the title"
+    );
+    let colour = |w: &Win, text: &str| (w.colored.iter()).find(|(t, _)| t == text).map(|(_, c)| *c);
+    assert_eq!(colour(&w, &first), Some(theme::accent(dark(&w))));
+    assert!(
+        !w.drawn.iter().any(|t| t == "docx"),
+        "folded: {:?}",
+        w.drawn
+    );
+    click(&mut w, fold.center());
+    assert!(form(&w.app).wizard.skills_open);
+    w.frame(Vec::new());
+    let docx = step_text(&w, "docx");
+    assert!(
+        step_text(&w, "pdf").top() > docx.top(),
+        "in the store's order"
+    );
+    assert!(!w.drawn.iter().any(|t| t == crate::wizard::OWN));
+    click(&mut w, docx.center());
+    w.frame(Vec::new());
+    assert!(form(&w.app).store_skill_on(0) && form(&w.app).store_skill_own(0));
+    let own = step_text(&w, crate::wizard::OWN);
+    assert!(
+        (own.center().y - docx.center().y).abs() < 4.0,
+        "on the line of docx"
+    );
+    assert!(own.left() > docx.right());
+    let after = summary(&w).expect("the fold says what is on");
+    assert_ne!(after, first);
+    step_text(&w, &after);
+
+    let create = |d: &mut dyn Driver| -> String {
+        d.save();
+        let Some(Modal::Running(_, pending)) = d.app_mut().modal.take() else {
+            panic!("the create started: {:?}", d.app().status)
+        };
+        let own = (pending.post.register.as_ref()).map(|r| r.store_skills.clone());
+        format!("{own:?} {:?}", pending.post.attach_skill_steps)
+    };
+    let mut core = Core(golden_app(&store));
+    core.0.open_create();
+    let tick = Do::Tick(CreateRow::StoreSkill(0));
+    run(&mut core, &[Do::Walk(CreateStep::Workspace), tick]);
+    let want = create(&mut core);
+    assert!(want.contains("docx"), "{want}");
+    assert_eq!(create(&mut w), want);
 }
 
 #[test]

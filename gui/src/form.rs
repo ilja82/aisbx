@@ -283,11 +283,13 @@ pub fn append_hint(
 /// follow back.
 pub const PARA_W: f32 = 620.0;
 
-/// A paragraph of explanation, muted and wrapped at [`PARA_W`].
+/// A paragraph of explanation, muted and wrapped at [`PARA_W`], its `code` pieces as code
+/// ([`theme::with_code`]).
 pub fn para(ui: &mut egui::Ui, text: &str) {
     ui.scope(|ui| {
         ui.set_max_width(ui.available_width().min(PARA_W));
-        ui.add(egui::Label::new(RichText::new(text).small().weak()).wrap());
+        let text = theme::with_code(ui, text, |t| t.size(theme::SMALL).weak());
+        ui.add(egui::Label::new(text).wrap());
     });
 }
 

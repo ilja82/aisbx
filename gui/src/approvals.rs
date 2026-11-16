@@ -73,6 +73,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                             meta: &reason,
                             state: None,
                             actions: &answers,
+                            switch: None,
                             reserve: 0.0,
                             selected: list.is_focused(*i),
                             rule: n > 0,

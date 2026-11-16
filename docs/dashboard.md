@@ -127,13 +127,13 @@ foreign kit.
      account  setup token “private”   no other sandbox uses it
         kits  jdk25 Temurin JDK 25   rtk RTK (token reducer)
       folder  ~/my-project   this folder
-      skills  read-only   the agent uses the shared skills
+      skills  read-only   the agent gets the shared skills switched on for it
         name  My private Claude Code
     sbx name  claude-token-my-project
          ssh  claude-token-my-project.sbx   o connects an editor
      created  2026-10-28 05:20 UTC   11 hours ago
 ────────────────────────────────────────────────────────────────────────────────────────────────
- ↵ start  y approvals  x shell  n new  e kits  o connect  w start folder  A account  i repo skills
+ ↵ start  y approvals  x shell  n new  e kits  o connect  w start folder  A account  i sandbox skills
 ```
 
 ### The list and its sections
@@ -183,8 +183,8 @@ Each sandbox is one row of three columns. The columns line up down the list.
 | `o` | [connect an editor or app](sandboxes.md#editor-and-app-integrations-vs-code-intellij-claude-desktop) over SSH |
 | `A` | [change the Anthropic account](accounts.md#accounts-a) or rotate its token; on a LiteLLM sandbox, move it to another connection |
 | `S` | [every secret stored on the host](accounts.md#stored-secrets-s); add (`n`), edit (`↵`) or delete (`d`) a LiteLLM connection |
-| `K` | [the shared agent-skills store](skills.md#shared-agent-skills); its *Repo skills for all sandboxes* row picks [repo skills](skills.md#skills-from-skill-repos-aisbx-skill) for every sandbox |
-| `i` | this sandbox's own [repo skills](skills.md#skills-from-skill-repos-aisbx-skill), and *Sync now* |
+| `K` | [the shared agent-skills store](skills.md#shared-agent-skills): its skills grouped by where they came from, each with a [switch](skills.md#switches) for all sandboxes, and the *Update daily* switch |
+| `i` | *Sandbox skills*: the store's skills with this sandbox's own [switches](skills.md#switches), and *Apply now* |
 | `f` | [the folders this sandbox mounts](sandboxes.md#a-sandboxs-own-folders-f) beside its workspace: add one, switch its access (`←→`) or drop it (`d`), then *Apply* to rebuild |
 | `F` | [the host folders every sandbox mounts](sandboxes.md#host-folders-f-and-companionjson): add, edit (`↵`) or delete (`d`) one |
 | `T` | sbx's settings for this host: [telemetry](network.md#sbxs-own-telemetry-t), [clipboard copy and image paste](sandboxes.md#the-host-clipboard-t), [FUSE](sandboxes.md#fuse-filesystems-t), and [Claude in Chrome and Remote Control](sandboxes.md#claude-in-chrome-and-remote-control-t), each turned on or off with `↵`, and the [skills default](skills.md#share-modes), which `↵`, `←` and `→` walk |
@@ -309,8 +309,10 @@ like a setup assistant. In both, click a step to go there.
    - Most kits can be added only now: adding one later means a rebuild. The terminal marks those *only now*. The
      window marks the few that can be added later, *Can add later*.
 6. **Workspace and options**: the label, where the agent starts, more folders to mount, clone mode,
-   *`.git` read-only* and the skills mode. *More options* is a fold, closed until you open it, with the ports, the
-   [blocked hosts](network.md#blocked-hosts) and the [MCP servers](sandboxes.md#mcp-servers).
+   *`.git` read-only* and the skills mode. *Shared skills* is a fold with a switch per skill of the store, for this
+   sandbox alone ([Switches](skills.md#switches)); it starts on the switches for all sandboxes. *More options* is a
+   fold, closed until you open it, with the ports, the [blocked hosts](network.md#blocked-hosts) and the
+   [MCP servers](sandboxes.md#mcp-servers).
    - The wizard makes the label from the agent, the provider, the account and the kits until you type one. The
      first character you type replaces it; an arrow key edits it instead.
    - *Starts in* opens a folder picker. `..` at the top mounts the folder above instead (see
