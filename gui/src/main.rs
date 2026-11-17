@@ -22,6 +22,7 @@ mod form;
 mod form_golden;
 mod help;
 mod kits;
+mod mcp;
 mod modal;
 mod overview;
 mod page;

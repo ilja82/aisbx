@@ -42,7 +42,9 @@ const SWITCH_KEY: KeyCode = KeyCode::Char(' ');
 
 /// The rows by `heading`, each run of rows under one heading a group, in order. A row without a
 /// heading (the button) is in none.
-fn groups(headings: Vec<Option<(String, String)>>) -> Vec<((String, String), Vec<usize>)> {
+pub(crate) fn groups(
+    headings: Vec<Option<(String, String)>>,
+) -> Vec<((String, String), Vec<usize>)> {
     let mut groups: Vec<((String, String), Vec<usize>)> = Vec::new();
     for (i, heading) in headings.into_iter().enumerate() {
         let Some(heading) = heading else {
@@ -59,7 +61,7 @@ fn groups(headings: Vec<Option<(String, String)>>) -> Vec<((String, String), Vec
 /// What a click on a row of a skills page asked of core: only to select the row, or to press a
 /// key on it (its switch's Space, a button's key).
 #[derive(Clone, Copy)]
-enum Asked {
+pub(crate) enum Asked {
     Select(usize),
     Press(usize, KeyCode),
 }
@@ -68,7 +70,7 @@ enum Asked {
 /// where it has one, its switch at the right edge. `i` is the row's place in core's rows, `n`
 /// its place in the group; `notes` shows under it while selected. Returns what a click on it
 /// asked.
-fn row_item(
+pub(crate) fn row_item(
     ui: &mut egui::Ui,
     list: &Rows,
     (i, n): (usize, usize),
@@ -102,7 +104,7 @@ fn row_item(
 
 /// Hand this frame's click to core: a key on its row after core's cursor moved there, so it acts
 /// on that row; a click on the page's bar as it is.
-fn hand(app: &mut App, asked: Option<Asked>, bar: Option<Hit>) {
+pub(crate) fn hand(app: &mut App, asked: Option<Asked>, bar: Option<Hit>) {
     match asked {
         Some(Asked::Press(i, code)) => {
             app.click(Hit::FormFocus(i));

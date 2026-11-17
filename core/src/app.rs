@@ -1828,7 +1828,7 @@ pub enum SettingTone {
 }
 
 /// The settings the screen offers, in its order.
-pub const SETTINGS: [SettingSpec; 6] = [
+pub const SETTINGS: [SettingSpec; 7] = [
     SettingSpec {
         key: sbx::TELEMETRY_DISABLED,
         label: "telemetry",
@@ -1909,6 +1909,20 @@ pub const SETTINGS: [SettingSpec; 6] = [
                or the Claude app. Otherwise, /remote-control cannot sign in. A change reaches \
                running sandboxes.",
         cautious: Some(false),
+    },
+    SettingSpec {
+        key: sbx::TLS_POST_QUANTUM,
+        label: "post-quantum TLS",
+        words: ["on", "off"],
+        meanings: [
+            "sbx's own HTTPS connections offer post-quantum key exchange; sbx's default",
+            "sbx's own HTTPS connections offer no post-quantum key exchange",
+        ],
+        note: "When on, sbx and its daemon offer post-quantum (ML-KEM) key exchange in their TLS \
+               connections. Otherwise, they offer only the classic key exchange: turn it off only \
+               if a firewall or a TLS-inspecting proxy drops or stalls sbx's HTTPS connections. A \
+               change takes effect after `sbx daemon restart`.",
+        cautious: Some(true),
     },
 ];
 
@@ -2107,6 +2121,21 @@ pub enum SandboxSkillRow {
     Reset,
     /// Deprecated: this sandbox's Repo skills screen. Only while skill repositories are in use.
     RepoSkills,
+    Close,
+}
+
+/// The MCP screen of one sandbox (`t`): which MCP servers its gateway has loaded.
+#[derive(Debug, Clone)]
+pub struct SandboxMcpForm {
+    pub sandbox: String,
+    pub focus: usize,
+}
+
+/// A focusable line on a sandbox's MCP screen, derived on every render like [`SandboxSkillRow`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SandboxMcpRow {
+    /// One MCP server: set up on this computer, or loaded in the sandbox but set up here no more.
+    Server(String),
     Close,
 }
 
@@ -2660,9 +2689,9 @@ pub enum SecretTarget {
 pub enum Ask {
     /// Set the local label. Never reaches sbx.
     Rename,
-    /// `sbx ports <name> --publish <spec>`.
+    /// `sbx port publish <name> <spec>`.
     PublishPort,
-    /// `sbx ports <name> --unpublish <spec>`.
+    /// `sbx port unpublish <name> <spec>`.
     UnpublishPort,
     /// `sbx policy check network --sandbox <name> <target>` — read-only.
     CheckHost,
@@ -2952,6 +2981,8 @@ pub enum Screen {
     RepoSkills(RepoSkillsForm),
     /// Which store skills one sandbox gets (`i`).
     SandboxSkills(SandboxSkillsForm),
+    /// Which MCP servers one sandbox has loaded (`t`).
+    SandboxMcp(SandboxMcpForm),
     /// Connecting an editor or desktop app to a sandbox over SSH.
     Connect(ConnectForm),
     /// Which directory inside the workspace the agent opens in.
@@ -4316,6 +4347,7 @@ impl App {
             Screen::Skills(_) => self.skills_key(key),
             Screen::RepoSkills(_) => self.repo_skills_key(key),
             Screen::SandboxSkills(_) => self.sandbox_skills_key(key),
+            Screen::SandboxMcp(_) => self.sandbox_mcp_key(key),
             Screen::Connect(_) => self.connect_key(key),
             Screen::StartDir(_) => self.start_dir_key(key),
             Screen::Approvals(_) => self.approvals_key(key),
@@ -4563,6 +4595,7 @@ impl App {
             Screen::Skills(_) => self.skill_rows().len(),
             Screen::RepoSkills(f) => f.rows().len(),
             Screen::SandboxSkills(f) => self.sandbox_skill_rows(&f.sandbox).len(),
+            Screen::SandboxMcp(f) => self.sandbox_mcp_rows(&f.sandbox).len(),
             Screen::Connect(f) => f.rows().len(),
             Screen::StartDir(f) => f.rows().len(),
             Screen::Approvals(_) => self.approval_rows().len(),
@@ -4584,6 +4617,7 @@ impl App {
             Screen::Skills(f) => f.focus = index,
             Screen::RepoSkills(f) => f.focus = index,
             Screen::SandboxSkills(f) => f.focus = index,
+            Screen::SandboxMcp(f) => f.focus = index,
             Screen::Connect(f) => f.focus = index,
             Screen::StartDir(f) => f.focus = index,
             Screen::Approvals(f) => f.focus = index,
@@ -4602,6 +4636,7 @@ impl App {
             Screen::Secrets(_) => self.secret_rows().len(),
             Screen::Skills(_) => self.skill_rows().len(),
             Screen::SandboxSkills(f) => self.sandbox_skill_rows(&f.sandbox).len(),
+            Screen::SandboxMcp(f) => self.sandbox_mcp_rows(&f.sandbox).len(),
             Screen::Approvals(_) => self.approval_rows().len(),
             _ => 0,
         };
@@ -4676,6 +4711,13 @@ impl App {
                 self.on_key(KeyEvent::from(KeyCode::Enter));
             }
             Screen::SandboxSkills(form) => {
+                if index >= secret_rows {
+                    return;
+                }
+                form.focus = index;
+                self.on_key(KeyEvent::from(KeyCode::Enter));
+            }
+            Screen::SandboxMcp(form) => {
                 if index >= secret_rows {
                     return;
                 }
@@ -6300,6 +6342,9 @@ impl App {
             Action::SandboxSkills => selected.map(|_| ()).ok_or_else(|| {
                 Refusal::Error("the cursor is on + New sandbox — press i on a sandbox".into())
             }),
+            Action::SandboxMcp => selected.map(|_| ()).ok_or_else(|| {
+                Refusal::Error("the cursor is on + New sandbox — press t on a sandbox".into())
+            }),
             Action::RefreshModels => {
                 let sb = selected.ok_or_else(new_card)?;
                 match self.sandbox_connection(&sb.name) {
@@ -6425,6 +6470,7 @@ impl App {
             Action::SandboxFolders => self.action_sandbox_folders(),
             Action::Settings => self.open_settings(),
             Action::SandboxSkills => self.action_sandbox_skills(),
+            Action::SandboxMcp => self.action_sandbox_mcp(),
             Action::Approvals => self.action_approvals(),
             Action::KeepRunning => self.action_keep_running(),
             Action::RefreshModels => self.action_refresh_models(),
@@ -8051,6 +8097,207 @@ impl App {
         }
     }
 
+    // --- one sandbox's MCP servers ------------------------------------------------------------
+
+    /// `t` on a sandbox: which MCP servers its gateway has loaded.
+    fn action_sandbox_mcp(&mut self) {
+        let Some(sb) = self.selected() else { return };
+        self.screen = Screen::SandboxMcp(SandboxMcpForm {
+            sandbox: sb.name.clone(),
+            focus: 0,
+        });
+    }
+
+    /// The sandbox's MCP gateway as sbx reports it; `None` without a gateway or a report.
+    fn mcp_gateway_of(&self, sandbox: &str) -> Option<&sbx::McpGateway> {
+        (self.sandboxes.iter())
+            .find(|s| s.name == sandbox && s.mcp_gateway)?
+            .mcp
+            .as_ref()
+    }
+
+    /// The host's server of that name, from `sbx mcp ls`.
+    fn host_mcp_server(&self, name: &str) -> Option<&sbx::McpServer> {
+        self.mcp.iter().find(|m| m.name == name)
+    }
+
+    /// Every line on a sandbox's MCP screen, in drawing order: the servers set up on this
+    /// computer in `sbx mcp ls`' order, then those the gateway has loaded but this computer no
+    /// longer sets up, and *Close*. Only *Close* while sbx reports no gateway to switch.
+    pub fn sandbox_mcp_rows(&self, sandbox: &str) -> Vec<SandboxMcpRow> {
+        let mut rows: Vec<SandboxMcpRow> = Vec::new();
+        if let Some(gateway) = self.mcp_gateway_of(sandbox) {
+            rows.extend(
+                self.mcp
+                    .iter()
+                    .map(|m| SandboxMcpRow::Server(m.name.clone())),
+            );
+            rows.extend(
+                (gateway.servers.iter())
+                    .filter(|s| self.host_mcp_server(s).is_none())
+                    .map(|s| SandboxMcpRow::Server(s.clone())),
+            );
+        }
+        rows.push(SandboxMcpRow::Close);
+        rows
+    }
+
+    /// The heading an MCP row is listed under, and its muted second part; `None` for the button.
+    pub fn sandbox_mcp_heading(&self, row: &SandboxMcpRow) -> Option<(String, String)> {
+        match row {
+            SandboxMcpRow::Server(name) => Some(match self.host_mcp_server(name) {
+                Some(_) => ("Set up on this computer".into(), "sbx mcp ls".into()),
+                None => ("Loaded, no longer set up here".into(), String::new()),
+            }),
+            SandboxMcpRow::Close => None,
+        }
+    }
+
+    /// The switch an MCP row shows at its right: whether the sandbox's gateway has the server
+    /// loaded.
+    pub fn sandbox_mcp_switch(&self, sandbox: &str, row: &SandboxMcpRow) -> Option<bool> {
+        match row {
+            SandboxMcpRow::Server(name) => {
+                Some(self.mcp_gateway_of(sandbox)?.servers.contains(name))
+            }
+            SandboxMcpRow::Close => None,
+        }
+    }
+
+    /// One MCP row: the server's name, and in a muted column how the gateway reaches it and
+    /// whether it is ready, as `sbx mcp ls` says.
+    pub fn sandbox_mcp_view(&self, row: &SandboxMcpRow) -> (String, String) {
+        match row {
+            SandboxMcpRow::Server(name) => {
+                let meta = match self.host_mcp_server(name) {
+                    Some(m) if m.ready() => format!("{} · ready", m.transport),
+                    Some(m) => format!("{} · {}", m.transport, m.status.trim()),
+                    None => "no longer set up on this computer".into(),
+                };
+                (name.clone(), meta)
+            }
+            SandboxMcpRow::Close => (String::new(), String::new()),
+        }
+    }
+
+    /// What switching the focused MCP row does, in whole sentences.
+    pub fn sandbox_mcp_notes(&self, sandbox: &str, row: &SandboxMcpRow) -> Vec<String> {
+        let SandboxMcpRow::Server(name) = row else {
+            return Vec::new();
+        };
+        let loaded = self.sandbox_mcp_switch(sandbox, row) == Some(true);
+        let mut notes = vec![match (loaded, self.host_mcp_server(name).is_some()) {
+            (true, true) => format!(
+                "Loaded: the agent has the tools of {name}. Switching it off unloads it at once, \
+                 also from a stopped sandbox, and keeps it set up on this computer."
+            ),
+            (true, false) => format!(
+                "Loaded, but no longer set up on this computer: switching it off unloads {name} \
+                 for good."
+            ),
+            (false, _) => format!(
+                "Switching it on loads {name}: a running agent gets its tools at once, a stopped \
+                 sandbox at its next start. It stays loaded across restarts and rebuilds."
+            ),
+        }];
+        if let Some(server) = self.host_mcp_server(name).filter(|m| !m.ready()) {
+            notes.push(format!("It is not ready yet: {}.", server.status.trim()));
+        }
+        notes
+    }
+
+    /// The lines under an MCP screen's title: the gateway's mode, or why nothing can be switched.
+    pub fn sandbox_mcp_intro(&self, sandbox: &str) -> Vec<String> {
+        let gateway_known = self.sandboxes.iter().find(|s| s.name == sandbox);
+        let Some(sb) = gateway_known else {
+            return vec!["sbx no longer lists this sandbox.".into()];
+        };
+        if !sb.mcp_gateway {
+            return vec!["This sandbox has no MCP gateway, so it gets no MCP server.".into()];
+        }
+        let Some(gateway) = &sb.mcp else {
+            return vec![
+                "sbx reports no MCP mode for this sandbox, so nothing can be switched here.".into(),
+            ];
+        };
+        let mut lines = vec![match gateway.mode {
+            sbx::McpMode::Static => {
+                "Static mode: the agent gets the loaded servers and no others.".to_string()
+            }
+            sbx::McpMode::Dynamic => "Dynamic mode: the agent gets the loaded servers, and it can \
+                                      find and load any other server set up on this computer \
+                                      itself."
+                .to_string(),
+        }];
+        if self.mcp.is_empty() && gateway.servers.is_empty() {
+            lines.push(
+                "No MCP server is set up on this computer yet: add one with `sbx mcp add`.".into(),
+            );
+        }
+        lines
+    }
+
+    fn sandbox_mcp_key(&mut self, key: KeyEvent) {
+        let Screen::SandboxMcp(form) = &self.screen else {
+            return;
+        };
+        let sandbox = form.sandbox.clone();
+        let rows = self.sandbox_mcp_rows(&sandbox);
+        let Screen::SandboxMcp(form) = &mut self.screen else {
+            return;
+        };
+        form.focus = form.focus.min(rows.len() - 1);
+        let row = rows[form.focus].clone();
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.screen = Screen::List,
+            KeyCode::Up | KeyCode::BackTab | KeyCode::Char('k') => {
+                form.focus = (form.focus + rows.len() - 1) % rows.len()
+            }
+            KeyCode::Down | KeyCode::Tab | KeyCode::Char('j') => {
+                form.focus = (form.focus + 1) % rows.len()
+            }
+            KeyCode::Home | KeyCode::Char('g') => form.focus = 0,
+            KeyCode::End | KeyCode::Char('G') => form.focus = rows.len() - 1,
+            KeyCode::Enter | KeyCode::Char(' ') => match row {
+                SandboxMcpRow::Server(server) => self.switch_sandbox_mcp(&sandbox, &server),
+                SandboxMcpRow::Close => self.screen = Screen::List,
+            },
+            KeyCode::F(5) => self.refresh(),
+            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => self.refresh(),
+            _ => {}
+        }
+    }
+
+    /// Load a server into the sandbox's gateway, or unload a loaded one: one job, also on a
+    /// stopped sandbox, which neither starts.
+    fn switch_sandbox_mcp(&mut self, sandbox: &str, server: &str) {
+        let Some(loaded) = self.sandbox_mcp_switch(sandbox, &SandboxMcpRow::Server(server.into()))
+        else {
+            self.set_error("sbx reports no MCP gateway to switch for this sandbox");
+            return;
+        };
+        let label = self.sandbox_label(sandbox);
+        let (title, step, argv) = match loaded {
+            true => (
+                format!("Unloading {server} from {label}"),
+                format!("sbx mcp unload {server}"),
+                sbx::mcp_unload_argv(server, sandbox),
+            ),
+            false => (
+                format!("Loading {server} into {label}"),
+                format!("sbx mcp load {server}"),
+                sbx::mcp_load_argv(server, sandbox),
+            ),
+        };
+        self.start_job(PendingJob {
+            title,
+            steps: vec![Step::new(step, argv)],
+            post: PostJob::default(),
+            fallback: None,
+            fallback_hint: None,
+        });
+    }
+
     // --- repo skills -----------------------------------------------------------------------
 
     /// Open the Repo skills screen. It reads the repo list, the caches and the selection file
@@ -8674,7 +8921,7 @@ impl App {
             Ask::PublishPort => self.start_job(PendingJob {
                 title: format!("Publishing {value} on {name}"),
                 steps: vec![Step::new(
-                    format!("sbx ports {name} --publish {value}"),
+                    format!("sbx port publish {name} {value}"),
                     sbx::ports_publish_argv(&name, &value),
                 )],
                 post: PostJob::default(),
@@ -8688,7 +8935,7 @@ impl App {
             Ask::UnpublishPort => self.start_job(PendingJob {
                 title: format!("Unpublishing {value} on {name}"),
                 steps: vec![Step::new(
-                    format!("sbx ports {name} --unpublish {value}"),
+                    format!("sbx port unpublish {name} {value}"),
                     sbx::ports_unpublish_argv(&name, &value),
                 )],
                 post: PostJob::default(),
@@ -8744,12 +8991,12 @@ impl App {
                 }
                 std::thread::spawn(move || {
                     let _ = tx.send(match sbx::check_host(&name, &value) {
-                        // No rule covers it: the sandbox would hold the request for approval.
-                        Ok(r) if r.implicit => (
-                            true,
-                            format!("{} — the sandbox would ask for approval (y)", r.detail),
-                        ),
-                        Ok(r) => (!r.allowed, r.detail),
+                        Ok(r) => {
+                            let source = (r.allowed && !r.rule.is_empty())
+                                .then(|| sbx::policy_rules(&name).unwrap_or_default())
+                                .and_then(|rules| sbx::allowing_rule_source(&r.rule, &rules));
+                            check_answer(&r, source.as_deref())
+                        }
                         Err(e) => (true, format!("{e:#}")),
                     });
                 });
@@ -11147,7 +11394,7 @@ impl App {
             },
         };
         // Repeat the ports and the skills mode; an unrecorded mode passes no `--skills`.
-        let ports = sbx::publish_specs(&sb.ports);
+        let ports = sbx::republish_specs(&sb.ports, sb.clone);
         let skills = sb.skills.and_then(model::Skills::mode);
         // A failed read means no rules, not a failed rebuild.
         let rules = sbx::policy_rules(name).unwrap_or_default();
@@ -11167,7 +11414,7 @@ impl App {
                 )
             })
             .collect();
-        let static_mcp = self.registry.static_mcp(name);
+        let (static_mcp, mcp_loads) = self.rebuild_mcp(sb);
         let argv = sbx::create_argv(sbx::Create {
             name,
             agent: &agent,
@@ -11189,6 +11436,12 @@ impl App {
             Step::new("sbx rm --force", sbx::rm_argv(name)),
             Step::new(format!("sbx create {name}"), argv).noting(BUILD_NOTE),
         ];
+        steps.extend(mcp_loads.iter().map(|server| {
+            Step::new(
+                format!("sbx mcp load {server}"),
+                sbx::mcp_load_argv(server, name),
+            )
+        }));
         if keep {
             steps.push(Step::new(
                 "sbx run --detach (keeps running)",
@@ -11263,6 +11516,52 @@ impl App {
         self.rebuild_confirm(name, plan, title, body)
     }
 
+    /// The MCP servers a rebuild gives the new container: the `--static-mcp` values, then the
+    /// servers to `sbx mcp load` after the create. From sbx's report of the gateway (a static set
+    /// as the flag, a dynamic gateway's loaded servers as loads), else from the set the registry
+    /// recorded at creation.
+    fn rebuild_mcp(&self, sb: &Sandbox) -> (Vec<String>, Vec<String>) {
+        match &sb.mcp {
+            Some(gateway) => (gateway.static_mcp(), gateway.to_load().to_vec()),
+            None => (self.registry.static_mcp(&sb.name), Vec::new()),
+        }
+    }
+
+    /// What a rebuild confirmation says about the MCP servers, if anything.
+    fn rebuild_mcp_line(&self, sb: &Sandbox) -> Option<String> {
+        if let Some(gateway) = &sb.mcp {
+            let names = gateway.servers.join(", ");
+            return match (gateway.mode, gateway.servers.is_empty()) {
+                (sbx::McpMode::Static, true) => {
+                    Some("It comes back with no MCP servers, as now.".into())
+                }
+                (sbx::McpMode::Static, false) => Some(format!(
+                    "It comes back with its MCP servers and no others, as now: {names}."
+                )),
+                (sbx::McpMode::Dynamic, false) => {
+                    Some(format!("Its loaded MCP servers are loaded again: {names}."))
+                }
+                (sbx::McpMode::Dynamic, true) => None,
+            };
+        }
+        let recorded = self.registry.static_mcp(&sb.name);
+        if sbx::is_no_mcp(&recorded) {
+            Some(
+                "It comes back with no MCP servers, as it was created. A server added since with \
+                 sbx mcp load is not kept."
+                    .into(),
+            )
+        } else if !recorded.is_empty() {
+            Some(format!(
+                "It comes back with the MCP servers it was created with: {}. A server added or \
+                 removed since with sbx mcp is not kept.",
+                recorded.join(", ")
+            ))
+        } else {
+            None
+        }
+    }
+
     /// The confirmation in front of a rebuild `plan`: `body`, then everything the rebuild keeps
     /// and loses.
     fn rebuild_confirm(
@@ -11296,7 +11595,7 @@ impl App {
             ),
             false => format!("Your files in {} stay.", model::tilde(&sb.workspace)),
         });
-        let ports = sbx::publish_specs(&sb.ports);
+        let ports = sbx::republish_specs(&sb.ports, sb.clone);
         if !ports.is_empty() {
             body.push(format!("Its ports come back: {}.", ports.join(", ")));
             body.push(
@@ -11384,20 +11683,7 @@ impl App {
                 parts.join(", ")
             ));
         }
-        let static_mcp = self.registry.static_mcp(name);
-        if sbx::is_no_mcp(&static_mcp) {
-            body.push(
-                "It comes back with no MCP servers, as it was created. A server added since with \
-                 sbx mcp load is not kept."
-                    .into(),
-            );
-        } else if !static_mcp.is_empty() {
-            body.push(format!(
-                "It comes back with the MCP servers it was created with: {}. A server added or \
-                 removed since with sbx mcp is not kept.",
-                static_mcp.join(", ")
-            ));
-        }
+        body.extend(self.rebuild_mcp_line(sb));
         match (sb.keep_running, plan.keep_running) {
             (true, true) => body.push("It keeps running after its sessions end, as now.".into()),
             (true, false) => body.push("It then stops after its last session.".into()),
@@ -11657,6 +11943,20 @@ pub(crate) fn port_spec_ok(spec: &str) -> bool {
                     None => port_ok(head),
                 }
         }
+    }
+}
+
+/// The status line a host check (`c`) answers with, and whether it reads as a problem: sbx's
+/// answer, then for an allowed host who put the allowing rule there (`source`, the Network tab's
+/// word), or that the sandbox would ask for approval when no rule covers it.
+pub fn check_answer(r: &sbx::Reachability, source: Option<&str>) -> (bool, String) {
+    match (r.implicit, r.allowed, source) {
+        (true, _, _) => (
+            true,
+            format!("{} — the sandbox would ask for approval (y)", r.detail),
+        ),
+        (false, true, Some(source)) => (false, format!("{} — {source} rule", r.detail)),
+        (false, allowed, _) => (!allowed, r.detail.clone()),
     }
 }
 
@@ -12945,6 +13245,120 @@ mod tests {
             .expect("a managed sandbox");
         let create = job.steps.last().unwrap().argv.join(" ");
         assert!(!create.contains("--skills"), "{create}");
+    }
+
+    #[test]
+    fn a_clone_mode_rebuild_leaves_the_clone_remotes_port_to_sbx() {
+        let mut sb = model::sample("claude-litellm-proj", Some("claude-litellm"), &[]);
+        sb.clone = true;
+        sb.running = true;
+        for (host_port, sandbox_port) in [(49153, sbx::CLONE_REMOTE_PORT), (18080, 3000)] {
+            sb.ports.push(sbx::Port {
+                host_ip: "127.0.0.1".into(),
+                host_port,
+                sandbox_port,
+                protocol: "tcp4".into(),
+                ephemeral: false,
+            });
+        }
+        let name = sb.name.clone();
+        let app = App::for_test(Catalog::load().unwrap(), vec![sb]);
+        let job = app
+            .recreate_job(&name, &[], None)
+            .expect("a managed sandbox");
+        let create = (job.steps.iter())
+            .find(|s| s.argv[..2] == ["sbx", "create"])
+            .expect("a create step")
+            .argv
+            .join(" ");
+        assert!(create.contains("--clone"), "{create}");
+        assert!(create.contains("-p 18080:3000/tcp4"), "{create}");
+        assert!(
+            !create.contains("9418"),
+            "sbx 0.54.0 refuses the port on a clone-mode create, after the rm: {create}"
+        );
+        let body = app
+            .recreate_confirm(&name, &[], None, "Rebuild", Vec::new())
+            .expect("a plan")
+            .body
+            .join("\n");
+        assert!(
+            body.contains("Its ports come back: 18080:3000/tcp4."),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn a_rebuild_brings_back_the_mcp_servers_sbx_reports() {
+        let gateway = |mode, servers: &[&str]| sbx::McpGateway {
+            mode,
+            servers: servers.iter().map(|s| s.to_string()).collect(),
+        };
+        let rebuild = |mcp: Option<sbx::McpGateway>, recorded: &[&str]| {
+            let mut sb = model::sample("claude-litellm-proj", Some("claude-litellm"), &[]);
+            sb.mcp_gateway = true;
+            sb.mcp = mcp;
+            let name = sb.name.clone();
+            let mut app = App::for_test(Catalog::load().unwrap(), vec![sb]);
+            if !recorded.is_empty() {
+                let recorded = recorded.iter().map(|s| s.to_string()).collect();
+                app.registry.set_static_mcp(&name, recorded);
+            }
+            let steps: Vec<String> = (app.recreate_job(&name, &[], None).unwrap().steps)
+                .iter()
+                .map(|s| s.argv.join(" "))
+                .collect();
+            let body = (app.recreate_confirm(&name, &[], None, "Rebuild", Vec::new()))
+                .unwrap()
+                .body
+                .join("\n");
+            (steps, body)
+        };
+        let create_of = |steps: &[String]| -> String {
+            steps
+                .iter()
+                .find(|s| s.starts_with("sbx create"))
+                .cloned()
+                .unwrap()
+        };
+
+        let (steps, body) = rebuild(
+            Some(gateway(sbx::McpMode::Static, &["notion", "linear"])),
+            &["notion"],
+        );
+        let create = create_of(&steps);
+        assert!(
+            create.contains("--static-mcp notion --static-mcp linear"),
+            "{create}"
+        );
+        assert!(!steps.iter().any(|s| s.starts_with("sbx mcp load")));
+        assert!(
+            body.contains("no others, as now: notion, linear."),
+            "{body}"
+        );
+        let (steps, body) = rebuild(Some(gateway(sbx::McpMode::Static, &[])), &[]);
+        assert!(create_of(&steps).contains("--static-mcp none"));
+        assert!(body.contains("no MCP servers, as now."), "{body}");
+        let (steps, body) = rebuild(
+            Some(gateway(sbx::McpMode::Dynamic, &["notion"])),
+            &["linear"],
+        );
+        let at = steps
+            .iter()
+            .position(|s| s.starts_with("sbx create"))
+            .unwrap();
+        assert!(!steps[at].contains("--static-mcp"), "{}", steps[at]);
+        assert_eq!(
+            steps[at + 1],
+            "sbx mcp load notion --sandbox claude-litellm-proj"
+        );
+        assert!(body.contains("loaded again: notion."), "{body}");
+        let (steps, body) = rebuild(Some(gateway(sbx::McpMode::Dynamic, &[])), &[]);
+        assert!(!create_of(&steps).contains("--static-mcp"));
+        assert!(!body.contains("MCP"), "nothing to say: {body}");
+        let (steps, body) = rebuild(None, &["linear"]);
+        assert!(create_of(&steps).contains("--static-mcp linear"));
+        assert!(body.contains("it was created with: linear"), "{body}");
     }
 
     #[test]
@@ -16174,6 +16588,140 @@ mod tests {
     }
 
     #[test]
+    fn t_loads_and_unloads_the_hosts_mcp_servers_in_one_sandbox() {
+        let server = |name: &str, status: &str| sbx::McpServer {
+            name: name.into(),
+            transport: "local stdio".into(),
+            status: status.into(),
+            kind: "local".into(),
+        };
+        let mut sb = model::sample(SB, Some("claude-anthropic"), &[]);
+        sb.mcp_gateway = true;
+        sb.mcp = Some(sbx::McpGateway {
+            mode: sbx::McpMode::Dynamic,
+            servers: vec!["notion".into(), "gone".into()],
+        });
+        let mut app = App::for_test(Catalog::load().unwrap(), vec![sb]);
+        app.mcp = vec![
+            server("github", "needs auth · sbx mcp auth github"),
+            server("notion", "ready"),
+        ];
+        app.on_key(KeyEvent::from(KeyCode::Char('t')));
+        assert!(matches!(&app.screen, Screen::SandboxMcp(f) if f.sandbox == SB));
+        let row = |name: &str| SandboxMcpRow::Server(name.into());
+        assert_eq!(
+            app.sandbox_mcp_rows(SB),
+            [
+                row("github"),
+                row("notion"),
+                row("gone"),
+                SandboxMcpRow::Close
+            ],
+            "the host's servers in sbx's order, then one loaded but no longer set up"
+        );
+        assert_eq!(app.sandbox_mcp_switch(SB, &row("notion")), Some(true));
+        assert_eq!(app.sandbox_mcp_switch(SB, &row("github")), Some(false));
+        assert_eq!(
+            app.sandbox_mcp_view(&row("notion")),
+            ("notion".to_string(), "local stdio · ready".to_string())
+        );
+        assert_eq!(
+            app.sandbox_mcp_heading(&row("gone")).unwrap().0,
+            "Loaded, no longer set up here"
+        );
+        assert!(app.sandbox_mcp_intro(SB)[0].starts_with("Dynamic mode:"));
+        let notes = app.sandbox_mcp_notes(SB, &row("github")).join(" ");
+        assert!(
+            notes.ends_with("It is not ready yet: needs auth · sbx mcp auth github."),
+            "{notes}"
+        );
+
+        for (i, verb, server) in [
+            (0, "load", "github"),
+            (1, "unload", "notion"),
+            (2, "unload", "gone"),
+        ] {
+            let argv = ["sbx", "mcp", verb, server, "--sandbox", SB];
+            app.modal = None;
+            app.click(Hit::FormFocus(i));
+            app.on_key(KeyEvent::from(KeyCode::Char(' ')));
+            let Some(Modal::Running(_, pending)) = &app.modal else {
+                panic!("a switch runs a job: {:?}", app.status)
+            };
+            assert_eq!(pending.steps[0].argv, argv);
+        }
+        app.modal = None;
+        app.on_key(KeyEvent::from(KeyCode::Esc));
+        assert!(matches!(app.screen, Screen::List));
+    }
+
+    #[test]
+    fn the_mcp_screen_switches_nothing_sbx_does_not_report() {
+        for (gateway, mcp, says) in [
+            (false, None, "no MCP gateway"),
+            (true, None, "reports no MCP mode"),
+        ] {
+            let mut sb = model::sample(SB, Some("claude-anthropic"), &[]);
+            sb.mcp_gateway = gateway;
+            sb.mcp = mcp;
+            let mut app = App::for_test(Catalog::load().unwrap(), vec![sb]);
+            app.mcp = vec![sbx::McpServer {
+                name: "notion".into(),
+                status: "ready".into(),
+                ..Default::default()
+            }];
+            assert_eq!(app.sandbox_mcp_rows(SB), [SandboxMcpRow::Close]);
+            assert!(app.sandbox_mcp_intro(SB)[0].contains(says), "{says}");
+        }
+        let mut sb = model::sample(SB, Some("claude-anthropic"), &[]);
+        sb.mcp_gateway = true;
+        sb.mcp = Some(sbx::McpGateway {
+            mode: sbx::McpMode::Static,
+            servers: Vec::new(),
+        });
+        let app = App::for_test(Catalog::load().unwrap(), vec![sb]);
+        let intro = app.sandbox_mcp_intro(SB).join(" ");
+        assert!(intro.starts_with("Static mode:"), "{intro}");
+        assert!(intro.contains("`sbx mcp add`"), "{intro}");
+        assert_eq!(app.sandbox_mcp_rows(SB), [SandboxMcpRow::Close]);
+    }
+
+    #[test]
+    fn a_host_check_names_who_put_the_allowing_rule_there() {
+        let answer = |allowed: bool, implicit: bool, rule: &str| sbx::Reachability {
+            allowed,
+            detail: format!(
+                "{}: example.com:443",
+                if allowed { "Allowed" } else { "Denied" }
+            ),
+            implicit,
+            rule: rule.into(),
+        };
+        assert_eq!(
+            check_answer(&answer(true, false, "kit:box"), Some("kit")),
+            (false, "Allowed: example.com:443 — kit rule".to_string())
+        );
+        assert_eq!(
+            check_answer(&answer(true, false, "d4d08a2d"), Some("added")),
+            (false, "Allowed: example.com:443 — added rule".to_string())
+        );
+        assert_eq!(
+            check_answer(&answer(true, false, ""), None),
+            (false, "Allowed: example.com:443".to_string()),
+            "a rule sbx names no source for is not guessed"
+        );
+        assert_eq!(
+            check_answer(&answer(false, false, ""), None),
+            (true, "Denied: example.com:443".to_string())
+        );
+        let (problem, text) = check_answer(&answer(false, true, ""), None);
+        assert!(
+            problem && text.ends_with("would ask for approval (y)"),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn skill_texts_have_no_stray_backslash_or_run_of_spaces() {
         let mut sb = model::sample(SB, Some("claude-anthropic"), &[]);
         sb.running = true;
@@ -18781,6 +19329,7 @@ mod action_tests {
                 SettingsRow::Setting(3),
                 SettingsRow::Setting(4),
                 SettingsRow::Setting(5),
+                SettingsRow::Setting(6),
                 SettingsRow::SkillsDefault,
                 SettingsRow::Close
             ]
@@ -18806,6 +19355,8 @@ mod action_tests {
             (4, true, sbx::CLAUDE_CHROME, "false"),
             (5, false, sbx::CLAUDE_REMOTE_CONTROL, "true"),
             (5, true, sbx::CLAUDE_REMOTE_CONTROL, "false"),
+            (6, true, sbx::TLS_POST_QUANTUM, "false"),
+            (6, false, sbx::TLS_POST_QUANTUM, "true"),
         ] {
             app.modal = None;
             let Screen::Settings(form) = &mut app.screen else {
@@ -18932,6 +19483,7 @@ mod action_tests {
         let fuse = |value| crate::testkit::bool_setting(sbx::SANDBOX_FUSE, value);
         let chrome = |value| crate::testkit::bool_setting(sbx::CLAUDE_CHROME, value);
         let remote = |value| crate::testkit::bool_setting(sbx::CLAUDE_REMOTE_CONTROL, value);
+        let tls = |value| crate::testkit::bool_setting(sbx::TLS_POST_QUANTUM, value);
         form.values = vec![
             Some(telemetry(true)),
             Some(copy(true)),
@@ -18939,6 +19491,7 @@ mod action_tests {
             Some(fuse(true)),
             Some(chrome(true)),
             Some(remote(true)),
+            Some(tls(true)),
         ];
         assert_eq!(form.view(0), ("off", SETTINGS[0].meanings[0].to_string()));
         for (i, spec) in SETTINGS.iter().enumerate().skip(1) {
@@ -18955,10 +19508,11 @@ mod action_tests {
                 SettingTone::Warn,
                 SettingTone::Plain,
                 SettingTone::Warn,
-                SettingTone::Warn
+                SettingTone::Warn,
+                SettingTone::Calm
             ],
-            "telemetry off is calm; an opened clipboard, browser or remote control a warning; \
-             FUSE neither"
+            "telemetry off and post-quantum TLS on are calm; an opened clipboard, browser or \
+             remote control a warning; FUSE neither"
         );
         assert_eq!(SETTINGS[0].tone(None), SettingTone::Unknown);
         form.values = vec![
@@ -18968,6 +19522,7 @@ mod action_tests {
             Some(fuse(false)),
             Some(chrome(false)),
             Some(remote(false)),
+            Some(tls(false)),
         ];
         assert_eq!(
             form.view(0).0,
@@ -18980,6 +19535,11 @@ mod action_tests {
         assert_eq!(SETTINGS[3].tone(Some(false)), SettingTone::Plain);
         assert_eq!(SETTINGS[4].tone(Some(false)), SettingTone::Calm);
         assert_eq!(SETTINGS[5].tone(Some(false)), SettingTone::Calm);
+        assert_eq!(
+            SETTINGS[6].tone(Some(false)),
+            SettingTone::Warn,
+            "TLS without post-quantum key exchange is weaker"
+        );
         for spec in SETTINGS {
             assert!(
                 spec.note.starts_with("When on, ") && spec.note.contains(" Otherwise, "),
@@ -18990,6 +19550,10 @@ mod action_tests {
         assert!(
             SETTINGS[0].note.contains("sbx daemon restart"),
             "what telemetry needs"
+        );
+        assert!(
+            SETTINGS[6].note.contains("sbx daemon restart"),
+            "what the TLS switch needs"
         );
         let note = |key: &str| SETTINGS.iter().find(|s| s.key == key).unwrap().note;
         assert!(

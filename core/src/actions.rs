@@ -16,6 +16,7 @@ pub enum Action {
     StartDir,
     Skills,
     SandboxSkills,
+    SandboxMcp,
     Folders,
     SandboxFolders,
     Settings,
@@ -47,7 +48,7 @@ pub enum Refusal {
 }
 
 impl Action {
-    pub const ALL: [Action; 27] = [
+    pub const ALL: [Action; 28] = [
         Action::Start,
         Action::Shell,
         Action::New,
@@ -58,6 +59,7 @@ impl Action {
         Action::StartDir,
         Action::Skills,
         Action::SandboxSkills,
+        Action::SandboxMcp,
         Action::Folders,
         Action::SandboxFolders,
         Action::Settings,
@@ -91,6 +93,7 @@ impl Action {
             Action::StartDir => (Char('w'), "Start folder"),
             Action::Skills => (Char('K'), "Skills"),
             Action::SandboxSkills => (Char('i'), "Sandbox skills"),
+            Action::SandboxMcp => (Char('t'), "MCP servers"),
             Action::Folders => (Char('F'), "Host folders"),
             Action::SandboxFolders => (Char('f'), "Sandbox folders"),
             Action::Settings => (Char('T'), "Settings"),
@@ -148,6 +151,7 @@ impl Action {
             Action::StartDir => "Choose the folder the agent starts in",
             Action::Skills => "Manage the shared skills",
             Action::SandboxSkills => "Switch the shared skills this sandbox gets",
+            Action::SandboxMcp => "Load or unload this computer's MCP servers in the sandbox",
             Action::Folders => "Choose the folders every sandbox mounts",
             Action::SandboxFolders => {
                 "Add or drop the folders this sandbox mounts, then rebuild it"

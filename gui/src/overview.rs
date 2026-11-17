@@ -217,9 +217,8 @@ fn agent_rows(app: &App, sb: &Sandbox) -> Vec<Row> {
         out.push(row("Secrets", vec![weak(list.join("  "))]));
     }
     if sb.mcp_gateway {
-        let servers = app.registry.static_mcp(&sb.name);
-        let set = aisbx_core::create::mcp_set(&servers);
-        let set = set.unwrap_or_else(|| aisbx_core::create::HOST_MCP.to_string());
+        let recorded = app.registry.static_mcp(&sb.name);
+        let set = aisbx_core::create::mcp_line(sb.mcp.as_ref(), &recorded);
         out.push(row("MCP", vec![weak(set)]));
     }
     for service in app.missing_credentials(sb) {

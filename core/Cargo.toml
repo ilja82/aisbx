@@ -23,3 +23,6 @@ sha2 = "0.11.0"
 # Only for the local UTC offset, which std cannot give; see `state::init_clock`.
 time = { version = "0.3.54", default-features = false, features = ["std", "local-offset"] }
 yaml-rust2 = { version = "0.13.0", default-features = false }
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31.3", default-features = false, features = ["user"] }

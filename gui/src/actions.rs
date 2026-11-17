@@ -37,6 +37,7 @@ pub const GROUPS: [(&str, &[Action]); 3] = [
             Action::StartDir,
             Action::SandboxFolders,
             Action::SandboxSkills,
+            Action::SandboxMcp,
             Action::RefreshModels,
         ],
     ),

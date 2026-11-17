@@ -11,8 +11,9 @@ use ratatui::Frame;
 use super::{panel, Hits};
 use crate::app::{
     AccountChoice, App, ApprovalRow, AuthRow, ConnMode, ConnRow, ConnSwitchRow, ConnectRow,
-    CreateForm, CreateRow, Empty, FoldersRow, Hit, KitsRow, SandboxFoldersRow, SandboxSkillRow,
-    Screen, SecretRow, SettingTone, SettingsRow, SkillRow, StartDirRow, TargetLaunch, TextInput,
+    CreateForm, CreateRow, Empty, FoldersRow, Hit, KitsRow, SandboxFoldersRow, SandboxMcpRow,
+    SandboxSkillRow, Screen, SecretRow, SettingTone, SettingsRow, SkillRow, StartDirRow,
+    TargetLaunch, TextInput,
 };
 use crate::create::account_notes;
 use crate::model::{self, Auth};
@@ -1498,6 +1499,51 @@ pub(super) fn render_sandbox_skills(frame: &mut Frame, app: &App, area: Rect) ->
             i,
         );
         out.explain_lines(focus == i, name, &app.sandbox_skill_notes(sandbox, row));
+    }
+    let buttons = [("Close", focus == close, Look::Plain, close)];
+    framed(frame, area, &title, out, &buttons)
+}
+
+// --- one sandbox's MCP servers -----------------------------------------------------------------
+
+/// A sandbox's MCP screen (`t`): the servers set up on this computer, each with whether the
+/// sandbox's gateway has it loaded at the right, in [`App::sandbox_mcp_rows`] order.
+pub(super) fn render_sandbox_mcp(frame: &mut Frame, app: &App, area: Rect) -> Hits {
+    let Screen::SandboxMcp(form) = &app.screen else {
+        return Hits::new();
+    };
+    let sandbox = form.sandbox.as_str();
+    let rows = app.sandbox_mcp_rows(sandbox);
+    let focus = form.focus.min(rows.len().saturating_sub(1));
+    let title = format!("MCP servers · {}", app.sandbox_label(sandbox));
+
+    let mut out = Lines::new(area);
+    for line in app.sandbox_mcp_intro(sandbox) {
+        out.para(line);
+    }
+    let mut section: Option<(String, String)> = None;
+    let mut close = rows.len();
+    for (i, row) in rows.iter().enumerate() {
+        if let SandboxMcpRow::Close = row {
+            close = i;
+            continue;
+        }
+        let heading = app.sandbox_mcp_heading(row);
+        if heading != section {
+            out.blank();
+            if let Some((title, gloss)) = &heading {
+                heading_line(&mut out, title, gloss);
+            }
+            section = heading;
+        }
+        let (name, meta) = app.sandbox_mcp_view(row);
+        let switch = app.sandbox_mcp_switch(sandbox, row);
+        out.row(
+            switch_row(out.width as usize, &name, &meta, switch),
+            focus == i,
+            i,
+        );
+        out.explain_lines(focus == i, name, &app.sandbox_mcp_notes(sandbox, row));
     }
     let buttons = [("Close", focus == close, Look::Plain, close)];
     framed(frame, area, &title, out, &buttons)

@@ -1628,16 +1628,54 @@ pub fn doctor_json() -> serde_json::Value {
     for skip in &skipped {
         problems.push(format!("kit skipped: {skip}"));
     }
+    let diagnosis = match sbx_version {
+        Some(_) => diagnose_part(sbx::diagnose(), &mut problems),
+        None => serde_json::Value::Null,
+    };
     serde_json::json!({
         "aisbx_version": crate::version(),
         "step_protocol": PROTOCOL,
         "sbx": {"version": sbx_version, "required": sbx::REQUIRED_VERSION, "ok": sbx_ok, "signed_in": signed_in},
+        "sbx_diagnose": diagnosis,
         "policy": {"fallback_rule": fallback},
         "kits": {"user_dirs": user_dirs, "found": kits, "skipped": skipped},
         "proofs_dir": proofs_dir(&state::state_dir()),
         "ok": problems.is_empty(),
         "problems": problems,
     })
+}
+
+/// The `sbx_diagnose` part of the doctor's document: how many checks sbx ran and each that did
+/// not pass or was skipped, by its stable id. A failed check is a problem too; a warning is not.
+/// `null` when sbx gave no answer, which is a problem.
+fn diagnose_part(
+    diagnosis: anyhow::Result<sbx::Diagnosis>,
+    problems: &mut Vec<String>,
+) -> serde_json::Value {
+    let diagnosis = match diagnosis {
+        Ok(diagnosis) => diagnosis,
+        Err(e) => {
+            problems.push(format!("{e:#}"));
+            return serde_json::Value::Null;
+        }
+    };
+    let findings: Vec<serde_json::Value> = (diagnosis.checks.iter())
+        .filter(|c| c.finding())
+        .map(|c| {
+            if c.failed() {
+                let hint = match c.hint.trim() {
+                    "" => String::new(),
+                    hint => format!(" ({hint})"),
+                };
+                problems.push(format!(
+                    "sbx diagnose: {} failed: {}{hint}",
+                    c.id, c.message
+                ));
+            }
+            serde_json::json!({"id": c.id, "status": c.status, "message": c.message, "hint": c.hint})
+        })
+        .collect();
+    serde_json::json!({"checks": diagnosis.checks.len(), "findings": findings})
 }
 
 /// `aisbx doctor` without `--json`: one line per fact.
@@ -1675,6 +1713,26 @@ pub fn doctor_text(doc: &serde_json::Value) -> String {
             }
         ),
     ];
+    let findings = doc["sbx_diagnose"]["findings"].as_array();
+    lines.push(match doc["sbx_diagnose"]["checks"].as_u64() {
+        Some(checks) => format!(
+            "sbx diagnose: {checks} checks, {} to look at",
+            findings.map_or(0, Vec::len)
+        ),
+        None => "sbx diagnose: no answer".into(),
+    });
+    for finding in findings.into_iter().flatten() {
+        let hint = match finding["hint"].as_str().unwrap_or("").trim() {
+            "" => String::new(),
+            hint => format!(" ({hint})"),
+        };
+        lines.push(format!(
+            "sbx {} {}: {}{hint}",
+            finding["status"].as_str().unwrap_or(""),
+            finding["id"].as_str().unwrap_or(""),
+            finding["message"].as_str().unwrap_or("")
+        ));
+    }
     for dir in doc["kits"]["user_dirs"].as_array().into_iter().flatten() {
         lines.push(format!("user kits: {}", dir.as_str().unwrap_or("")));
     }
@@ -1982,6 +2040,9 @@ mod tests {
         let doc = serde_json::json!({
             "aisbx_version": "0.51.0.3", "step_protocol": 1,
             "sbx": {"version": "v0.51.0", "required": "0.51.0", "ok": true, "signed_in": false},
+            "sbx_diagnose": {"checks": 20, "findings": [
+                {"id": "disk-space", "status": "warn", "message": "1.2GiB free", "hint": ""},
+            ]},
             "policy": {"fallback_rule": true},
             "kits": {"user_dirs": ["/u/kits"], "found": [{"name": "claude-anthropic", "source": "aisbx"}], "skipped": []},
             "ok": false, "problems": ["not signed in to Docker: run `sbx login`"],
@@ -1989,9 +2050,57 @@ mod tests {
         let text = doctor_text(&doc);
         assert!(text.contains("aisbx 0.51.0.3  step protocol 1"));
         assert!(text.contains("signed in: no"));
+        assert!(text.contains("sbx diagnose: 20 checks, 1 to look at"));
+        assert!(
+            text.contains("sbx warn disk-space: 1.2GiB free\n"),
+            "{text}"
+        );
         assert!(text.contains("user kits: /u/kits"));
         assert!(text.contains("kits: claude-anthropic (aisbx)"));
         assert!(text.ends_with("not ok"));
+        let unanswered = serde_json::json!({"sbx_diagnose": null, "problems": []});
+        assert!(doctor_text(&unanswered).contains("sbx diagnose: no answer"));
+    }
+
+    #[test]
+    fn doctor_reports_sbxs_own_checks_by_id_and_only_a_failure_is_a_problem() {
+        let check = |id: &str, status: &str, hint: &str| sbx::DiagnoseCheck {
+            id: id.into(),
+            name: format!("{id} shown"),
+            status: status.into(),
+            message: format!("{id} says so"),
+            hint: hint.into(),
+        };
+        let diagnosis = sbx::Diagnosis {
+            checks: vec![
+                check("cli-binary", "pass", ""),
+                check("zfs-offset-sync", "skip", ""),
+                check("disk-space", "warn", ""),
+                check("daemon", "fail", "run sbx daemon start"),
+            ],
+        };
+        let mut problems = Vec::new();
+        let part = diagnose_part(Ok(diagnosis), &mut problems);
+        assert_eq!(part["checks"], 4);
+        let ids: Vec<&str> = (part["findings"].as_array().unwrap().iter())
+            .map(|f| f["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["disk-space", "daemon"]);
+        assert!(
+            !part.to_string().contains("shown"),
+            "the display name can change between releases, so it stays out"
+        );
+        assert_eq!(
+            problems,
+            ["sbx diagnose: daemon failed: daemon says so (run sbx daemon start)"]
+        );
+        let mut problems = Vec::new();
+        let none = diagnose_part(
+            Err(anyhow::anyhow!("sbx diagnose said nothing usable")),
+            &mut problems,
+        );
+        assert!(none.is_null());
+        assert_eq!(problems, ["sbx diagnose said nothing usable"]);
     }
 
     fn strings(items: &[&str]) -> Vec<String> {

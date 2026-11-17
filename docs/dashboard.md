@@ -101,7 +101,7 @@ This text version shows more row states: a setup token, a LiteLLM connection, an
 foreign kit.
 
 ```text
- aisbx  ~/my-project   ● 2 of 4 running                    ⚑ 1 approval waiting    sbx v0.53.0
+ aisbx  ~/my-project   ● 2 of 4 running                    ⚑ 1 approval waiting    sbx v0.54.0
  Sandboxes ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   This folder  ~/my-project   2 sandboxes ───────────────────────────────────────────────────
   ▌● My private Claude Code              Claude Code · token private  running · 1 session
@@ -185,14 +185,15 @@ Each sandbox is one row of three columns. The columns line up down the list.
 | `S` | [every secret stored on the host](accounts.md#stored-secrets-s); add (`n`), edit (`↵`) or delete (`d`) a LiteLLM connection |
 | `K` | [the shared agent-skills store](skills.md#shared-agent-skills): its skills grouped by where they came from, each with a [switch](skills.md#switches) for all sandboxes, and the *Update daily* switch |
 | `i` | *Sandbox skills*: the store's skills with this sandbox's own [switches](skills.md#switches), and *Apply now* |
+| `t` | *MCP servers*: the [MCP servers](sandboxes.md#mcp-servers) registered on this computer, each with whether this sandbox has it loaded; `space` loads or unloads one |
 | `f` | [the folders this sandbox mounts](sandboxes.md#a-sandboxs-own-folders-f) beside its workspace: add one, switch its access (`←→`) or drop it (`d`), then *Apply* to rebuild |
 | `F` | [the host folders every sandbox mounts](sandboxes.md#host-folders-f-and-companionjson): add, edit (`↵`) or delete (`d`) one |
-| `T` | sbx's settings for this host: [telemetry](network.md#sbxs-own-telemetry-t), [clipboard copy and image paste](sandboxes.md#the-host-clipboard-t), [FUSE](sandboxes.md#fuse-filesystems-t), and [Claude in Chrome and Remote Control](sandboxes.md#claude-in-chrome-and-remote-control-t), each turned on or off with `↵`, and the [skills default](skills.md#share-modes), which `↵`, `←` and `→` walk |
+| `T` | sbx's settings for this host: [telemetry](network.md#sbxs-own-telemetry-t), [clipboard copy and image paste](sandboxes.md#the-host-clipboard-t), [FUSE](sandboxes.md#fuse-filesystems-t), [Claude in Chrome and Remote Control](sandboxes.md#claude-in-chrome-and-remote-control-t) and [post-quantum TLS](sandboxes.md#post-quantum-tls-t), each turned on or off with `↵`, and the [skills default](skills.md#share-modes), which `↵`, `←` and `→` walk |
 | `p` / `u` | [publish / unpublish a port](sandboxes.md#ports-p--u) |
 | `L` | LiteLLM sandboxes: fetch the connection's [model list](litellm.md#the-gateways-model-list) now |
 | `b` | [keep the sandbox running](sandboxes.md#keeping-a-sandbox-running-b) after its sessions end, or rebuild it back |
 | `y` | [answer requests held for approval](sandboxes.md#requests-held-for-approval-y) (offered while one waits) |
-| `c` | check whether a host is reachable from the sandbox (`sbx policy check network`; opens no connection) |
+| `c` | check whether a host is reachable from the sandbox (`sbx policy check network`; opens no connection); an allowed host's answer says who put the allowing rule there: the kit, you (`added`), an approval or a preset |
 | `r` / `R` | rename (the label only) / [rebuild](sandboxes.md#names-kits-and-rebuilds) from its current kits |
 | `s` / `d` | stop / delete |
 | `P` | [prune every stopped sandbox](sandboxes.md#prune-stopped-sandboxes-p) on the host |
@@ -214,7 +215,7 @@ Each sandbox is one row of three columns. The columns line up down the list.
 - The split between the list and the details pane moves only when a sandbox comes or goes, or *Sandboxes in other
   folders* folds. The details pane is as tall as the longest Overview of the listed sandboxes. On `+ New sandbox`
   the list gets the whole screen.
-- Every full-screen form (`S`, `K`, `i`, `o`, `y`, `w`, `e`, `A`) keeps its rows in place too:
+- Every full-screen form (`S`, `K`, `i`, `t`, `o`, `y`, `w`, `e`, `A`) keeps its rows in place too:
   - A strip right under the rows explains the row under the cursor.
   - A rule above the strip names that row and counts the rows scrolled out of view (`↓ 4 more`).
   - The form's buttons are its last line.
@@ -424,10 +425,10 @@ The details pane shows the selected sandbox in seven tabs. Press `tab` or `1`…
 
 | Tab | Shows | From |
 | --- | --- | --- |
-| `1 Overview` | what needs you first: status (and an unresponsive guest), where the requests waiting for approval go, a missing secret, keep-running. Then agent, account, pinned models and kits, folder, start folder and skills mode, names and SSH host, created / last used and CPU/memory limits, the size of the container's own files, image, injected secrets, MCP servers. On a wide terminal, the names and everything after them are in a second column | `sbx ls --json`, `sbx inspect --json`, `sbx policy approval ls --json`, `sbx df --json` |
+| `1 Overview` | what needs you first: status (and an unresponsive guest), where the requests waiting for approval go, a missing secret, keep-running. Then agent, account, pinned models and kits, folder, start folder and skills mode, names and SSH host, created / last used and CPU/memory limits, the size of the container's own files, image, injected secrets, the MCP servers it has loaded. On a wide terminal, the names and everything after them are in a second column | `sbx ls --json`, `sbx inspect --json`, `sbx policy approval ls --json`, `sbx df --json` |
 | `2 Resources` | vCPUs and load, memory, disk, uptime (the sandbox's own, not the host's). From the second reading on, CPU and memory also show as sparklines of the readings taken while the tab is open, beside their meters where the terminal is wide enough | `sbx exec` of a `/proc` + `df` probe |
 | `3 Mounts` | every folder sbx mounts from the host: the workspace, extra folders, the skills store, folders added later with `sbx mount`. Each with its path in the sandbox where that differs, read-write or read-only, and a warning when the host folder is gone | `sbx inspect --json`, `sbx ls --json` |
-| `4 Ports` | port forwards, as URLs | `sbx ports <name> --json` |
+| `4 Ports` | port forwards, as URLs | `sbx port ls <name> --json` |
 | `5 Network` | every network rule that applies (allow / deny, HTTP method / path), where it came from (`kit`, `added`, `approved`, `preset`, `org`), and `all sandboxes` on a rule of the host-wide policy (a rule of the sandbox's own says nothing) | `sbx policy ls <name> --json` |
 | `6 Filesystem` | the filesystem read / write rules | the same call |
 | `7 Activity` | the proxy's log: hosts allowed and blocked, with counts, last seen and why | `sbx policy log <name> --json` |

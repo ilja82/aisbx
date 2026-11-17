@@ -140,7 +140,7 @@ dependencies = [
 
 [[package]]
 name = "aisbx"
-version = "0.53.0+0"
+version = "0.54.0+0"
 dependencies = [
  "aisbx-core",
  "anyhow",
@@ -152,10 +152,11 @@ dependencies = [
 
 [[package]]
 name = "aisbx-core"
-version = "0.53.0+0"
+version = "0.54.0+0"
 dependencies = [
  "anyhow",
  "ctrlc",
+ "nix 0.31.3",
  "serde",
  "serde_json",
  "sha2 0.11.1",
@@ -165,7 +166,7 @@ dependencies = [
 
 [[package]]
 name = "aisbx-ui"
-version = "0.53.0+0"
+version = "0.54.0+0"
 dependencies = [
  "aisbx-core",
  "anyhow",
