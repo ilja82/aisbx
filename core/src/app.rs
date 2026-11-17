@@ -15761,7 +15761,11 @@ mod tests {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
         let root = crate::sbx::plain_path(std::fs::canonicalize(&root).unwrap());
-        let mut sb = model::sample("claude-litellm-proj", Some("claude-litellm"), &[]);
+        let mut sb = model::sample(
+            "claude-litellm-rebuild-folders",
+            Some("claude-litellm"),
+            &[],
+        );
         sb.workspace = root.join("proj");
         sb.ro_mounts = vec![
             root.join("proj").join(".git"),
