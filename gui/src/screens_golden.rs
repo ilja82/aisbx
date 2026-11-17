@@ -23,6 +23,7 @@ fn focus(app: &App) -> usize {
         Screen::Connection(f) => f.focus,
         Screen::Skills(f) => f.focus,
         Screen::SandboxSkills(f) => f.focus,
+        Screen::SandboxMcp(f) => f.focus,
         Screen::RepoSkills(f) => f.focus,
         Screen::Approvals(f) => f.focus,
         other => panic!("no S7 screen is open: {other:?}"),
@@ -42,6 +43,7 @@ fn at(app: &App, row: &str) -> usize {
         Screen::Secrets(_) => names(app.secret_rows()),
         Screen::Skills(_) => names(app.skill_rows()),
         Screen::SandboxSkills(f) => names(app.sandbox_skill_rows(&f.sandbox)),
+        Screen::SandboxMcp(f) => names(app.sandbox_mcp_rows(&f.sandbox)),
         other => panic!("no rows for {other:?}"),
     };
     let found = rows.iter().position(|r| r == row);
@@ -315,6 +317,7 @@ fn the_settings_page_turns_each_setting_with_its_own_button() {
             Some(testkit::bool_setting(sbx::SANDBOX_FUSE, true)),
             Some(testkit::bool_setting(sbx::CLAUDE_CHROME, false)),
             Some(testkit::bool_setting(sbx::CLAUDE_REMOTE_CONTROL, false)),
+            Some(testkit::bool_setting(sbx::TLS_POST_QUANTUM, true)),
         ];
         form.skills = Some(testkit::skills_default("readonly"));
         w.frame(Vec::new());
@@ -327,6 +330,7 @@ fn the_settings_page_turns_each_setting_with_its_own_button() {
             "FUSE",
             "Claude in Chrome",
             "Remote Control",
+            "Post-quantum TLS",
             "Turn off",
             "Turn on",
             "Close",
@@ -1055,6 +1059,57 @@ fn a_click_on_a_skills_name_selects_it_and_switches_nothing() {
 
 /// The sandbox of [`on_login`].
 const SB: &str = "claude-anthropic-proj";
+
+/// A sandbox whose dynamic MCP gateway has `notion` loaded, on a computer that sets up `github`
+/// and `notion`.
+fn with_mcp() -> App {
+    use aisbx_core::sbx::{McpGateway, McpMode, McpServer};
+    let mut app = on_login();
+    app.sandboxes[0].mcp_gateway = true;
+    app.sandboxes[0].mcp = Some(McpGateway {
+        mode: McpMode::Dynamic,
+        servers: vec!["notion".into()],
+    });
+    let server = |name: &str| McpServer {
+        name: name.into(),
+        transport: "remote http".into(),
+        status: "ready".into(),
+        kind: "remote".into(),
+    };
+    app.mcp = vec![server("github"), server("notion")];
+    app
+}
+
+/// `t`: the sandbox's MCP page, titled with its label: its mode, then the computer's servers
+/// with whether the sandbox has each loaded at the right edge. A click on a switch runs the job
+/// Space runs on its row.
+#[test]
+fn a_sandboxs_mcp_page_loads_and_unloads_as_space_does() {
+    let open = |d: &mut dyn Driver| d.type_text("t");
+    let w = page(&with_mcp, &open);
+    assert!(matches!(&w.app.screen, Screen::SandboxMcp(_)));
+    let lines = Lines(&w);
+    lines.text(&format!("MCP servers · {}", w.app.sandbox_label(SB)));
+    lines.text(&w.app.sandbox_mcp_intro(SB).join(" "));
+    lines.beside("notion", "remote http · ready");
+    assert!(lines.word("notion").1, "notion is loaded");
+    assert!(!lines.word("github").1, "github is not");
+
+    let mut core = Core(with_mcp());
+    open(&mut core);
+    go(&mut core, "Server(\"github\")");
+    core.press(KeyCode::Char(' '));
+    let want = outcome(&core.0);
+    let mut w = page(&with_mcp, &open);
+    let at = Lines(&w).pill("github").center();
+    click(&mut w, at);
+    w.frame(Vec::new());
+    assert_eq!(outcome(&w.app), want);
+    assert!(
+        want.contains("sbx mcp load github"),
+        "the click loads github: {want}"
+    );
+}
 
 /// A running sandbox with its own switch for `docx`, on, while only `pdf` is on for all.
 fn with_own_switch() -> App {

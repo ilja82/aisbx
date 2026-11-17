@@ -184,6 +184,7 @@ fn form_screen(screen: &Screen) -> bool {
         | Screen::Secrets(_)
         | Screen::Skills(_)
         | Screen::SandboxSkills(_)
+        | Screen::SandboxMcp(_)
         | Screen::RepoSkills(_)
         | Screen::Approvals(_)
         | Screen::Connection(_)
@@ -450,6 +451,7 @@ fn screen(ui: &mut egui::Ui, app: &mut App, moved: bool, busy: bool) {
         Screen::Connection(_) => secrets::show_connection(ui, app),
         Screen::Skills(_) => skills::show_store(ui, app),
         Screen::SandboxSkills(_) => skills::show_sandbox(ui, app),
+        Screen::SandboxMcp(_) => crate::mcp::show(ui, app),
         Screen::RepoSkills(_) => skills::show_repo(ui, app),
         Screen::Approvals(_) => approvals::show(ui, app),
         Screen::Connect(_) => connect::show(ui, app),

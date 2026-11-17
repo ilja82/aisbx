@@ -101,7 +101,7 @@ pub fn credentials_path() -> Option<PathBuf> {
             return Some(PathBuf::from(appdata).join("sbx").join("credentials.yaml"));
         }
     }
-    crate::model::home_dir().map(|h| h.join(".config").join("sbx").join("credentials.yaml"))
+    crate::sbx::sbx_home().map(|h| h.join(".config").join("sbx").join("credentials.yaml"))
 }
 
 /// Add what `wanted` lacks to the bindings file's text. `None` when nothing is missing, else the

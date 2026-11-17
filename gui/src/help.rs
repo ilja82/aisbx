@@ -71,6 +71,7 @@ pub fn keys(action: Action) -> Vec<String> {
         | Action::StartDir
         | Action::Skills
         | Action::SandboxSkills
+        | Action::SandboxMcp
         | Action::Folders
         | Action::SandboxFolders
         | Action::Settings

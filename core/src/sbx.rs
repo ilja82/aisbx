@@ -10,7 +10,7 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 
 /// The oldest sbx release the dashboard accepts. docs/development.md, *sbx version*, says why.
-pub const REQUIRED_VERSION: &str = "0.53.0";
+pub const REQUIRED_VERSION: &str = "0.54.0";
 
 /// How a sandbox mounts the host's shared agent-skills store (`--skills`). sbx reports the mode
 /// nowhere, so a rebuild repeats it from the registry; see [`crate::state::Entry`].
@@ -91,7 +91,7 @@ pub struct LsEntry {
     pub workspaces: Vec<String>,
     #[serde(default)]
     pub workspace_missing: bool,
-    /// Published host->sandbox port mappings, the same rows as `sbx ports --json`.
+    /// Published host->sandbox port mappings, the same rows as `sbx port ls --json`.
     #[serde(default)]
     pub ports: Vec<Port>,
     /// When the sandbox was last used, RFC 3339 with fractional seconds. It is not a creation
@@ -177,6 +177,14 @@ pub struct InspectEntry {
     pub secrets: Vec<Secret>,
     #[serde(default)]
     pub mcp_gateway: bool,
+    /// `static` or `dynamic`, the mode of the sandbox's MCP gateway; anything else is unknown.
+    /// Read through [`InspectEntry::mcp`].
+    #[serde(default)]
+    pub mcp_mode: String,
+    /// The servers loaded in the sandbox's MCP gateway, by name, also while it is stopped. Read
+    /// leniently through [`InspectEntry::mcp`], like `runtime_mounts`.
+    #[serde(default)]
+    pub mcp_servers: Vec<serde_json::Value>,
     #[serde(default)]
     pub daemon_version: String,
     /// The sbx release that created the sandbox. Empty for one created before sbx reported it.
@@ -211,6 +219,60 @@ impl InspectEntry {
     /// of an unknown shape.
     pub fn bind_mounts(&self) -> Vec<HostMount> {
         lenient_mounts(&self.host_mounts)
+    }
+
+    /// The sandbox's MCP gateway as sbx reports it; `None` when the mode is not one sbx documents.
+    /// A server is a name, or an object's `name`.
+    pub fn mcp(&self) -> Option<McpGateway> {
+        let mode = match self.mcp_mode.trim() {
+            "static" => McpMode::Static,
+            "dynamic" => McpMode::Dynamic,
+            _ => return None,
+        };
+        let servers = (self.mcp_servers.iter())
+            .filter_map(|v| v.as_str().or_else(|| v.get("name")?.as_str()))
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .collect();
+        Some(McpGateway { mode, servers })
+    }
+}
+
+/// How a sandbox's MCP gateway picks its servers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpMode {
+    /// Only the servers loaded into it: the set of `--static-mcp`, or none for `none`.
+    Static,
+    /// The agent can also find and add any server registered on the host itself.
+    Dynamic,
+}
+
+/// A sandbox's MCP gateway, from `sbx inspect --json`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpGateway {
+    pub mode: McpMode,
+    /// The servers loaded now, in sbx's order.
+    pub servers: Vec<String>,
+}
+
+impl McpGateway {
+    /// The `--static-mcp` values that build this gateway again: the servers of a static one, or
+    /// `none` for a static one without servers. Empty for a dynamic one, which takes no flag.
+    pub fn static_mcp(&self) -> Vec<String> {
+        match (self.mode, self.servers.is_empty()) {
+            (McpMode::Dynamic, _) => Vec::new(),
+            (McpMode::Static, true) => vec![STATIC_MCP_NONE.to_string()],
+            (McpMode::Static, false) => self.servers.clone(),
+        }
+    }
+
+    /// The servers a dynamic gateway has loaded, which a new container gets back only through
+    /// `sbx mcp load`; none for a static one, whose `--static-mcp` carries them.
+    pub fn to_load(&self) -> &[String] {
+        match self.mode {
+            McpMode::Dynamic => &self.servers,
+            McpMode::Static => &[],
+        }
     }
 }
 
@@ -543,7 +605,11 @@ impl PolicyLog {
     }
 }
 
-/// One published port mapping, as reported by `sbx ports <sandbox> --json`.
+/// The sandbox port of a clone-mode sandbox's Git daemon. sbx publishes it itself when
+/// `clone.legacyTcpRemote` is on, and refuses it on a clone-mode sandbox otherwise.
+pub const CLONE_REMOTE_PORT: u16 = 9418;
+
+/// One published port mapping, as reported by `sbx port ls <sandbox> --json`.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Port {
     #[serde(default)]
@@ -574,7 +640,7 @@ impl Port {
         }
     }
 
-    /// `8080:3000/tcp4` - the spelling `--unpublish` expects back.
+    /// `8080:3000/tcp4` - the spelling `sbx port unpublish` expects back.
     pub fn spec(&self) -> String {
         format!(
             "{}:{}{}",
@@ -605,6 +671,9 @@ pub struct Reachability {
     /// in the JSON. Under `balanced` / `deny-all` that is exactly a destination the sandbox would
     /// *ask* for.
     pub implicit: bool,
+    /// The name of the rule that allowed it, as `sbx policy ls` names the rule; empty when denied
+    /// or not said. [`allowing_rule_source`] words it.
+    pub rule: String,
 }
 
 /// `sbx policy check network --json`.
@@ -619,6 +688,23 @@ struct CheckOutput {
     deny_kind: String,
     #[serde(default)]
     reason: String,
+    /// The allowing rule's name: `kit:<sandbox>`, a hand-added rule's id, ... Absent when denied.
+    #[serde(default)]
+    rule: String,
+}
+
+/// Who put the rule that allowed a check there, in the Network tab's words
+/// ([`PolicyRule::source`]): the rule of that name among `rules`, else `kit` for a `kit:` name.
+/// `None` when the check names no rule or one that is not listed.
+pub fn allowing_rule_source(rule: &str, rules: &[PolicyRule]) -> Option<String> {
+    let rule = rule.trim();
+    if rule.is_empty() {
+        return None;
+    }
+    match rules.iter().find(|r| r.name == rule) {
+        Some(found) => Some(found.source().to_string()),
+        None => rule.starts_with("kit:").then(|| "kit".to_string()),
+    }
 }
 
 /// Is this sbx new enough for what this dashboard asks of it? See [`REQUIRED_VERSION`] for what
@@ -784,16 +870,16 @@ pub fn probe(name: &str) -> Result<crate::stats::Sample> {
 /// does not start it.
 pub fn ports(name: &str) -> Result<Vec<Port>> {
     let out = Command::new("sbx")
-        .args(["ports", name, "--json"])
+        .args(["port", "ls", name, "--json"])
         .output()
-        .with_context(|| format!("running `sbx ports {name} --json`"))?;
+        .with_context(|| format!("running `sbx port ls {name} --json`"))?;
     if !out.status.success() {
         return Err(anyhow!(
-            "sbx ports {name} failed: {}",
+            "sbx port ls {name} failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
-    parse_json(&out.stdout).with_context(|| format!("parsing `sbx ports {name} --json`"))
+    parse_json(&out.stdout).with_context(|| format!("parsing `sbx port ls {name} --json`"))
 }
 
 /// Ask the daemon whether the policy in force for `sandbox` would allow reaching `target`.
@@ -838,6 +924,10 @@ fn reachability(check: &CheckOutput, asked: &str) -> Reachability {
         allowed: check.allowed,
         detail,
         implicit,
+        rule: match check.allowed {
+            true => check.rule.trim().to_string(),
+            false => String::new(),
+        },
     }
 }
 
@@ -2039,19 +2129,21 @@ pub fn disk_usage() -> Result<DiskUsage> {
 pub fn ports_publish_argv(name: &str, spec: &str) -> Vec<String> {
     vec![
         "sbx".into(),
-        "ports".into(),
+        "port".into(),
+        "publish".into(),
         name.into(),
-        "--publish".into(),
         spec.into(),
     ]
 }
 
+/// Stop forwarding a host port: `spec` in the publish grammar, a bare sandbox port removing every
+/// host port mapped to it.
 pub fn ports_unpublish_argv(name: &str, spec: &str) -> Vec<String> {
     vec![
         "sbx".into(),
-        "ports".into(),
+        "port".into(),
+        "unpublish".into(),
         name.into(),
-        "--unpublish".into(),
         spec.into(),
     ]
 }
@@ -2193,6 +2285,16 @@ pub fn publish_specs(ports: &[Port]) -> Vec<String> {
     out
 }
 
+/// The `-p` arguments a rebuild passes back: [`publish_specs`] of every mapping but, on a
+/// clone-mode sandbox, the clone remote's Git daemon ([`CLONE_REMOTE_PORT`]), which is sbx's own.
+pub fn republish_specs(ports: &[Port], clone: bool) -> Vec<String> {
+    let kept: Vec<Port> = (ports.iter())
+        .filter(|p| !(clone && p.sandbox_port == CLONE_REMOTE_PORT))
+        .cloned()
+        .collect();
+    publish_specs(&kept)
+}
+
 /// The per-sandbox network **denies** that apply to `name`, as `--deny-network` arguments.
 ///
 /// Only the sandbox's own plain *network* denies: an HTTP deny goes back through [`rule_argvs`],
@@ -2255,6 +2357,9 @@ pub const CLAUDE_CHROME: &str = "claude.chrome";
 /// The setting that lets Claude Code's Remote Control in a sandbox sign in with the credentials the
 /// proxy keeps on the host.
 pub const CLAUDE_REMOTE_CONTROL: &str = "claude.remoteControl";
+
+/// The setting that lets sbx's own TLS connections offer post-quantum key exchange.
+pub const TLS_POST_QUANTUM: &str = "tls.postQuantumKeyExchange";
 
 /// The skills mode a create without `--skills` gets: `off`, `readonly` or `readwrite`.
 pub const SKILLS_DEFAULT_MODE: &str = "skills.defaultMode";
@@ -2395,6 +2500,153 @@ fn parse_mcp_json(stdout: &[u8]) -> Vec<McpServer> {
     parse_json::<Vec<McpServer>>(stdout).unwrap_or_default()
 }
 
+/// Load a registered MCP server into a sandbox's gateway: at once while it runs, else at its next
+/// start, without starting it. The server stays loaded across restarts. Loading a loaded server
+/// again exits 0.
+pub fn mcp_load_argv(server: &str, sandbox: &str) -> Vec<String> {
+    vec![
+        "sbx".into(),
+        "mcp".into(),
+        "load".into(),
+        server.into(),
+        "--sandbox".into(),
+        sandbox.into(),
+    ]
+}
+
+/// Unload a server from a sandbox's gateway, also while it is stopped. It stays registered on the
+/// host. A server that is not loaded exits 1.
+pub fn mcp_unload_argv(server: &str, sandbox: &str) -> Vec<String> {
+    vec![
+        "sbx".into(),
+        "mcp".into(),
+        "unload".into(),
+        server.into(),
+        "--sandbox".into(),
+        sandbox.into(),
+    ]
+}
+
+// --- sbx's own checks ----------------------------------------------------------------------------
+
+/// One check of `sbx diagnose --format json`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct DiagnoseCheck {
+    /// Stable across sbx releases: what a script matches on.
+    #[serde(default)]
+    pub id: String,
+    /// Display text, which can change between releases.
+    #[serde(default)]
+    pub name: String,
+    /// `pass`, `warn`, `fail` or `skip`.
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub message: String,
+    /// What to do about it; empty when sbx has no advice.
+    #[serde(default)]
+    pub hint: String,
+}
+
+impl DiagnoseCheck {
+    /// A check that failed: sbx says something is broken.
+    pub fn failed(&self) -> bool {
+        self.status == "fail"
+    }
+
+    /// A check that neither passed nor was skipped.
+    pub fn finding(&self) -> bool {
+        matches!(self.status.as_str(), "warn" | "fail")
+    }
+}
+
+/// What `sbx diagnose --format json` answers: `{version, summary, checks}`. Only the checks are
+/// read. They are required, so a moved shape is an error instead of "nothing found".
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct Diagnosis {
+    pub checks: Vec<DiagnoseCheck>,
+}
+
+/// sbx's own checks of this host. The answer is read whatever the exit status; no answer is an
+/// error, never "all passed".
+pub fn diagnose() -> Result<Diagnosis> {
+    let out = Command::new("sbx")
+        .args(["diagnose", "--format", "json"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .context("running `sbx diagnose --format json`")?;
+    parse_json(&out.stdout).map_err(|_| {
+        anyhow!(
+            "sbx diagnose said nothing usable: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )
+    })
+}
+
+// --- where sbx keeps its own files ----------------------------------------------------------------
+
+/// The home folder sbx keeps its own files under, and that `sbx setup ssh` writes to: the home
+/// folder, but for root on Unix root's registered one, since sbx then ignores `HOME` and the
+/// `XDG_*` overrides.
+pub fn sbx_home() -> Option<std::path::PathBuf> {
+    home_for(
+        running_as_root(),
+        registered_root_home,
+        crate::model::home_dir(),
+    )
+}
+
+/// [`sbx_home`] with its facts given: root's registered home when running as root and the
+/// system names one, else `home`.
+fn home_for(
+    root: bool,
+    registered: impl FnOnce() -> Option<std::path::PathBuf>,
+    home: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    match root {
+        true => registered().or(home),
+        false => home,
+    }
+}
+
+/// Does this process run as root on Unix, where sbx ignores `HOME` and the `XDG_*` overrides?
+/// Never elsewhere.
+pub fn running_as_root() -> bool {
+    #[cfg(unix)]
+    {
+        nix::unistd::geteuid().is_root()
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+/// Root's home folder as the system's user database names it.
+#[cfg(unix)]
+fn registered_root_home() -> Option<std::path::PathBuf> {
+    let root = nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(0)).ok()??;
+    Some(root.dir).filter(|dir| !dir.as_os_str().is_empty())
+}
+
+#[cfg(not(unix))]
+fn registered_root_home() -> Option<std::path::PathBuf> {
+    None
+}
+
+/// An `XDG_*` folder as sbx reads it: the variable's value, unless it is empty or sbx ignores it
+/// because it runs as root.
+#[cfg_attr(any(target_os = "macos", windows), allow(dead_code))]
+fn sbx_xdg(var: &str) -> Option<std::path::PathBuf> {
+    xdg_for(running_as_root(), std::env::var_os(var))
+}
+
+fn xdg_for(root: bool, value: Option<std::ffi::OsString>) -> Option<std::path::PathBuf> {
+    value
+        .filter(|v| !root && !v.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
 // --- shared agent skills -------------------------------------------------------------------------
 
 /// Where sbx keeps the shared store, so the UI can name it rather than describing it.
@@ -2402,7 +2654,7 @@ fn parse_mcp_json(stdout: &[u8]) -> Vec<McpServer> {
 /// A guess by platform, and only the fallback for a host where `sbx skills ls --json` failed:
 /// [`SkillsStore::store`] carries the real path.
 pub fn skills_store() -> Option<std::path::PathBuf> {
-    let home = crate::model::home_dir()?;
+    let home = sbx_home()?;
     #[cfg(target_os = "macos")]
     {
         Some(home.join("Library/Application Support/com.docker.sandboxes/sandboxes/agent-skills"))
@@ -2422,10 +2674,7 @@ pub fn skills_store() -> Option<std::path::PathBuf> {
     }
     #[cfg(all(not(target_os = "macos"), not(windows)))]
     {
-        let base = std::env::var_os("XDG_STATE_HOME")
-            .filter(|v| !v.is_empty())
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| home.join(".local").join("state"));
+        let base = sbx_xdg("XDG_STATE_HOME").unwrap_or_else(|| home.join(".local").join("state"));
         Some(
             base.join("sandboxes")
                 .join("sandboxes")
@@ -2560,7 +2809,8 @@ pub fn ssh_host(name: &str) -> String {
     format!("{name}.sbx")
 }
 
-/// Write (or refresh) the managed `Host *.sbx` block. Idempotent, and safe to re-run.
+/// Write (or refresh) the managed SSH configuration and its `Include`. Idempotent, and safe to
+/// re-run.
 pub fn setup_ssh_argv() -> Vec<String> {
     vec!["sbx".into(), "setup".into(), "ssh".into()]
 }
@@ -2569,7 +2819,7 @@ pub fn setup_ssh_argv() -> Vec<String> {
 /// rather than remembered. Only `~/.ssh/config` is read, because the generated include file holds
 /// a fence of its own.
 pub fn ssh_configured() -> bool {
-    crate::model::home_dir()
+    sbx_home()
         .map(|h| h.join(".ssh").join("config"))
         .and_then(|p| std::fs::read_to_string(p).ok())
         .is_some_and(|text| ssh_fenced(&text))
@@ -3019,6 +3269,17 @@ mod live {
             unused.iter().map(|i| i.unique_size).sum::<u64>()
         );
         println!("ssh configured: {}", ssh_configured());
+        let diagnosis = diagnose().expect("sbx diagnose --format json");
+        println!("sbx diagnose: {} check(s)", diagnosis.checks.len());
+        assert!(!diagnosis.checks.is_empty(), "sbx diagnose lists no check");
+        for check in &diagnosis.checks {
+            println!("  {} [{}] {}", check.id, check.status, check.message);
+            assert!(
+                !check.id.is_empty()
+                    && matches!(check.status.as_str(), "pass" | "warn" | "fail" | "skip"),
+                "{check:?}"
+            );
+        }
         // Approval requests, host-wide. A key that moves shows up here as an empty column, and a
         // shape that moves as a list the plain one disagrees with.
         let pending = approvals().expect("sbx policy approval ls --json");
@@ -3137,16 +3398,16 @@ mod live {
             for host in log.allowed.iter().chain(&log.blocked) {
                 assert!(!host.host.is_empty() && host.count > 0, "{host:?}");
             }
-            // `sbx ports --json` is a bare array and its field names are not in the official
+            // `sbx port ls --json` is a bare array and its field names are not in the official
             // docs, so print what came back: a renamed key shows up here as a zero column.
-            let ports = ports(&entry.name).expect("sbx ports --json");
+            let ports = ports(&entry.name).expect("sbx port ls --json");
             println!("  {} published port(s)", ports.len());
             // The list entry carries them too, and a recreate reads them from there to publish them
             // again. The two have to agree, and both are empty while stopped.
             assert_eq!(
                 entry.ports.len(),
                 ports.len(),
-                "{}: `ls --json` and `ports --json` disagree",
+                "{}: `ls --json` and `port ls --json` disagree",
                 entry.name
             );
             if !entry.ports.is_empty() {
@@ -3202,7 +3463,25 @@ mod live {
             for secret in &inspect.secrets {
                 println!("  secret {:?} ({})", secret.name, secret.source);
             }
-            println!("  mcp gateway: {}", inspect.mcp_gateway);
+            println!(
+                "  mcp gateway: {} · {:?} {:?}",
+                inspect.mcp_gateway, inspect.mcp_mode, inspect.mcp_servers
+            );
+            if inspect.mcp_gateway {
+                let gateway = inspect.mcp();
+                assert!(
+                    gateway.is_some(),
+                    "{}: mcp_mode {:?} is neither static nor dynamic",
+                    entry.name,
+                    inspect.mcp_mode
+                );
+                assert_eq!(
+                    gateway.map(|g| g.servers.len()),
+                    Some(inspect.mcp_servers.len()),
+                    "{}: an mcp_servers element is no longer a name",
+                    entry.name
+                );
+            }
 
             // `sbx exec` would start a stopped sandbox — never probe one.
             if entry.status.eq_ignore_ascii_case("running") {
@@ -3299,22 +3578,27 @@ mod tests {
 
     #[test]
     fn the_gate_names_the_version_it_refuses() {
-        assert_eq!(gate("v0.53.0".into()).unwrap(), "v0.53.0");
-        assert!(gate("v0.51.0".into()).is_err());
-        let err = gate("v0.51.0".into()).unwrap_err().to_string();
+        assert_eq!(gate("v0.54.0".into()).unwrap(), "v0.54.0");
+        assert!(gate("v0.53.0".into()).is_err());
+        let err = gate("v0.53.0".into()).unwrap_err().to_string();
         assert!(
-            err.starts_with("this sbx is v0.51.0, but this dashboard needs 0.53.0+ — "),
+            err.starts_with("this sbx is v0.53.0, but this dashboard needs 0.54.0+ — "),
             "{err}"
         );
     }
 
     #[test]
-    fn version_gate_accepts_0530_and_newer() {
-        assert!(meets_required_version("v0.53.0"));
-        assert!(meets_required_version("0.53.0"));
-        assert!(meets_required_version("v0.53.1"));
+    fn version_gate_accepts_0540_and_newer() {
         assert!(meets_required_version("v0.54.0"));
+        assert!(meets_required_version("0.54.0"));
+        assert!(meets_required_version("v0.54.0-rc1"));
+        assert!(meets_required_version("v0.54.1"));
+        assert!(meets_required_version("v0.55.0"));
         assert!(meets_required_version("v1.0.0"));
+        assert!(!meets_required_version("v0.53.9"));
+        assert!(!meets_required_version("v0.53.1"));
+        assert!(!meets_required_version("v0.53.0"));
+        assert!(!meets_required_version("v0.53"));
         assert!(!meets_required_version("v0.52.0-rc1"));
         assert!(!meets_required_version("v0.52.9"));
         assert!(!meets_required_version("v0.52.0"));
@@ -3619,6 +3903,52 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_check_names_the_rule_that_allowed_it_in_the_network_tabs_words() {
+        let by_kit: CheckOutput = parse_json(br#"{"action":"net:connect:tcp","allowed":true,"context":"sandbox:claude-anthropic-proj","governance":{"active":false},"resource_type":"net:domain","resource_value":"api.anthropic.com:443","rule":"kit:claude-anthropic-proj","target":"api.anthropic.com:443","type":"network"}"#).unwrap();
+        let r = reachability(&by_kit, "api.anthropic.com");
+        assert_eq!(r.rule, "kit:claude-anthropic-proj");
+        assert_eq!(
+            r.detail, "Allowed: api.anthropic.com:443",
+            "the step proof records the detail, so it stays as it was"
+        );
+        let by_hand: CheckOutput = parse_json(br#"{"action":"net:connect:tcp","allowed":true,"context":"sandbox:s","governance":{"active":false},"resource_type":"net:domain","resource_value":"example.com:443","rule":"d4d08a2d-40a8-4719-a1a4-79bdbebca0cc","target":"example.com:443","type":"network"}"#).unwrap();
+        let by_hand = reachability(&by_hand, "example.com");
+        let denied: CheckOutput = parse_json(br#"{"allowed":false,"deny_kind":"explicit","reason":"Denied by local rule","rule":"local:0430fd72","target":"ads.example.com:443"}"#).unwrap();
+        assert_eq!(reachability(&denied, "ads.example.com").rule, "");
+
+        let rule = |name: &str, created_via: &str| PolicyRule {
+            name: name.into(),
+            scope: "sandbox:s".into(),
+            resource_type: "network".into(),
+            decision: "allow".into(),
+            provenance: Provenance {
+                created_via: created_via.into(),
+            },
+            ..Default::default()
+        };
+        let rules = vec![
+            rule("d4d08a2d-40a8-4719-a1a4-79bdbebca0cc", "added"),
+            rule("approval:6f1c", "approval"),
+            rule("balanced-github", "default"),
+        ];
+        assert_eq!(
+            allowing_rule_source(&by_hand.rule, &rules).as_deref(),
+            Some("added")
+        );
+        assert_eq!(
+            allowing_rule_source("approval:6f1c", &rules).as_deref(),
+            Some("approved")
+        );
+        assert_eq!(
+            allowing_rule_source("balanced-github", &rules).as_deref(),
+            Some("preset")
+        );
+        assert_eq!(allowing_rule_source(&r.rule, &[]).as_deref(), Some("kit"));
+        assert_eq!(allowing_rule_source("someone-elses", &rules), None);
+        assert_eq!(allowing_rule_source("", &rules), None);
+    }
+
     /// The rules of one sandbox, as sbx reports them: its kit's allow-list and deny list, a
     /// `--deny-network` deny, HTTP rules (two of them with a query), an answered approval and a
     /// global preset.
@@ -3807,6 +4137,109 @@ mod tests {
     }
 
     #[test]
+    fn inspect_reports_the_mcp_gateways_mode_and_servers() {
+        let gateway = |mode: &str, servers: &str| {
+            let raw = format!(
+                r#"{{"name":"aisbx-probe-054","agent":"shell","mcp_gateway":true,"mcp_mode":{mode},"mcp_servers":{servers}}}"#
+            );
+            parse_json::<InspectEntry>(raw.as_bytes()).unwrap().mcp()
+        };
+        let dynamic = gateway(r#""dynamic""#, "[]").unwrap();
+        assert_eq!(dynamic.mode, McpMode::Dynamic);
+        assert!(dynamic.servers.is_empty() && dynamic.static_mcp().is_empty());
+        let loaded = gateway(r#""dynamic""#, r#"["aisbx-probe-mcp"]"#).unwrap();
+        assert_eq!(loaded.servers, ["aisbx-probe-mcp"]);
+        assert!(loaded.static_mcp().is_empty(), "dynamic takes no flag");
+        assert_eq!(loaded.to_load(), ["aisbx-probe-mcp"]);
+        let fixed = gateway(r#""static""#, r#"["aisbx-probe-mcp"]"#).unwrap();
+        assert_eq!(fixed.mode, McpMode::Static);
+        assert_eq!(fixed.static_mcp(), ["aisbx-probe-mcp"]);
+        assert!(fixed.to_load().is_empty(), "the flag carries them");
+        let none = gateway(r#""static""#, "[]").unwrap();
+        assert_eq!(none.static_mcp(), [STATIC_MCP_NONE]);
+        assert_eq!(gateway(r#""-""#, "[]"), None);
+        assert_eq!(parse_json::<InspectEntry>(b"{}").unwrap().mcp(), None);
+        let object = gateway(r#""static""#, r#"[{"name":"notion"},7,"",null]"#).unwrap();
+        assert_eq!(object.servers, ["notion"]);
+    }
+
+    #[test]
+    fn mcp_load_and_unload_name_the_server_and_the_sandbox() {
+        assert_eq!(
+            mcp_load_argv("notion", "claude-anthropic-proj"),
+            [
+                "sbx",
+                "mcp",
+                "load",
+                "notion",
+                "--sandbox",
+                "claude-anthropic-proj"
+            ]
+        );
+        assert_eq!(
+            mcp_unload_argv("notion", "claude-anthropic-proj"),
+            [
+                "sbx",
+                "mcp",
+                "unload",
+                "notion",
+                "--sandbox",
+                "claude-anthropic-proj"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_diagnosis_lists_the_checks_that_did_not_pass() {
+        let raw = br#"{"checks":[
+  {"id":"cli-binary","name":"CLI binary","status":"pass","message":"found","hint":"","detail":"/x/sbx"},
+  {"id":"zfs-offset-sync","name":"ZFS offset sync","status":"skip","message":"state directory is not on ZFS","hint":"","detail":""},
+  {"id":"disk-space","name":"Disk space","status":"warn","message":"1.2GiB free","hint":"free some space","detail":""},
+  {"id":"daemon","name":"Daemon","status":"fail","message":"not running","hint":"run sbx daemon start","detail":""}
+],"summary":{"pass":1,"warn":1,"fail":1,"skip":1},"version":"1.1"}"#;
+        let diagnosis: Diagnosis = parse_json(raw).unwrap();
+        let findings: Vec<&str> = (diagnosis.checks.iter())
+            .filter(|c| c.finding())
+            .map(|c| c.id.as_str())
+            .collect();
+        assert_eq!(findings, ["disk-space", "daemon"]);
+        let failed: Vec<&str> = (diagnosis.checks.iter())
+            .filter(|c| c.failed())
+            .map(|c| c.id.as_str())
+            .collect();
+        assert_eq!(failed, ["daemon"]);
+        assert_eq!(diagnosis.checks[3].hint, "run sbx daemon start");
+        assert!(
+            parse_json::<Diagnosis>(b"[]").is_err(),
+            "a moved shape fails"
+        );
+        assert!(parse_json::<Diagnosis>(br#"{"result":[]}"#).is_err());
+    }
+
+    #[test]
+    fn root_reads_sbxs_files_under_its_registered_home() {
+        let home = Some(PathBuf::from("/home/me"));
+        let root = || Some(PathBuf::from("/var/root"));
+        assert_eq!(home_for(false, root, home.clone()), home);
+        assert_eq!(
+            home_for(true, root, home.clone()),
+            Some(PathBuf::from("/var/root"))
+        );
+        assert_eq!(home_for(true, || None, home.clone()), home);
+        let never = || -> Option<PathBuf> { panic!("only root looks it up") };
+        assert_eq!(home_for(false, never, None), None);
+
+        let state = Some(std::ffi::OsString::from("/tmp/state"));
+        assert_eq!(
+            xdg_for(false, state.clone()),
+            Some(PathBuf::from("/tmp/state"))
+        );
+        assert_eq!(xdg_for(true, state), None, "sbx as root ignores it");
+        assert_eq!(xdg_for(false, Some(std::ffi::OsString::new())), None);
+        assert_eq!(xdg_for(false, None), None);
+    }
+
+    #[test]
     fn no_input_goes_right_after_sbx_once() {
         let own = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<String>>();
         let argv = own(&["sbx", "exec", "box", "agent", "--no-input"]);
@@ -3905,7 +4338,7 @@ mod tests {
 
     #[test]
     fn decodes_a_bare_array_and_ignores_noise_on_both_sides() {
-        // `sbx ports --json` answers with an array, not an object.
+        // `sbx port ls --json` answers with an array, not an object.
         let ports: Vec<Port> = parse_json(b"[]").unwrap();
         assert!(ports.is_empty());
 
@@ -4126,8 +4559,12 @@ mod tests {
         };
         assert_eq!(udp.spec(), "5000:5000/udp");
         assert_eq!(
-            ports_unpublish_argv("s", &udp.spec()).last().unwrap(),
-            "5000:5000/udp"
+            ports_unpublish_argv("s", &udp.spec()),
+            ["sbx", "port", "unpublish", "s", "5000:5000/udp"]
+        );
+        assert_eq!(
+            ports_publish_argv("s", "8080:3000"),
+            ["sbx", "port", "publish", "s", "8080:3000"]
         );
         // An IPv6 host binding has to be bracketed before it can be pasted into a browser.
         let v6 = Port {
@@ -4783,6 +5220,22 @@ mod tests {
         assert_eq!(
             publish_specs(&[row("127.0.0.1", 1, 2, "", false)]),
             vec!["1:2".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_rebuild_leaves_the_clone_remotes_port_to_sbx() {
+        let ports: Vec<Port> = parse_json(
+            br#"[
+  {"host_ip":"127.0.0.1","host_port":49153,"sandbox_port":9418,"protocol":"tcp4"},
+  {"host_ip":"127.0.0.1","host_port":18054,"sandbox_port":8080,"protocol":"tcp4"}
+]"#,
+        )
+        .unwrap();
+        assert_eq!(republish_specs(&ports, true), ["18054:8080/tcp4"]);
+        assert_eq!(
+            republish_specs(&ports, false),
+            ["49153:9418/tcp4", "18054:8080/tcp4"]
         );
     }
 

@@ -20,8 +20,9 @@ sandbox, whatever the kits say.
 
 ### Check a host
 
-Select a sandbox and press `c`, then type the host. The dashboard tells whether the policy allows it. This opens no
-connection. Without the dashboard, run `sbx policy check network --sandbox <name> <host>`.
+Select a sandbox and press `c`, then type the host. The dashboard tells whether the policy allows it, and for an
+allowed host who put the rule there, in the words of the *5 Network* tab: `kit`, `added`, `approved`, `preset` or
+`org`. This opens no connection. Without the dashboard, run `sbx policy check network --sandbox <name> <host>`.
 
 The *5 Network* tab shows every rule that applies to the sandbox and where it came from. The last row, marked
 `fallback`, is the policy's own `deny **`: it decides every request that no other rule matches.

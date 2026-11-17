@@ -7,8 +7,9 @@ How your accounts reach a sandbox while the secret stays on the host, and the `A
 ## Credentials
 
 The backends `claude-anthropic`, `codex-openai` and `agy` use an sbx service credential. sbx gives a credential only
-to the domains in its binding in `~/.config/sbx/credentials.yaml`. aisbx adds this binding for you before it creates,
-rebuilds or starts a sandbox, and never removes an entry. A plain `sbx run` asks for the binding on its first
+to the domains in its binding in `~/.config/sbx/credentials.yaml` (for root, under root's own home folder, whatever
+`HOME` says). aisbx adds this binding for you before it creates, rebuilds or starts a sandbox, and never removes an
+entry. A plain `sbx run` asks for the binding on its first
 interactive start. **Without a binding, sbx silently withholds the credential** and the agent fails to sign in.
 LiteLLM connections and setup tokens need no binding.
 

@@ -38,7 +38,7 @@ They use the same kits, sandbox names, LiteLLM connections and setup tokens, and
 | `aisbx status` | `sbx ls --json`, `sbx inspect --json` and `sbx policy approval ls --json` |
 | `aisbx stop` / `rm` | `sbx stop` / `sbx rm --force` |
 | `aisbx step` | `up` with `--deny-network`, `sbx policy ls`, `sbx policy check network` (in parallel), `sbx policy log`, the agent or checks through `sbx exec`, then `rm` and `sbx ls` to prove the removal ([The step protocol](step-protocol.md)) |
-| `aisbx doctor` | `sbx version --json`, `sbx ls --json`, `sbx policy ls --json`; the kit folders on this computer |
+| `aisbx doctor` | `sbx version --json`, `sbx ls --json`, `sbx policy ls --json`, `sbx diagnose --format json`; the kit folders on this computer |
 
 ![A script runs aisbx up, which runs sbx create and prints the sandbox name. aisbx run NAME runs sbx exec for the agent update and the prompt upload, then the agent in print mode, whose output reaches the script on stdout, then dismisses held network requests. aisbx rm runs sbx rm --force.](images/headless-run.png)
 
@@ -242,6 +242,11 @@ file, every event, the report and the exit codes.
 protocol, the sbx version and whether it is new enough, whether sbx is signed in, whether the policy has its
 deny-all fallback, the user kit folders searched, and every kit found or skipped. It exits 0 whatever it finds; the
 `problems` list and `ok` say what is wrong.
+
+It also runs sbx's own checks, `sbx diagnose --format json`. `sbx_diagnose` in the JSON counts them (`checks`) and
+lists each that warned or failed (`findings`: `id`, `status`, `message`, `hint`). Match a check by its `id`: sbx keeps
+the `id` stable, while the text can change. A failed check is also in `problems`; a warning is not. The text form
+prints one `sbx <status> <id>: <message>` line per finding. `sbx_diagnose` is `null` when sbx gave no answer.
 
 ### `aisbx ls`, `status`, `stop`, `rm` and `prune-images`
 

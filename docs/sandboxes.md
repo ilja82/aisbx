@@ -40,8 +40,8 @@ change, to remove a kit, or to leave detached mode.
 
 A rebuild deletes the container and everything you installed in it. It keeps the workspace files, the `/login`, a
 named setup token, and the agent's session history. It carries over
-published ports, clone mode, the skills mode, the MCP set, the CPU and memory limits, the sandbox's own folders
-([`f`](#a-sandboxs-own-folders-f)), `sbx mount` folders, the
+published ports, clone mode, the skills mode, the MCP servers the sandbox has loaded, the CPU and memory limits, the
+sandbox's own folders ([`f`](#a-sandboxs-own-folders-f)), `sbx mount` folders, the
 sandbox's own network rules and detached mode. The confirmation names each one.
 
 #### Limits
@@ -68,8 +68,8 @@ details quote the kit's newest lines from `kits/<kit>/changes.txt`.
 
 ### What aisbx remembers
 
-aisbx remembers only what sbx does not report: labels, clone mode, the skills mode, the MCP set, start folders, kit
-hashes and UI preferences. It never stores a token. The registry is
+aisbx remembers only what sbx does not report: labels, clone mode, the skills mode, start folders, kit hashes and UI
+preferences. It also keeps the MCP servers chosen at creation, for a sandbox whose MCP gateway sbx does not report. It never stores a token. The registry is
 `${XDG_STATE_HOME:-~/.local/state}/aisbx/registry.json` (`%LOCALAPPDATA%\aisbx\state\` on Windows). The
 generated kits are next to it, in `tokens/` and `models/`. You can delete all of it: labels fall back to sbx names,
 and the next rebuild writes the generated kits again.
@@ -175,7 +175,8 @@ command there, with its flags. Claude Code opens the folder without a trust prom
 ## Editor and app integrations (VS Code, IntelliJ, Claude Desktop)
 
 Every sandbox is an SSH target at **`<sbx name>.sbx`**. Press `o` to list the ways in. The first time, choose *Set up
-SSH now*.
+SSH now*. After you upgrade sbx, run `sbx setup ssh` once more: sbx then writes its newest configuration, which keeps
+crafted host or user names from running commands on an older OpenSSH client.
 
 | App | What `o` does |
 | --- | --- |
@@ -251,24 +252,42 @@ $ sbx settings set claude.chrome true          # false blocks new browser connec
 $ sbx settings set claude.remoteControl true
 ```
 
+## Post-quantum TLS (`T`)
+
+The sbx CLI and its daemon offer post-quantum key exchange in the TLS connections they make. A firewall or a
+TLS-inspecting proxy that cannot handle it drops or stalls those connections. Then press `T` (or *Settings* in the
+window's header) and turn *Post-quantum TLS* off. The daemon follows after `sbx daemon restart`; the dashboard does
+not restart it for you. Without the dashboard:
+
+```console
+$ sbx settings set tls.postQuantumKeyExchange false   # true turns it on again
+$ sbx daemon restart
+```
+
 ## MCP servers
 
 sbx registers [MCP](https://modelcontextprotocol.io) servers on the host and lends them to sandboxes. The host keeps
-each server's OAuth token. Register a server, then tick it in the create wizard. The set is fixed at creation, and a
-rebuild repeats it. To attach or detach a server on a running sandbox, use `sbx mcp load` / `unload`.
+each server's OAuth token. Register a server, then tick it in the create wizard, or load it into a sandbox later
+with `t`. A rebuild loads the same servers again.
 
 The wizard's *MCP servers*, under *More options*, has three answers:
 
-- **Nothing ticked:** the agent gets tools to find and attach the host's registered servers itself.
-- **Servers ticked:** the agent gets only those servers.
+- **Nothing ticked:** the agent gets tools to find and attach the host's registered servers itself (dynamic mode).
+- **Servers ticked:** the agent gets only those servers (static mode).
 - **No MCP servers ticked:** the agent gets no server and no tools to find or add one
-  (`sbx create --static-mcp none`). You can still attach a server later with `sbx mcp load`.
+  (`sbx create --static-mcp none`). You can still load a server later with `t`.
+
+Press `t` on a sandbox to see the servers registered on this computer and which of them the sandbox has loaded.
+Space loads or unloads the one under the cursor: a running agent gets or loses its tools at once, a stopped sandbox
+at its next start, and the change lasts across restarts. The screen names the mode: static gives the agent the
+loaded servers only, dynamic also lets the agent load any registered server itself. A server that is no longer
+registered stays listed under its own heading until you unload it. The details pane's *mcp* row shows the same.
 
 ```console
 $ sbx mcp add notion --url https://mcp.notion.com/mcp                      # remote, OAuth discovered
 $ sbx mcp add gh --command npx --args @modelcontextprotocol/server-github  # local stdio
 $ sbx mcp auth notion                                                      # authorize, host-side
-$ sbx mcp load notion --sandbox my-sandbox                                 # attach now, until a rebuild
+$ sbx mcp load notion --sandbox my-sandbox                                 # what t does
 ```
 
 ## Host folders (`F`) and `companion.json`
@@ -321,9 +340,17 @@ By default the agent edits your working tree. Tick **Clone mode** in the create 
 the container, for example for parallel agents or untrusted code. Your repo is mounted read-only and gets a
 `sandbox-<name>` Git remote. Clone mode needs a Git workspace, is fixed at creation, and survives a rebuild.
 
+sbx serves the remote through its daemon socket, which only your user can reach, so a fetch needs the sandbox
+running:
+
 ```console
 $ git fetch sandbox-<name> && git log sandbox-<name>/<branch>
 ```
+
+For a Git client that ignores the remote's `uploadpack` setting, `sbx settings set clone.legacyTcpRemote true` serves
+it on a localhost TCP port instead, from the sandbox's next start. Other local accounts on the computer can then read
+the repository. In that mode sbx publishes the remote's port 9418 itself, so `p` cannot take it, and a rebuild leaves
+it out.
 
 Deleting the sandbox also deletes the agent's commits that you have not fetched yet, so fetch first. The delete
 confirmation says so and shows the command.
@@ -356,14 +383,15 @@ build and a Gradle build ran as fast at 4 CPUs and 4 GiB.
 | --- | --- |
 | Add a kit (absolute path, no trailing slash) | `sbx kit add <sandbox> "$PWD/kits/jdk25"` |
 | Rebuild | `sbx rm`, then `sbx create` with the same name, workspace and kits |
-| Publish a port | `sbx ports <name> --publish 8080:3000` |
+| Publish a port | `sbx port publish <name> 8080:3000` |
+| List or remove ports | `sbx port ls <name>`, `sbx port unpublish <name> 8080:3000` |
 | Keep running | `sbx run --detach --name <sandbox>` |
 | Answer a request | `sbx policy approval respond <id> --option allow` (or `dismiss`) |
 | Prune | `sbx prune --dry-run`, then `sbx prune`; add `--filter until=168h` to keep what stopped in the last week |
 | Disk use | `sbx df`; `--verbose` lists each image, container and volume |
 | Remove a kit image | `sbx df --verbose` to find an image no container runs, then `sbx template rm --force <image id>` |
 | Connect over SSH | `sbx setup ssh` once, then `ssh <name>.sbx` |
-| Detach an MCP server | `sbx mcp unload notion --sandbox my-sandbox` |
+| Load or unload an MCP server | `sbx mcp load notion --sandbox my-sandbox`, `sbx mcp unload notion --sandbox my-sandbox` |
 | Create without MCP servers | `sbx create --static-mcp none …` |
 | A sandbox's own folders | `sbx create ./kits/claude-anthropic . ~/notes:ro` at creation; later, `sbx mount <name> ~/notes` |
 | Host folders | `aisbx folders add ~/notes --purpose "..."` (`--write` for read-write), `aisbx folders ls`, `aisbx folders rm ~/notes` |

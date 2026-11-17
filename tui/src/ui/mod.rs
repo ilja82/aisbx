@@ -47,6 +47,7 @@ pub(crate) fn draw_in(frame: &mut Frame, app: &mut App, caps: theme::Caps) {
         Screen::Skills(_) => form::render_skills(frame, app, body),
         Screen::RepoSkills(_) => form::render_repo_skills(frame, app, body),
         Screen::SandboxSkills(_) => form::render_sandbox_skills(frame, app, body),
+        Screen::SandboxMcp(_) => form::render_sandbox_mcp(frame, app, body),
         Screen::Connect(_) => form::render_connect(frame, app, body),
         Screen::StartDir(_) => form::render_start_dir(frame, app, body),
         Screen::Approvals(_) => form::render_approvals(frame, app, body),
@@ -413,6 +414,11 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, caps: theme::Caps) ->
             ("↵", "activate", KeyCode::Enter),
             ("esc", "back", KeyCode::Esc),
         ],
+        Screen::SandboxMcp(_) => vec![
+            ("↑↓", "move", KeyCode::Down),
+            ("space", "load / unload", KeyCode::Char(' ')),
+            ("esc", "back", KeyCode::Esc),
+        ],
         Screen::Connect(_) => vec![
             ("↑↓", "move", KeyCode::Down),
             ("↵", "connect", KeyCode::Enter),
@@ -776,6 +782,7 @@ pub(crate) mod tests_support {
                 Some(setting(crate::sbx::SANDBOX_FUSE, true)),
                 Some(setting(crate::sbx::CLAUDE_CHROME, false)),
                 Some(setting(crate::sbx::CLAUDE_REMOTE_CONTROL, false)),
+                Some(setting(crate::sbx::TLS_POST_QUANTUM, true)),
             ],
             skills: Some(aisbx_core::testkit::skills_default("readonly")),
             ..Default::default()
@@ -1096,6 +1103,31 @@ pub(crate) mod tests_support {
             focus: 3,
         });
         out.push(("Sandbox skills".to_string(), render(&mut app)));
+        let name = app.sandboxes[0].name.clone();
+        app.sandboxes[0].mcp_gateway = true;
+        app.sandboxes[0].mcp = Some(crate::sbx::McpGateway {
+            mode: crate::sbx::McpMode::Static,
+            servers: vec!["notion".into()],
+        });
+        app.mcp = vec![
+            crate::sbx::McpServer {
+                name: "github".into(),
+                transport: "remote http".into(),
+                status: "needs auth · sbx mcp auth github".into(),
+                kind: "remote".into(),
+            },
+            crate::sbx::McpServer {
+                name: "notion".into(),
+                transport: "remote http".into(),
+                status: "ready".into(),
+                kind: "remote".into(),
+            },
+        ];
+        app.screen = Screen::SandboxMcp(crate::app::SandboxMcpForm {
+            sandbox: name,
+            focus: 0,
+        });
+        out.push(("Sandbox MCP servers".to_string(), render(&mut app)));
 
         // Connecting an editor: a launchable target and one configured inside the app.
         for (title, focus) in [("terminal", 0usize), ("IntelliJ", 3)] {
@@ -1442,10 +1474,11 @@ mod tests {
             Some(setting(crate::sbx::SANDBOX_FUSE, true)),
             Some(setting(crate::sbx::CLAUDE_CHROME, false)),
             Some(setting(crate::sbx::CLAUDE_REMOTE_CONTROL, true)),
+            Some(setting(crate::sbx::TLS_POST_QUANTUM, false)),
         ];
         form.skills = Some(aisbx_core::testkit::skills_default("readonly"));
         let screen = super::tests_support::render_at(&mut app, 110, 30);
-        let [telemetry, copy, paste, fuse, chrome, remote] = crate::app::SETTINGS;
+        let [telemetry, copy, paste, fuse, chrome, remote, tls] = crate::app::SETTINGS;
         for text in [
             "Settings",
             telemetry.label,
@@ -1460,6 +1493,8 @@ mod tests {
             chrome.meaning(false),
             remote.label,
             remote.meaning(true),
+            tls.label,
+            tls.meaning(false),
             crate::app::SKILLS_DEFAULT_LABEL,
             "read-only",
             "Close",
@@ -1470,6 +1505,7 @@ mod tests {
             (chrome.label, "off"),
             (remote.label, "on"),
             (fuse.label, "on"),
+            (tls.label, "off"),
         ] {
             let line = (screen.lines())
                 .find(|l| l.contains(label))
@@ -4964,6 +5000,39 @@ mod tests {
         let screen = super::tests_support::render_at(&mut app, 110, 40);
         assert!(line_with(&screen, " web ").contains("own · off for all sandboxes"));
         assert!(line_with(&screen, " web ").contains("● on"), "{screen}");
+    }
+
+    #[test]
+    fn the_mcp_screen_shows_which_servers_the_sandbox_has_loaded() {
+        let mut app = app_with(populated());
+        app.cursor = 0;
+        let name = app.selected().expect("a sandbox").name.clone();
+        let sb = (app.sandboxes.iter_mut()).find(|s| s.name == name).unwrap();
+        sb.mcp_gateway = true;
+        sb.mcp = Some(crate::sbx::McpGateway {
+            mode: crate::sbx::McpMode::Dynamic,
+            servers: vec!["notion".into()],
+        });
+        let server = |name: &str, status: &str| crate::sbx::McpServer {
+            name: name.into(),
+            transport: "remote http".into(),
+            status: status.into(),
+            kind: "remote".into(),
+        };
+        app.mcp = vec![server("github", "ready"), server("notion", "ready")];
+        app.on_key(KeyEvent::from(KeyCode::Char('t')));
+        let screen = super::tests_support::render_at(&mut app, 110, 40);
+        assert!(screen.contains("MCP servers · "), "{screen}");
+        assert!(screen.contains("Dynamic mode:"), "{screen}");
+        assert!(screen.contains("Set up on this computer"), "{screen}");
+        let notion = line_with(&screen, " notion ");
+        assert!(
+            notion.contains("remote http · ready") && notion.contains("● on"),
+            "{screen}"
+        );
+        assert!(line_with(&screen, " github ").contains("○ off"), "{screen}");
+        assert!(screen.contains("space load / unload"), "{screen}");
+        render_all_sizes(&mut app);
     }
 
     #[test]

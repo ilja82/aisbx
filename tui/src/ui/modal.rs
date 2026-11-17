@@ -85,6 +85,7 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
             ("", "a change applies with a rebuild"),
             ("T", "sbx's settings on this computer, such as telemetry"),
             ("i", "the shared skills this sandbox gets: its own switches"),
+            ("t", "the MCP servers loaded in it: load or unload one"),
             ("r", "rename it"),
             ("R", "rebuild it from its kits"),
             ("s", "stop it"),

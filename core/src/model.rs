@@ -236,6 +236,9 @@ pub struct Sandbox {
     /// Injected secrets as (name, source) — never the values, which stay on the host.
     pub secrets: Vec<(String, String)>,
     pub mcp_gateway: bool,
+    /// The MCP gateway's mode and loaded servers as `sbx inspect` reports them, also while it is
+    /// stopped; `None` when sbx reports no mode. Read each refresh, never remembered.
+    pub mcp: Option<sbx::McpGateway>,
 }
 
 impl Sandbox {
@@ -819,6 +822,7 @@ pub fn resolve(snapshot: &Snapshot, catalog: &Catalog, registry: &mut Registry) 
             });
 
         let inspect = raw.inspect.clone().unwrap_or_default();
+        let mcp = inspect.mcp();
         let host_mounts = raw.inspect.is_some().then(|| {
             bind_mounts(
                 &inspect.bind_mounts(),
@@ -883,6 +887,7 @@ pub fn resolve(snapshot: &Snapshot, catalog: &Catalog, registry: &mut Registry) 
                 .map(|s| (s.name, s.source))
                 .collect(),
             mcp_gateway: inspect.mcp_gateway,
+            mcp,
             name,
         });
     }
@@ -1695,6 +1700,7 @@ pub fn sample(name: &str, backend: Option<&str>, addons: &[&str]) -> Sandbox {
         policy_scope: "global".into(),
         secrets: Vec::new(),
         mcp_gateway: false,
+        mcp: None,
     }
 }
 

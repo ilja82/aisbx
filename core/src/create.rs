@@ -984,6 +984,22 @@ pub fn mcp_set(servers: &[String]) -> Option<String> {
     }
 }
 
+/// The details' MCP value: the gateway as sbx reports it, else the set the registry recorded at
+/// creation ([`mcp_set`]).
+pub fn mcp_line(gateway: Option<&crate::sbx::McpGateway>, recorded: &[String]) -> String {
+    use crate::sbx::McpMode;
+    let Some(gateway) = gateway else {
+        return mcp_set(recorded).unwrap_or_else(|| HOST_MCP.to_string());
+    };
+    let names = gateway.servers.join(" ");
+    match (gateway.mode, gateway.servers.is_empty()) {
+        (McpMode::Static, true) => "none".into(),
+        (McpMode::Static, false) => names,
+        (McpMode::Dynamic, true) => HOST_MCP.into(),
+        (McpMode::Dynamic, false) => format!("{names} loaded, and {HOST_MCP}"),
+    }
+}
+
 /// The GUI's marker on a kit that `sbx kit add` can add to the sandbox later: the GUI marks the
 /// few exceptions, the TUI marks the rule ([`ONLY_NOW`]).
 pub const ADD_LATER: &str = "can add later";
@@ -3145,6 +3161,29 @@ mod tests {
         let set = ["github".to_string(), "notion".to_string()];
         assert_eq!(mcp_set(&set).as_deref(), Some("github notion"));
         assert_eq!(mcp_set(&["NONE".to_string()]).as_deref(), Some("none"));
+    }
+
+    #[test]
+    fn the_details_name_the_gateway_sbx_reports_before_the_recorded_set() {
+        use crate::sbx::{McpGateway, McpMode};
+        let gateway = |mode, servers: &[&str]| McpGateway {
+            mode,
+            servers: servers.iter().map(|s| s.to_string()).collect(),
+        };
+        let recorded = ["linear".to_string()];
+        let line = |g: McpGateway| mcp_line(Some(&g), &recorded);
+        assert_eq!(line(gateway(McpMode::Static, &[])), "none");
+        assert_eq!(
+            line(gateway(McpMode::Static, &["github", "notion"])),
+            "github notion"
+        );
+        assert_eq!(line(gateway(McpMode::Dynamic, &[])), HOST_MCP);
+        assert_eq!(
+            line(gateway(McpMode::Dynamic, &["notion"])),
+            format!("notion loaded, and {HOST_MCP}")
+        );
+        assert_eq!(mcp_line(None, &recorded), "linear");
+        assert_eq!(mcp_line(None, &[]), HOST_MCP);
     }
 
     /// The row the wizard's one cursor is on.

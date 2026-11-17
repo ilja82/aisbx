@@ -60,10 +60,18 @@ $ sh tests/step-test.sh                           # one live checks step; skips 
 
 ## sbx version
 
-The dashboard needs **sbx 0.53.0** or later and refuses an older sbx. The JSON it reads and every kit build are
-measured on sbx 0.53.0. The checks by hand in [On an upgrade](#on-an-upgrade) were last run on sbx 0.50. aisbx uses
+The dashboard needs **sbx 0.54.0** or later and refuses an older sbx. The JSON it reads and every kit build are
+measured on sbx 0.54.0. The checks by hand in [On an upgrade](#on-an-upgrade) were last run on sbx 0.50. aisbx uses
 these sbx features, which older releases lack:
 
+- `sbx port ls`, `sbx port publish` and `sbx port unpublish` read and change the published ports. The Ports tab, `p`
+  and `u` use them. sbx deprecates the older `sbx ports`.
+- `sbx inspect` reports the mode of a sandbox's MCP gateway and the servers it has loaded. The details pane shows
+  them, the MCP screen (`t`) loads and unloads servers, and a rebuild loads them again.
+- `sbx policy check network` names the rule that allowed a host. The answer to `c` says who put that rule there.
+- The setting `tls.postQuantumKeyExchange` turns post-quantum key exchange in sbx's own TLS connections off. The
+  Settings screen offers it.
+- `sbx diagnose --format json` gives each check a stable `id`. `aisbx doctor` reports the checks that did not pass.
 - `sbx df --json` reports the size of each container. The details pane and the prune confirmation show it.
 - The setting `claude.chrome` lets Claude Code use Claude in Chrome. The Settings screen offers it.
 - `sbx run --workdir` opens the agent in its start folder, with the kit's own launch command.
@@ -73,6 +81,13 @@ these sbx features, which older releases lack:
 
 sbx 0.53.0 refuses to create a sandbox whose name differs from another one's only in upper and lower case
 ([Breaking changes](deprecations.md#breaking-changes)).
+
+sbx 0.54.0 serves the clone-mode Git remote through its daemon socket. It refuses to publish sandbox port 9418 on a
+clone-mode sandbox unless `clone.legacyTcpRemote` is on, and in that mode it publishes the port itself. So a rebuild
+of a clone-mode sandbox leaves that port out.
+
+sbx 0.54.0 run as root ignores `HOME` and the `XDG_*` variables and keeps its files under root's registered home
+folder. aisbx run as root then writes sbx's `credentials.yaml` and reads `~/.ssh/config` there too.
 
 sbx 0.51.0 no longer publishes Docker's Codex and OpenCode templates and no longer updates the shell templates. The
 `codex-openai`, `opencode-litellm` and `pi-litellm` kits build on `docker.io/sbx/shell-docker-image`. The build steps
@@ -84,11 +99,11 @@ check that the daemon socket belongs to the same user.
 
 ### aisbx version
 
-The aisbx version is the sbx version it needs plus a counter: aisbx **0.53.0.0** needs sbx 0.53.0. Count the last
+The aisbx version is the sbx version it needs plus a counter: aisbx **0.54.0.0** needs sbx 0.54.0. Count the last
 number up for each aisbx release on the same sbx version. Set it back to 0 when aisbx moves to a newer sbx.
 
-Cargo accepts only three numbers, so the root `Cargo.toml` writes 0.53.0.0 as `version = "0.53.0+0"`.
-`aisbx --version` and `aisbx-ui --version` print 0.53.0.0. A test in `core/src/lib.rs` fails when the first three
+Cargo accepts only three numbers, so the root `Cargo.toml` writes 0.54.0.0 as `version = "0.54.0+0"`.
+`aisbx --version` and `aisbx-ui --version` print 0.54.0.0. A test in `core/src/lib.rs` fails when the first three
 numbers differ from `sbx::REQUIRED_VERSION`.
 
 ### Rules for sbx calls
@@ -107,7 +122,7 @@ aisbx does not use these sbx features. Test the reason again before you add one.
   `resources@1`, `privileged@1`, `git-identity@1`, `ssh-agent@1` and `long-running@1`.
 - `sbx run --model` with `model.providers`, `sbx run --rm`, kit arguments (`--kit-arg`) and `-e` / `--env`.
 - `sbx mount`, `host-mount@1` and `sbx create --mount HOST:SANDBOX_PATH`.
-- `sbx mcp load` / `unload` (see [MCP servers](sandboxes.md#mcp-servers)) and `sbx setup ssh --auto-create`.
+- `sbx setup ssh --auto-create`.
 - Cloud sandboxes (`--cloud`).
 
 ### On an upgrade
@@ -144,9 +159,9 @@ platform on the GitHub release page.
 
    ```console
    $ python3 scripts/package.py version
-   0.53.0.0
-   $ git tag v0.53.0.0
-   $ git push origin v0.53.0.0
+   0.54.0.0
+   $ git tag v0.54.0.0
+   $ git push origin v0.54.0.0
    ```
 
 3. The workflow stops when the tag is not `v` plus the `Cargo.toml` version. Otherwise it makes a draft

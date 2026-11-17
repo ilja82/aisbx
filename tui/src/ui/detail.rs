@@ -618,9 +618,8 @@ fn overview_parts(sb: &Sandbox, app: &App) -> (Vec<Line<'static>>, Vec<Line<'sta
     }
 
     if sb.mcp_gateway {
-        let servers = app.registry.static_mcp(&sb.name);
-        let set = crate::create::mcp_set(&servers);
-        let set = set.unwrap_or_else(|| crate::create::HOST_MCP.to_string());
+        let recorded = app.registry.static_mcp(&sb.name);
+        let set = crate::create::mcp_line(sb.mcp.as_ref(), &recorded);
         lines.push(field("mcp", vec![Span::styled(set, theme::muted())]));
     }
 

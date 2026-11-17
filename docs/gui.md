@@ -202,12 +202,13 @@ The window has the dashboard's forms. It shows them as the create wizard, pages,
 
 ### Pages
 
-`A`, `S` (with the LiteLLM connection dialog), `K`, `i` and `y` each open a page of their own. A page is a centred
-column under the page's title, with its buttons along the window's foot.
+`A`, `S` (with the LiteLLM connection dialog), `K`, `i`, `t` and `y` each open a page of their own. A page is a
+centred column under the page's title, with its buttons along the window's foot.
 
 - The account forms and the connection dialog use the wizard's tiles, radios and input boxes.
 - The pages that list things show every item with its own buttons: *Allow* and *Dismiss* on a request; *Edit*,
-  *Replace*, *Store*, *Delete* or *Sign out* on a secret; *Remove* on a skill; *New LiteLLM connection* on `S`.
+  *Replace*, *Store*, *Delete* or *Sign out* on a secret; *Remove* on a skill; *New LiteLLM connection* on `S`. A
+  skill on `K` and `i` and an MCP server on `t` have a switch at the right edge.
 - A click on an item selects it and shows what core says about it under it. The keys work as in `aisbx`.
 - Tokens and keys show as dots.
 
