@@ -37,8 +37,9 @@ They use the same kits, sandbox names, LiteLLM connections and setup tokens, and
 | `aisbx skills` | `sbx skills ls --json`; `on` and `off` for one sandbox also `sbx ls --json`. The switches are a file in the aisbx state folder |
 | `aisbx status` | `sbx ls --json`, `sbx inspect --json` and `sbx policy approval ls --json` |
 | `aisbx stop` / `rm` | `sbx stop` / `sbx rm --force` |
-| `aisbx step` | `up` with `--deny-network`, `sbx policy ls`, `sbx policy check network` (in parallel), `sbx policy log`, the agent or checks through `sbx exec`, then `rm` and `sbx ls` to prove the removal ([The step protocol](step-protocol.md)) |
-| `aisbx doctor` | `sbx version --json`, `sbx ls --json`, `sbx policy ls --json`, `sbx diagnose --format json`; the kit folders on this computer |
+| `aisbx step` | `up` with `--deny-network`, `sbx policy ls`, `sbx policy check network` (in parallel), `sbx policy log`, the agent or checks and the commands before and after them through `sbx exec`, `sbx inspect`, then `rm` and `sbx ls` to prove the removal ([The step protocol](step-protocol.md)) |
+| `aisbx kit build` | `sbx kit validate` for each kit folder a step would create from |
+| `aisbx doctor` | `sbx version --json`, `sbx ls --json`, `sbx policy ls --json`, `sbx diagnose --format json`; the kit folders on this computer; with `--kit`, `sbx template ls --json` |
 
 ![A script runs aisbx up, which runs sbx create and prints the sandbox name. aisbx run NAME runs sbx exec for the agent update and the prompt upload, then the agent in print mode, whose output reaches the script on stdout, then dismisses held network requests. aisbx rm runs sbx rm --force.](images/headless-run.png)
 
@@ -229,19 +230,32 @@ The agent's output comes through untouched:
 ### `aisbx step`
 
 `step --spec FILE --dir DIR` runs one unit of work in a fresh sandbox and removes the sandbox again, all in one
-process: create with every unwanted host denied, prove the network, run the agent or a list of check commands,
-read the proxy log, remove, report. A script calls it once per pipeline step, reads NDJSON events from stdout while
+process: create with every unwanted host denied, prove the network, run the agent or a list of check commands
+(with the spec's fixed commands before and after it), read the proxy log, remove, report. A script calls it once per pipeline step, reads NDJSON events from stdout while
 it runs, and finds the artefacts (`stream.ndjson` or `checks.json`, `policy.json`, the proxy logs, `report.json`) in
-`DIR` afterwards. `--prewarm` creates and proves only, for a later step with the same spec. `step --protocol`
+`DIR` afterwards. A spec may also open the whole web on 443 to a research step, with a proven deny list. `--prewarm`
+creates and proves only, for a later step with the same spec. `step --protocol`
 prints the protocol version a script pins. [The step protocol](step-protocol.md) is the contract, with the spec
 file, every event, the report and the exit codes.
+
+### `aisbx kit build`
+
+`kit build --kit NAME… [--backend B] [--json]` builds the kit images a step with these kits and backend creates
+from, or finds them built, outside any step. A step whose spec says `kits_prebuilt` then never builds: it creates
+from them, or stops at once. `--backend` defaults to `claude-anthropic`. [Kit images](step-protocol.md#kit-images-protocol-2)
+describes the output and the image key.
 
 ### `aisbx doctor`
 
 `doctor [--json]` says what a script needs before its first `up` or `step`: the aisbx version and its step
 protocol, the sbx version and whether it is new enough, whether sbx is signed in, whether the policy has its
-deny-all fallback, the user kit folders searched, and every kit found or skipped. It exits 0 whatever it finds; the
-`problems` list and `ok` say what is wrong.
+deny-all fallback, the user kit folders searched, every kit found or skipped, and how many steps may run at once
+and run now (`step_concurrency`, see [Several steps at once](step-protocol.md#several-steps-at-once-protocol-2)). It
+exits 0 whatever it finds; the `problems` list and `ok` say what is wrong.
+
+`doctor --kit K[,K…] [--kit …] [--backend B]` also says, for each kit set, whether its kit images are `ready` for a
+step with `kits_prebuilt`, `missing` or `stale` (built before a kit file changed). Each `--kit` is one set, its
+kits separated by commas. A set that is not ready is a problem that names the `aisbx kit build` to run.
 
 It also runs sbx's own checks, `sbx diagnose --format json`. `sbx_diagnose` in the JSON counts them (`checks`) and
 lists each that warned or failed (`findings`: `id`, `status`, `message`, `hint`). Match a check by its `id`: sbx keeps
