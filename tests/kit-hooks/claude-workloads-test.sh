@@ -161,10 +161,41 @@ EOF
   check "statusline: exits 0" same "$?" 0
   check "statusline: the bar points at the image's script" same \
     "$(j .statusLine.command "$H/.claude/settings.json")" '"/usr/local/lib/aisbx/statusline/statusline.sh"'
-  check "statusline: and the subagent rows" same \
-    "$(j .subagentStatusLine.command "$H/.claude/settings.json")" '"/usr/local/lib/aisbx/statusline/subagent-statusline.sh"'
+  check "statusline: no subagentStatusLine" same "$(j 'has("subagentStatusLine")' "$H/.claude/settings.json")" false
+  check "statusline: registers the mod for the subagent rows" same \
+    "$(j .env.CLAUDE_CODE_PLUGIN_DIRS "$H/.claude/settings.json")" '"/usr/local/lib/aisbx/statusline/mod"'
   check "statusline: the seeded mode stays" same "$(j .permissions.defaultMode "$H/.claude/settings.json")" \
     '"bypassPermissions"'
+  sl() {
+    env -i PATH="/usr/bin:/bin" AISBX_STATUSLINE_SETTINGS="$H/.claude/settings.json" \
+      sh "$root/kits/statusline/files/statusline/install.sh"
+  }
+  old_rows=/usr/local/lib/aisbx/statusline/subagent-statusline.sh
+  printf '{"subagentStatusLine":{"type":"command","command":"%s"},"env":{"CLAUDE_CODE_PLUGIN_DIRS":"/x","A":"1"}}\n' \
+    "$old_rows" > "$H/.claude/settings.json"
+  sl
+  check "statusline: an old sandbox loses the kit's subagentStatusLine" same \
+    "$(j 'has("subagentStatusLine")' "$H/.claude/settings.json")" false
+  check "statusline: and appends the mod to its plugin dirs" same \
+    "$(j .env "$H/.claude/settings.json")" '{"CLAUDE_CODE_PLUGIN_DIRS":"/x:/usr/local/lib/aisbx/statusline/mod","A":"1"}'
+  check "statusline: and still points the bar at the image's script" same \
+    "$(j .statusLine.command "$H/.claude/settings.json")" '"/usr/local/lib/aisbx/statusline/statusline.sh"'
+  cp "$H/.claude/settings.json" "$scratch/settings.once"
+  sl
+  check "statusline: a second run changes nothing" cmp -s "$scratch/settings.once" "$H/.claude/settings.json"
+  printf '{"subagentStatusLine":{"type":"command","command":"/home/agent/my.sh"}}\n' > "$H/.claude/settings.json"
+  sl
+  check "statusline: a subagentStatusLine of the user's own stays" same \
+    "$(j .subagentStatusLine.command "$H/.claude/settings.json")" '"/home/agent/my.sh"'
+  mod=$root/kits/statusline/files/statusline/mod
+  check "statusline: the mod's manifests are JSON" sh -c 'jq -e . "$1" "$2" >/dev/null' sh \
+    "$mod/.claude-plugin/plugin.json" "$mod/hooks/hooks.json"
+  check "statusline: the mod is aisbx-statusline" same "$(j .name "$mod/.claude-plugin/plugin.json")" '"aisbx-statusline"'
+  check "statusline: hooks.json names register.ts" same "$(j .modules "$mod/hooks/hooks.json")" '["./register.ts"]'
+  check "statusline: the mod hooks the agent rows" grep -q "on('ui.render', { component: 'AgentRow' }" \
+    "$mod/hooks/register.ts"
+  check "statusline: and runs the image's row script" grep -qF "'$old_rows'" "$mod/hooks/register.ts"
+  check "statusline: and falls back to the default row" grep -q "return next(e)" "$mod/hooks/register.ts"
   printf 'not json\n' > "$H/.claude/settings.json"
   env -i PATH="/usr/bin:/bin" AISBX_STATUSLINE_SETTINGS="$H/.claude/settings.json" \
     sh "$root/kits/statusline/files/statusline/install.sh" 2>/dev/null
