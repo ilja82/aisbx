@@ -9,9 +9,10 @@ description: >-
   (⬢ name), which stackable kits are on it, the folder, the model and the live context
   fill, and under that the session total (Σ, subagents included), what it has cost and how
   much of the 5h/7d limit is left. Plus a row body for each running subagent in the panel
-  under the prompt - its own context fill, runtime, pace and a sparkline. Ships
-  /usr/local/lib/aisbx/statusline/{statusline,subagent-statusline}.sh and points
-  ~/.claude/settings.json at them from an install hook. Adds no network egress and installs
+  under the prompt - its own context fill, runtime, pace and a sparkline, drawn by a Claude
+  Code mod. Ships /usr/local/lib/aisbx/statusline/{statusline,subagent-statusline}.sh and
+  the mod in /usr/local/lib/aisbx/statusline/mod, and points ~/.claude/settings.json at the
+  bar and the mod from an install hook. Adds no network egress and installs
   nothing. Inert on an OpenCode sandbox - OpenCode does not read ~/.claude/settings.json. See
   README.md ("Status line inside the sandbox").
 
@@ -24,4 +25,4 @@ capabilities:
       install:
         - command: ["sh", "/usr/local/lib/aisbx/statusline/install.sh"]
           user: agent
-          description: Point ~/.claude/settings.json at statusline.sh and subagent-statusline.sh (merged)
+          description: Point ~/.claude/settings.json at statusline.sh and the subagent-row mod (merged)

@@ -245,6 +245,13 @@ Each running subagent gets a row with its context fill, runtime, pace (`idle` af
 Throwaway task · ctx 15k/1M (1%) · 0:35 · ≈26k/min · ▇▃▁▂▁▁▁
 ```
 
+A Claude Code mod draws these rows: the plugin `aisbx-statusline` in `/usr/local/lib/aisbx/statusline/mod`, which runs
+`subagent-statusline.sh` for each row. The install hook lists that folder in `env.CLAUDE_CODE_PLUGIN_DIRS` of
+`~/.claude/settings.json`, after any folders already there, and removes the kit's older `subagentStatusLine` entry,
+which Claude Code deprecated. An entry of your own stays. To get the default rows back, remove the folder from
+`CLAUDE_CODE_PLUGIN_DIRS`. A Claude Code without mods, or a `CLAUDE_CODE_PLUGIN_DIRS` set in the process environment,
+shows the default rows.
+
 ### Where the label and the kits come from
 
 The label is the dashboard's label. A rename (`r`) shows at the next start. A sandbox started another way (`x`,
@@ -252,7 +259,7 @@ The label is the dashboard's label. A rename (`r`) shows at the next start. A sa
 
 ### What the kit installs
 
-Two scripts and their entries in `~/.claude/settings.json`. It opens no egress. The same script works on the host as
+Two scripts, the mod, and their entries in `~/.claude/settings.json`. It opens no egress. The same script works on the host as
 `~/.claude/statusline.sh`, without the `⬢` segment.
 
 ### Write your own status line

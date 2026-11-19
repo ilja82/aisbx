@@ -1,0 +1,5 @@
+{
+  "name": "aisbx-statusline",
+  "version": "0.1.0",
+  "description": "Subagent rows of the aisbx statusline kit: context fill, runtime, pace and a sparkline"
+}
