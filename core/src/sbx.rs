@@ -2948,6 +2948,29 @@ pub fn secret_rm_litellm_key_argv(placeholder: &str) -> Vec<String> {
     ]
 }
 
+fn contains_standalone_25244(output: &str) -> bool {
+    const CODE: &str = "-25244";
+    output.match_indices(CODE).any(|(at, _)| {
+        let before = output[..at].chars().next_back();
+        let after = output[at + CODE.len()..].chars().next();
+        !before.is_some_and(|c| c.is_alphanumeric() || c == '-' || c == '_')
+            && !after.is_some_and(|c| c.is_ascii_digit())
+    })
+}
+
+pub fn secret_rm_keychain_owner_hint(output: &str) -> Option<&'static str> {
+    if contains_standalone_25244(output)
+        || output.contains("An invalid attempt to change the owner of an item")
+    {
+        Some(
+            "Cause: the macOS keychain item belongs to another owner or has another access setting, so sbx cannot delete it.\n\
+             Workaround: open Keychain Access and search for the item this command removes: the placeholder shown above for a token or a key, or the service name (and sandbox) in the command for a service secret. Delete that item, then close this log, or press F5 or Ctrl+R in Stored secrets, to refresh the list.",
+        )
+    } else {
+        None
+    }
+}
+
 /// Drop a named token from the host, and with it the account every sandbox pointed at that name
 /// was using. Only ever reached from the secrets screen: deleting a *sandbox* never touches a
 /// shared token.
@@ -3530,6 +3553,30 @@ mod tests {
                 template: None,
             }
         };
+    }
+
+    #[test]
+    fn the_keychain_owner_error_gets_a_hint() {
+        let line =
+            "error: delete custom secret: An invalid attempt to change the owner of an item. (-25244)";
+        assert!(secret_rm_keychain_owner_hint(line).is_some());
+        assert!(secret_rm_keychain_owner_hint("failed (-25244)").is_some());
+        assert!(secret_rm_keychain_owner_hint("OSStatus: -25244").is_some());
+        assert!(secret_rm_keychain_owner_hint("-25244").is_some());
+        assert_eq!(
+            secret_rm_keychain_owner_hint("sbx-cs-aisbx-llm-conn-25244"),
+            None
+        );
+        assert_eq!(secret_rm_keychain_owner_hint("-252440"), None);
+        let message = "An invalid attempt to change the owner of an item";
+        assert!(secret_rm_keychain_owner_hint(message).is_some());
+        let hint = secret_rm_keychain_owner_hint(line).unwrap();
+        assert!(hint.contains("Keychain Access"), "{hint}");
+        assert!(hint.contains("service name"), "{hint}");
+        assert_eq!(secret_rm_keychain_owner_hint("error: no such secret"), None);
+        let table = "(global)   host   -   sbx-cs-aisbx-llm-conn-25244   key";
+        assert_eq!(secret_rm_keychain_owner_hint(table), None);
+        assert_eq!(secret_rm_keychain_owner_hint(""), None);
     }
 
     #[test]
