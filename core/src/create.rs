@@ -2645,8 +2645,8 @@ impl CreateForm {
             ),
             CreateRow::McpNone => Help::new(
                 NO_MCP,
-                "On by default: the agent gets no MCP servers and cannot add any. Untick it for the \
-                 agent to find and add the MCP servers set up on this computer.",
+                "When enabled (the default), the agent gets no MCP servers and cannot add any. \
+                 Otherwise, it can use the MCP servers set up on this computer.",
             ),
             CreateRow::Mcp(i) => {
                 let Some(server) = ws.mcp.get(i) else {
