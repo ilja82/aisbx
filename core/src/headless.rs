@@ -61,7 +61,9 @@ HEADLESS USE — the same kits and names as the dashboard, for scripts:
                                reads the history but cannot commit or change hooks
         --no-host-folders      mount neither the folders of `aisbx folders` nor those the
                                workspace's companion.json names (mounted by default)
-        --no-mcp               no MCP servers and no tools to find the host's; applied at
+        --no-mcp               no MCP servers and no tools to find the host's (the default
+                               at creation, so the flag changes nothing)
+        --mcp                  let the agent find and add the host's MCP servers; applied at
                                creation only (an existing sandbox keeps what it has)
 
     aisbx run NAME (--prompt TEXT | --prompt-file FILE|-) [options] [-- AGENT_ARGS]
@@ -549,6 +551,7 @@ pub(crate) fn up_inner(raw: &[String]) -> Result<String, Fail> {
             "git-readonly",
             "no-host-folders",
             "no-mcp",
+            "mcp",
         ],
         &[
             "backend",
@@ -572,6 +575,7 @@ pub(crate) fn up_inner(raw: &[String]) -> Result<String, Fail> {
     if !args.trailing.is_empty() {
         return Err(Fail::usage("up takes no agent arguments"));
     }
+    check_mcp_flags(&args)?;
     let skill_specs = args.all("skill");
     if let Some(line) = up_skill_note(&skill_specs) {
         eprintln!("{line}");
@@ -773,11 +777,13 @@ pub(crate) fn up_inner(raw: &[String]) -> Result<String, Fail> {
                 }
             }
         }
-        if args.has("no-mcp") {
-            eprintln!(
-                "aisbx: warning: --no-mcp only applies when a sandbox is created; it cannot be \
-                 checked or changed on the existing {name}"
-            );
+        for flag in ["no-mcp", "mcp"] {
+            if args.has(flag) {
+                eprintln!(
+                    "aisbx: warning: --{flag} only applies when a sandbox is created; it cannot \
+                     be checked or changed on the existing {name}"
+                );
+            }
         }
         eprintln!("aisbx: {name} exists ({}) — reusing it", existing.status);
         match inspected {
@@ -893,6 +899,9 @@ pub(crate) fn up_inner(raw: &[String]) -> Result<String, Fail> {
     approve_credentials(&kit_dirs);
     let kit_refs: Vec<&Path> = kit_dirs.iter().map(PathBuf::as_path).collect();
     let static_mcp = static_mcp_for(&args);
+    if !args.has("mcp") && !args.has("no-mcp") {
+        eprintln!("{}", compat::mcp_default_warning());
+    }
     let argv = sbx::create_argv(sbx::Create {
         name: &name,
         agent: &backend.agent,
@@ -934,10 +943,7 @@ pub(crate) fn up_inner(raw: &[String]) -> Result<String, Fail> {
     registry.set_display_name(&name, Some(label));
     registry.set_clone(&name, args.has("clone"));
     registry.set_skills(&name, skills);
-    if !static_mcp.is_empty() {
-        // The same record the dashboard keeps, so a rebuild repeats the choice.
-        registry.set_static_mcp(&name, static_mcp);
-    }
+    registry.set_static_mcp(&name, static_mcp);
     if let Some(token) = &token {
         registry.set_last_token(token);
     }
@@ -1034,11 +1040,18 @@ fn note_not_in_store(flags: &[(String, bool)]) {
     }
 }
 
-/// The fixed MCP set `up` asks sbx for: none at all with `--no-mcp`, else sbx's default (no flag).
+/// The fixed MCP set `up` asks sbx for: none at all, unless `--mcp` keeps sbx's default (no flag).
 fn static_mcp_for(args: &Args) -> Vec<String> {
-    match args.has("no-mcp") {
-        true => vec![sbx::STATIC_MCP_NONE.to_string()],
-        false => Vec::new(),
+    match args.has("mcp") {
+        true => Vec::new(),
+        false => vec![sbx::STATIC_MCP_NONE.to_string()],
+    }
+}
+
+fn check_mcp_flags(args: &Args) -> Result<(), Fail> {
+    match args.has("mcp") && args.has("no-mcp") {
+        true => Err(Fail::usage("--mcp and --no-mcp exclude each other")),
+        false => Ok(()),
     }
 }
 
@@ -6807,7 +6820,7 @@ mod tests {
     }
 
     fn parse_up(raw: &[&str]) -> Args {
-        Args::parse(&strings(raw), &["no-mcp"], &[]).unwrap()
+        Args::parse(&strings(raw), &["no-mcp", "mcp"], &[]).unwrap()
     }
 
     fn create_argv_for(args: &Args) -> Vec<String> {
@@ -6833,8 +6846,12 @@ mod tests {
 
     #[test]
     fn no_mcp_passes_static_mcp_none_once() {
-        let args = parse_up(&["--no-mcp"]);
-        let argv = create_argv_for(&args);
+        for raw in [&["--no-mcp"][..], &[][..]] {
+            assert_none_once(&create_argv_for(&parse_up(raw)));
+        }
+    }
+
+    fn assert_none_once(argv: &[String]) {
         let at: Vec<usize> = (0..argv.len())
             .filter(|&i| argv[i] == "--static-mcp")
             .collect();
@@ -6844,12 +6861,23 @@ mod tests {
     }
 
     #[test]
-    fn without_no_mcp_the_argv_has_no_static_mcp() {
-        let args = parse_up(&[]);
+    fn mcp_keeps_the_dynamic_mode() {
+        let args = parse_up(&["--mcp"]);
         assert!(static_mcp_for(&args).is_empty());
         let argv = create_argv_for(&args);
         let has_flag = argv.iter().any(|a| a == "--static-mcp");
         assert!(!has_flag, "{argv:?}");
+    }
+
+    #[test]
+    fn mcp_and_no_mcp_exclude_each_other() {
+        let both = parse_up(&["--mcp", "--no-mcp"]);
+        let fail = check_mcp_flags(&both).expect_err("refused");
+        assert_eq!(fail.code, EXIT_USAGE);
+        assert!(fail.message.contains("exclude each other"), "{}", fail.message);
+        assert!(check_mcp_flags(&parse_up(&["--mcp"])).is_ok());
+        assert!(check_mcp_flags(&parse_up(&["--no-mcp"])).is_ok());
+        assert!(check_mcp_flags(&parse_up(&[])).is_ok());
     }
 
     #[test]
@@ -6869,6 +6897,8 @@ mod tests {
         assert!(HELP.contains("\n        --no-mcp "));
         let docs = include_str!("../../docs/headless.md");
         assert!(docs.contains("`--no-mcp`"));
+        assert!(HELP.contains("\n        --mcp "));
+        assert!(docs.contains("`--mcp`"));
     }
 
     #[test]

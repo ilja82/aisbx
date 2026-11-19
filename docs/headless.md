@@ -109,7 +109,10 @@ Give the workspace folder as the last argument: `aisbx up --backend <kit> [optio
 | `--ssh-agent` | forwards the host's SSH agent (off by default) |
 | `--git-readonly` | also mounts the workspace's `.git` read-only: the agent reads the history but cannot commit or change hooks |
 | `--tmpfs-volumes` | keeps the kits' volumes in RAM (see below) |
-| `--no-mcp` | no MCP servers and no tools to find the host's (`sbx create --static-mcp none`, as the dashboard's "none"); applied at creation only: on an existing sandbox it warns on stderr and changes nothing |
+| `--no-mcp` | no MCP servers and no tools to find the host's (`sbx create --static-mcp none`): the default, so the flag changes nothing; accepted for scripts that pass it |
+| `--mcp` | lets the agent find and add the host's MCP servers (sbx's dynamic mode, no `--static-mcp`); with `--no-mcp` it exits 2; applied at creation only: on an existing sandbox it warns on stderr and changes nothing |
+
+A create with neither flag prints one note on stderr that MCP is off now ([`mcp-default`](deprecations.md#mcp-default)).
 
 #### `up --kit` on an existing sandbox
 
