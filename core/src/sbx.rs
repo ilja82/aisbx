@@ -2948,8 +2948,18 @@ pub fn secret_rm_litellm_key_argv(placeholder: &str) -> Vec<String> {
     ]
 }
 
+fn contains_standalone_25244(output: &str) -> bool {
+    const CODE: &str = "-25244";
+    output.match_indices(CODE).any(|(at, _)| {
+        let before = output[..at].chars().next_back();
+        let after = output[at + CODE.len()..].chars().next();
+        !before.is_some_and(|c| c.is_alphanumeric() || c == '-' || c == '_')
+            && !after.is_some_and(|c| c.is_ascii_digit())
+    })
+}
+
 pub fn secret_rm_keychain_owner_hint(output: &str) -> Option<&'static str> {
-    if output.contains("(-25244)")
+    if contains_standalone_25244(output)
         || output.contains("An invalid attempt to change the owner of an item")
     {
         Some(
@@ -3551,6 +3561,10 @@ mod tests {
             "error: delete custom secret: An invalid attempt to change the owner of an item. (-25244)";
         assert!(secret_rm_keychain_owner_hint(line).is_some());
         assert!(secret_rm_keychain_owner_hint("failed (-25244)").is_some());
+        assert!(secret_rm_keychain_owner_hint("OSStatus: -25244").is_some());
+        assert!(secret_rm_keychain_owner_hint("-25244").is_some());
+        assert_eq!(secret_rm_keychain_owner_hint("sbx-cs-aisbx-llm-conn-25244"), None);
+        assert_eq!(secret_rm_keychain_owner_hint("-252440"), None);
         let message = "An invalid attempt to change the owner of an item";
         assert!(secret_rm_keychain_owner_hint(message).is_some());
         let hint = secret_rm_keychain_owner_hint(line).unwrap();
