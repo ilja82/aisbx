@@ -270,7 +270,7 @@ sbx registers [MCP](https://modelcontextprotocol.io) servers on the host and len
 each server's OAuth token. Register a server, then tick it in the create wizard, or load it into a sandbox later
 with `t`. A rebuild loads the same servers again.
 
-A new sandbox starts with MCP off. The wizard's *MCP servers*, under *More options*, has three answers:
+When no saved answers apply, the wizard starts with *No MCP servers* ticked. Its *MCP servers* row, under *More options*, has three answers:
 
 - **No MCP servers ticked (the default):** the agent gets no server and no tools to find or add one
   (`sbx create --static-mcp none`). You can still load a server later with `t`.

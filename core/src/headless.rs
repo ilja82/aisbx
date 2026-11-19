@@ -6871,10 +6871,11 @@ mod tests {
 
     #[test]
     fn mcp_and_no_mcp_exclude_each_other() {
-        let both = parse_up(&["--mcp", "--no-mcp"]);
-        let fail = check_mcp_flags(&both).expect_err("refused");
+        let raw = strings(&["--backend", "claude-anthropic", "--mcp", "--no-mcp"]);
+        let fail = up(&raw).expect_err("refused");
         assert_eq!(fail.code, EXIT_USAGE);
-        assert!(fail.message.contains("exclude each other"), "{}", fail.message);
+        let message = &fail.message;
+        assert!(message.contains("exclude each other"), "{message}");
         assert!(check_mcp_flags(&parse_up(&["--mcp"])).is_ok());
         assert!(check_mcp_flags(&parse_up(&["--no-mcp"])).is_ok());
         assert!(check_mcp_flags(&parse_up(&[])).is_ok());
