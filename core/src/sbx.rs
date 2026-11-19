@@ -3563,7 +3563,10 @@ mod tests {
         assert!(secret_rm_keychain_owner_hint("failed (-25244)").is_some());
         assert!(secret_rm_keychain_owner_hint("OSStatus: -25244").is_some());
         assert!(secret_rm_keychain_owner_hint("-25244").is_some());
-        assert_eq!(secret_rm_keychain_owner_hint("sbx-cs-aisbx-llm-conn-25244"), None);
+        assert_eq!(
+            secret_rm_keychain_owner_hint("sbx-cs-aisbx-llm-conn-25244"),
+            None
+        );
         assert_eq!(secret_rm_keychain_owner_hint("-252440"), None);
         let message = "An invalid attempt to change the owner of an item";
         assert!(secret_rm_keychain_owner_hint(message).is_some());
