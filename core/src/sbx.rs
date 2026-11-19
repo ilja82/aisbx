@@ -2948,6 +2948,19 @@ pub fn secret_rm_litellm_key_argv(placeholder: &str) -> Vec<String> {
     ]
 }
 
+pub fn secret_rm_keychain_owner_hint(output: &str) -> Option<&'static str> {
+    if output.contains("(-25244)")
+        || output.contains("An invalid attempt to change the owner of an item")
+    {
+        Some(
+            "Cause: the macOS keychain item belongs to another owner or has another access setting, so sbx cannot delete it.\n\
+             Workaround: open Keychain Access and search for the item this command removes: the placeholder shown above for a token or a key, or the service name (and sandbox) in the command for a service secret. Delete that item, then close this log, or press F5 or Ctrl+R in Stored secrets, to refresh the list.",
+        )
+    } else {
+        None
+    }
+}
+
 /// Drop a named token from the host, and with it the account every sandbox pointed at that name
 /// was using. Only ever reached from the secrets screen: deleting a *sandbox* never touches a
 /// shared token.
@@ -3530,6 +3543,23 @@ mod tests {
                 template: None,
             }
         };
+    }
+
+    #[test]
+    fn the_keychain_owner_error_gets_a_hint() {
+        let line =
+            "error: delete custom secret: An invalid attempt to change the owner of an item. (-25244)";
+        assert!(secret_rm_keychain_owner_hint(line).is_some());
+        assert!(secret_rm_keychain_owner_hint("failed (-25244)").is_some());
+        let message = "An invalid attempt to change the owner of an item";
+        assert!(secret_rm_keychain_owner_hint(message).is_some());
+        let hint = secret_rm_keychain_owner_hint(line).unwrap();
+        assert!(hint.contains("Keychain Access"), "{hint}");
+        assert!(hint.contains("service name"), "{hint}");
+        assert_eq!(secret_rm_keychain_owner_hint("error: no such secret"), None);
+        let table = "(global)   host   -   sbx-cs-aisbx-llm-conn-25244   key";
+        assert_eq!(secret_rm_keychain_owner_hint(table), None);
+        assert_eq!(secret_rm_keychain_owner_hint(""), None);
     }
 
     #[test]
