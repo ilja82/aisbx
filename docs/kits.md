@@ -29,6 +29,7 @@ Pick the kits in the create wizard (`n`, or **New sandbox**). You can add an *ad
 | `claude-local` | workload on `claude-code-docker` | Claude Code → an inference engine on this computer |
 | `jdk25` | stackable mixin, add-able | Temurin JDK 25 |
 | `rust` | stackable mixin | Rust 1.99.1: rustc, cargo, clippy, rustfmt ([Rust projects](addons.md#rust-projects)) |
+| `swiftlint` | stackable mixin, add-able | SwiftLint 0.65.1 for Linux ([SwiftLint](addons.md#swiftlint-swift-projects)) |
 | `rtk` | stackable mixin, add-able | the RTK token reducer |
 | `headroom` | stackable mixin | **unmeasured**: the headroom context-compression proxy for Claude Code's model requests ([Headroom](addons.md#headroom-context-compression-proxy-unmeasured)) |
 | `ponytail` | stackable mixin | the Ponytail "lazy senior dev" prompt and commands for Claude Code and OpenCode |

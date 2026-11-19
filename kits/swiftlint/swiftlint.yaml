@@ -1,0 +1,8 @@
+# syntax=docker/sandbox-kit:3
+# SwiftLint for Linux: a v3 mixin, its image built from swiftlint.dockerfile.
+schemaVersion: "3"
+kind: mixin
+displayName: SwiftLint 0.65.1
+description: >-
+  Install SwiftLint 0.65.1 (the static Linux build) as swiftlint, so `swiftlint lint` checks Swift code in the
+  sandbox without Xcode. Rules that need SourceKit are skipped with a warning; the rest match macOS.

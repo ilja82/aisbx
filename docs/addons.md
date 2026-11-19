@@ -7,7 +7,7 @@ Addons are kits that you stack onto any backend: build tools, host caches, web a
 Add an addon in one of these ways:
 
 - Tick it in the create wizard (`n`).
-- Press `e` on a sandbox. `jdk25`, `rtk` and `statusline` join a running sandbox.
+- Press `e` on a sandbox. `jdk25`, `rtk`, `statusline` and `swiftlint` join a running sandbox.
 - All other addons join only at creation or with a rebuild, because they have network rules or host folders. See
   [Names, kits and rebuilds](sandboxes.md#names-kits-and-rebuilds).
 
@@ -49,6 +49,22 @@ Use one JDK per sandbox: sbx refuses two kits that set `JAVA_HOME` to different 
 
 Update the version, the dist date and the ten SHA256s. Take them from
 `https://static.rust-lang.org/dist/channel-rust-stable.toml` (each component's `hash`).
+
+## SwiftLint (Swift projects)
+
+`swiftlint` adds SwiftLint 0.65.1, the static Linux build, as `swiftlint`. It lints Swift code in the sandbox
+without Xcode or a Swift toolchain.
+
+- `swiftlint lint --strict` reads the project's `.swiftlint.yml` as on macOS.
+- Rules that need SourceKit are skipped with a warning, for example `statement_position` and
+  `vertical_whitespace_opening_braces`. Keep a macOS lint job in CI for them.
+- The kit opens no network. It builds and tests nothing: Xcode runs only on macOS.
+
+### Move to a new SwiftLint release
+
+Update the version and the two SHA256s. Take them from the release page,
+`https://github.com/realm/SwiftLint/releases` (the `swiftlint_linux_amd64.zip` and `swiftlint_linux_arm64.zip`
+digests).
 
 ## RTK token reducer
 
