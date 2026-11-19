@@ -270,12 +270,17 @@ sbx registers [MCP](https://modelcontextprotocol.io) servers on the host and len
 each server's OAuth token. Register a server, then tick it in the create wizard, or load it into a sandbox later
 with `t`. A rebuild loads the same servers again.
 
-The wizard's *MCP servers*, under *More options*, has three answers:
+When no saved answers apply, the wizard starts with *No MCP servers* ticked. Its *MCP servers* row, under *More options*, has three answers:
 
-- **Nothing ticked:** the agent gets tools to find and attach the host's registered servers itself (dynamic mode).
-- **Servers ticked:** the agent gets only those servers (static mode).
-- **No MCP servers ticked:** the agent gets no server and no tools to find or add one
+- **No MCP servers ticked (the default):** the agent gets no server and no tools to find or add one
   (`sbx create --static-mcp none`). You can still load a server later with `t`.
+- **Nothing ticked:** untick *No MCP servers* to turn MCP on: the agent gets tools to find and attach the host's
+  registered servers itself (dynamic mode).
+- **Servers ticked:** the agent gets only those servers (static mode). Ticking a server unticks *No MCP servers*.
+
+The wizard remembers this answer like the others ([Remembered answers](dashboard.md#remembered-answers-and-checks)),
+and sandboxes that already exist keep what they have. `aisbx up` also starts without MCP; `--mcp` turns it on
+([`up` options](headless.md)). See [`mcp-default`](deprecations.md#mcp-default).
 
 Press `t` on a sandbox to see the servers registered on this computer and which of them the sandbox has loaded.
 Space loads or unloads the one under the cursor: a running agent gets or loses its tools at once, a stopped sandbox
@@ -392,7 +397,7 @@ build and a Gradle build ran as fast at 4 CPUs and 4 GiB.
 | Remove a kit image | `sbx df --verbose` to find an image no container runs, then `sbx template rm --force <image id>` |
 | Connect over SSH | `sbx setup ssh` once, then `ssh <name>.sbx` |
 | Load or unload an MCP server | `sbx mcp load notion --sandbox my-sandbox`, `sbx mcp unload notion --sandbox my-sandbox` |
-| Create without MCP servers | `sbx create --static-mcp none …` |
+| Create without MCP servers (the wizard's default) | `sbx create --static-mcp none …` |
 | A sandbox's own folders | `sbx create ./kits/claude-anthropic . ~/notes:ro` at creation; later, `sbx mount <name> ~/notes` |
 | Host folders | `aisbx folders add ~/notes --purpose "..."` (`--write` for read-write), `aisbx folders ls`, `aisbx folders rm ~/notes` |
 | A folder at a path of its own | `sbx create ./kits/claude-anthropic . ~/libs:/workspace/libs:ro` |

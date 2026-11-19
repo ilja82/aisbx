@@ -250,6 +250,8 @@ fn g1_defaults() {
                 &conn_kit(&app, "claude"),
                 "--name",
                 "claude-litellm-proj",
+                "--static-mcp",
+                "none",
                 "--skills",
                 "readonly",
                 "--cpus",
@@ -271,7 +273,7 @@ fn g1_defaults() {
     assert!(!reg.clone);
     assert_eq!(reg.skills, Some(sbx::SkillsMode::Readonly));
     assert_eq!(reg.start_dir, None);
-    assert!(reg.static_mcp.is_empty());
+    assert_eq!(reg.static_mcp, vec!["none".to_string()]);
 }
 
 #[test]
@@ -317,6 +319,8 @@ fn g2_opencode_options() {
                 "5173",
                 "--deny-network",
                 "api.example.com",
+                "--static-mcp",
+                "none",
                 "--skills",
                 "off",
                 "--cpus",
@@ -336,7 +340,7 @@ fn g2_opencode_options() {
     assert!(reg.clone);
     assert_eq!(reg.skills, Some(sbx::SkillsMode::Off));
     assert_eq!(reg.start_dir, None);
-    assert!(reg.static_mcp.is_empty());
+    assert_eq!(reg.static_mcp, vec!["none".to_string()]);
 }
 
 #[test]
@@ -361,6 +365,8 @@ fn g3_login() {
                 &kit(&app, "jdk25"),
                 "--name",
                 "claude-anthropic-proj",
+                "--static-mcp",
+                "none",
                 "--skills",
                 "readonly",
                 "--cpus",
@@ -380,7 +386,7 @@ fn g3_login() {
     assert!(!reg.clone);
     assert_eq!(reg.skills, Some(sbx::SkillsMode::Readonly));
     assert_eq!(reg.start_dir, None);
-    assert!(reg.static_mcp.is_empty());
+    assert_eq!(reg.static_mcp, vec!["none".to_string()]);
 }
 
 #[test]
@@ -404,6 +410,8 @@ fn g4_named_token() {
                 &path(&crate::tokens::kit_dir("private")),
                 "--name",
                 "claude-token-proj",
+                "--static-mcp",
+                "none",
                 "--skills",
                 "readonly",
                 "--cpus",
@@ -427,7 +435,7 @@ fn g4_named_token() {
         "the v3 token workload declares where Claude Code reads skills"
     );
     assert_eq!(reg.start_dir, None);
-    assert!(reg.static_mcp.is_empty());
+    assert_eq!(reg.static_mcp, vec!["none".to_string()]);
 }
 
 #[test]
@@ -467,6 +475,8 @@ fn g5_new_token() {
                     &path(&crate::tokens::kit_dir("personal")),
                     "--name",
                     "claude-token-proj",
+                    "--static-mcp",
+                    "none",
                     "--skills",
                     "readonly",
                     "--cpus",
@@ -494,7 +504,7 @@ fn g5_new_token() {
     assert!(!reg.clone);
     assert_eq!(reg.skills, Some(sbx::SkillsMode::Readonly));
     assert_eq!(reg.start_dir, None);
-    assert!(reg.static_mcp.is_empty());
+    assert_eq!(reg.static_mcp, vec!["none".to_string()]);
     if !existed {
         crate::tokens::remove_kit("personal").unwrap();
     }
@@ -620,6 +630,8 @@ fn g7_start_dir() {
                 &conn_kit(&app, "claude"),
                 "--name",
                 "claude-litellm-proj",
+                "--static-mcp",
+                "none",
                 "--skills",
                 "readonly",
                 "--cpus",
@@ -641,7 +653,7 @@ fn g7_start_dir() {
     assert!(!reg.clone);
     assert_eq!(reg.skills, Some(sbx::SkillsMode::Readonly));
     assert_eq!(reg.start_dir, Some(PathBuf::from("sub")));
-    assert!(reg.static_mcp.is_empty());
+    assert_eq!(reg.static_mcp, vec!["none".to_string()]);
     let _ = std::fs::remove_dir_all(&base);
 }
 
@@ -689,6 +701,8 @@ fn g7b_more_folders() {
                 &path(&crate::folders::kit_dir("claude-litellm-proj-more")),
                 "--name",
                 "claude-litellm-proj-more",
+                "--static-mcp",
+                "none",
                 "--skills",
                 "readonly",
                 "--cpus",
@@ -837,6 +851,8 @@ fn g9_new_connection() {
                 &path(&beta_kit),
                 "--name",
                 "claude-litellm-proj",
+                "--static-mcp",
+                "none",
                 "--skills",
                 "readonly",
                 "--cpus",

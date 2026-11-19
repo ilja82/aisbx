@@ -21,6 +21,18 @@ gets a section here: its id, the old way, the replacement, your step and the ais
 The commands keep working. `aisbx skill-repo` and `aisbx skill` print one warning on stderr per run; stdout does not
 change. The pre-start sync of the picks warns nothing.
 
+### `mcp-default`
+
+| | |
+| --- | --- |
+| Old way | `aisbx up` created a sandbox in sbx's dynamic MCP mode: the agent could find and add the host's MCP servers. The create wizard opened with no MCP answer ticked, the same mode. |
+| Replacement | MCP is off by default: `aisbx up` passes `--static-mcp none`, and the wizard opens with *No MCP servers* ticked. `aisbx up --mcp` and unticking *No MCP servers* give the old mode ([MCP servers](sandboxes.md#mcp-servers), [`up` options](headless.md)). |
+| Your step | Add `--mcp` to each `aisbx up` that relies on the agent reaching the host's MCP servers. `--no-mcp` stays accepted and changes nothing; both flags together exit 2. In the wizard, untick *No MCP servers* once: the wizard remembers it. |
+| Deprecated in | the first release after 0.54.0.0 |
+
+Sandboxes that exist, the wizard's saved answers and rebuilds do not change. A saved empty MCP answer stays the
+dynamic mode. A create with neither flag prints one note on stderr; stdout does not change.
+
 ## Breaking changes
 
 A break comes from an sbx release that removed what aisbx needs, where no aisbx change can keep the old behavior, or

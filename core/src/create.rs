@@ -1342,8 +1342,8 @@ impl CreateForm {
         }
         let picked = self.selected_mcp();
         if let Some(mcp) = match (ws.no_mcp, picked.is_empty()) {
-            (true, _) => Some(NO_MCP.to_string()),
-            (false, true) => None,
+            (true, _) => None,
+            (false, true) => Some(HOST_MCP.to_string()),
             (false, false) => Some(picked.join(", ")),
         } {
             answer(CreateStep::Workspace, "MCP servers", mcp, false);
@@ -2043,9 +2043,9 @@ impl CreateForm {
                 }
                 let picked = self.selected_mcp();
                 match (ws.no_mcp, picked.is_empty()) {
-                    (true, _) => parts.push(NO_MCP.to_string()),
+                    (true, _) => {}
                     (false, false) => parts.push(format!("MCP {}", picked.join(", "))),
-                    (false, true) => {}
+                    (false, true) => parts.push(format!("MCP {HOST_MCP}")),
                 }
             }
             _ => return None,
@@ -2645,8 +2645,8 @@ impl CreateForm {
             ),
             CreateRow::McpNone => Help::new(
                 NO_MCP,
-                "When enabled, the agent gets no MCP servers and cannot add any. Otherwise, it can \
-                 use the MCP servers set up on this computer.",
+                "When enabled (the default), the agent gets no MCP servers and cannot add any. \
+                 Otherwise, it can use the MCP servers set up on this computer.",
             ),
             CreateRow::Mcp(i) => {
                 let Some(server) = ws.mcp.get(i) else {

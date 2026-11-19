@@ -31,9 +31,23 @@ pub fn skill_repos_quiet(args: &[String]) -> bool {
     args.first().map(String::as_str) == Some("sync") && args.iter().any(|a| a == "--start")
 }
 
+pub fn mcp_default_warning() -> String {
+    "aisbx: note: a new sandbox now starts without MCP servers; pass `--mcp` to let the agent find \
+     the host's servers as before; see docs/deprecations.md#mcp-default"
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcp_default_warning_names_the_flag_and_the_row() {
+        let line = mcp_default_warning();
+        assert!(line.starts_with("aisbx: "), "{line}");
+        assert!(line.contains("`--mcp`"), "{line}");
+        assert!(line.ends_with("docs/deprecations.md#mcp-default"), "{line}");
+    }
 
     #[test]
     fn skill_repos_warnings_name_the_replacement_and_the_row() {

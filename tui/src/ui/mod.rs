@@ -1774,8 +1774,10 @@ mod tests {
         let Screen::Create(form) = &mut app.screen else {
             unreachable!()
         };
-        assert!(form.selected_mcp().is_empty(), "nothing ticked by default");
+        let ticked = form.selected_mcp();
+        assert_eq!(ticked, vec!["none"], "none is ticked by default");
         form.workspace.static_mcp[0] = true;
+        form.workspace.no_mcp = false;
         assert_eq!(form.selected_mcp(), vec!["notion"]);
     }
 
