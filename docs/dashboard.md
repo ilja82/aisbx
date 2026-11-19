@@ -305,15 +305,18 @@ like a setup assistant. In both, click a step to go there.
    connection gets the list, and OpenCode's or Pi's picks, at its next start.
 5. **Kits**: the *Host caches* first, then the other addons.
    - You cannot tick a host cache that this host has nothing for.
-   - The step shows only the addons that work with the harness you picked: the status line and headroom for Claude
-     Code, RTK and Ponytail for Claude Code and OpenCode.
+   - The step shows only the addons that work with the harness you picked: headroom for Claude Code, RTK and
+     Ponytail for Claude Code and OpenCode. The status line is under *More options* on the next step.
    - Most kits can be added only now: adding one later means a rebuild. The terminal marks those *only now*. The
      window marks the few that can be added later, *Can add later*.
 6. **Workspace and options**: the label, where the agent starts, more folders to mount, clone mode,
    *`.git` read-only* and the skills mode. *Shared skills* is a fold with a switch per skill of the store, for this
    sandbox alone ([Switches](skills.md#switches)); it starts on the switches for all sandboxes. *More options* is a
-   fold, closed until you open it, with the ports, the [blocked hosts](network.md#blocked-hosts) and the
-   [MCP servers](sandboxes.md#mcp-servers).
+   fold, closed until you open it, with the [status line](addons.md#status-line-inside-the-sandbox), the ports, the
+   [blocked hosts](network.md#blocked-hosts) and the [MCP servers](sandboxes.md#mcp-servers).
+   - *Status line* is there for Claude Code only, and ticked: a new Claude Code sandbox gets the `statusline` kit.
+     Untick it to create the sandbox without one. The fold then says *no status line*, and the review says
+     *Status line off*.
    - The wizard makes the label from the agent, the provider, the account and the kits until you type one. The
      first character you type replaces it; an arrow key edits it instead.
    - *Starts in* opens a folder picker. `..` at the top mounts the folder above instead (see

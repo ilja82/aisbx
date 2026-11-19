@@ -486,9 +486,21 @@ fn the_golden_answers_through_the_window_start_the_same_job() {
             Do::Enter(provider(Provider::Anthropic)),
             Do::Enter(WizardRow::Agent(0)),
             Do::Enter(WizardRow::Connection(ConnChoice::Login)),
-            Do::Tick(addon("statusline")),
+            Do::Tick(addon("rtk")),
         ],
         true,
+    );
+    // g3b: /login without the status line, unticked under more options.
+    same_job(
+        none,
+        &[
+            Do::Enter(provider(Provider::Anthropic)),
+            Do::Enter(WizardRow::Agent(0)),
+            Do::Enter(WizardRow::Connection(ConnChoice::Login)),
+            Do::Walk(CreateStep::Workspace),
+            Do::Tick(CreateRow::StatusLine),
+        ],
+        false,
     );
     // g4: a stored named token.
     same_job(
@@ -1113,13 +1125,41 @@ fn a_click_on_a_fold_shows_what_it_holds() {
     let mut w = open_form();
     run(&mut w, &[Do::Walk(CreateStep::Workspace)]);
     w.frame(Vec::new());
-    assert!(!w.drawn.iter().any(|t| t == "Ports"), "{:?}", w.drawn);
+    let first = crate::wizard::STATUS_LINE;
+    assert!(!w.drawn.iter().any(|t| t == first), "{:?}", w.drawn);
     let fold = text_from(&w, "More options", 0.0).center();
     click(&mut w, fold);
     assert!(form(&w.app).wizard.advanced_open);
     w.frame(Vec::new());
-    assert!(w.drawn.iter().any(|t| t == "Ports"), "{:?}", w.drawn);
+    assert!(w.drawn.iter().any(|t| t == first), "{:?}", w.drawn);
     assert!(w.drawn.iter().any(|t| t == crate::controls::OPTIONAL));
+}
+
+/// The status line waits under *More options*, ticked; a click on it unticks it, and the create
+/// leaves its kit out.
+#[test]
+fn a_click_on_the_status_line_unticks_it() {
+    let mut w = open_form();
+    run(&mut w, &[Do::Walk(CreateStep::Workspace)]);
+    w.frame(Vec::new());
+    let fold = text_from(&w, "More options", 0.0).center();
+    click(&mut w, fold);
+    w.frame(Vec::new());
+    let status_line = aisbx_core::create::STATUS_LINE_KIT.to_string();
+    assert!(form(&w.app)
+        .selected_addons(&w.app.catalog)
+        .contains(&status_line));
+    let row = step_text(&w, crate::wizard::STATUS_LINE).center();
+    click(&mut w, row);
+    assert!(!form(&w.app)
+        .selected_addons(&w.app.catalog)
+        .contains(&status_line));
+    w.frame(Vec::new());
+    let row = step_text(&w, crate::wizard::STATUS_LINE).center();
+    click(&mut w, row);
+    assert!(form(&w.app)
+        .selected_addons(&w.app.catalog)
+        .contains(&status_line));
 }
 
 /// Where the step draws exactly `text`: right of the rail, which names the answers too.
@@ -1335,6 +1375,7 @@ fn the_kits_step_marks_the_kits_that_can_go_in_later() {
         .collect();
     let later: Vec<&str> = (w.app.catalog.addons.iter())
         .filter(|a| a.create_time_reason().is_none())
+        .filter(|a| a.kit.name != aisbx_core::create::STATUS_LINE_KIT)
         .map(|a| a.kit.display_name.as_str())
         .collect();
     assert_eq!(marked.len(), later.len(), "{later:?}: {:?}", w.drawn);

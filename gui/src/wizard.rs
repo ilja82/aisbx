@@ -1158,7 +1158,7 @@ fn kits_step(ui: &mut egui::Ui, at: &mut Draw<'_, '_>) {
     let catalog = &at.app.catalog;
     let form = at.form;
     let dark = dark(ui);
-    let order = form.addon_order(catalog);
+    let order = form.kit_step_addons(catalog);
     let host = |i: usize| form.kits.host.get(i).is_some_and(Option::is_some);
     let (hosts, others): (Vec<usize>, Vec<usize>) = order.into_iter().partition(|i| host(*i));
     let add_later = sentence(create::ADD_LATER);
@@ -1346,6 +1346,9 @@ fn workspace_step(ui: &mut egui::Ui, at: &mut Draw<'_, '_>) {
     nested(ui, |ui| advanced(ui, at));
 }
 
+/// The title of [`CreateRow::StatusLine`] under *More options*.
+pub const STATUS_LINE: &str = "Status line";
+
 /// The title of the Workspace step's fold over the shared store's skills, and the badge of a skill
 /// whose switch is the new sandbox's own.
 pub const SHARED_SKILLS: &str = "Shared skills";
@@ -1452,6 +1455,22 @@ fn advanced(ui: &mut egui::Ui, at: &mut Draw<'_, '_>) {
     let form = at.form;
     let dark = dark(ui);
     let ws = &form.workspace;
+    if form.status_line_addon(&at.app.catalog).is_some() {
+        let width = ui.available_width().min(FIELD + 120.0);
+        let row = WizardRow::Field(CreateRow::StatusLine);
+        let item = Item {
+            mark: Mark::Check,
+            title: STATUS_LINE,
+            detail: &sentence(field_gloss(CreateRow::StatusLine)),
+            badges: Vec::new(),
+            color: theme::accent(dark),
+            checked: form.status_line_on(&at.app.catalog),
+            enabled: true,
+            focused: at.focused(row),
+        };
+        let response = controls::check_item(ui, item, width);
+        at.take(response, row);
+    }
     text_field(
         ui,
         at,

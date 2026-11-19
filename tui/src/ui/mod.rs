@@ -303,6 +303,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, caps: theme::Caps) ->
                 ],
                 Some(WizardRow::Field(
                     CreateRow::Addon(_)
+                    | CreateRow::StatusLine
                     | CreateRow::Clone
                     | CreateRow::GitGuard
                     | CreateRow::McpNone
@@ -1711,6 +1712,29 @@ mod tests {
                 render_all_sizes(&mut app);
             }
         }
+    }
+
+    #[test]
+    fn the_status_line_is_a_switch_under_more_options() {
+        let mut app = app_with(populated());
+        app.open_create();
+        show_step(&mut app, CreateStep::Workspace);
+        let screen = super::tests_support::render_at(&mut app, 110, 40);
+        assert!(!screen.contains("[x] status line"), "folded: {screen}");
+        assert!(!screen.contains(crate::create::NO_STATUS_LINE), "{screen}");
+
+        focus_row(&mut app, CreateRow::AdvancedFold);
+        app.on_key(KeyEvent::from(KeyCode::Enter));
+        let screen = super::tests_support::render_at(&mut app, 110, 40);
+        let gloss = crate::create::field_gloss(CreateRow::StatusLine);
+        assert!(screen.contains("[x] status line"), "{screen}");
+        assert!(screen.contains(gloss), "{screen}");
+
+        focus_row(&mut app, CreateRow::StatusLine);
+        app.on_key(KeyEvent::from(KeyCode::Char(' ')));
+        let screen = super::tests_support::render_at(&mut app, 110, 40);
+        assert!(screen.contains("[ ] status line"), "{screen}");
+        assert!(screen.contains(crate::create::NO_STATUS_LINE), "{screen}");
     }
 
     #[test]
@@ -4232,7 +4256,8 @@ mod tests {
             };
             assert_eq!(buffer[(*x, *y)].fg, muted, "line {y}: muted");
         }
-        for kit in ["jdk25", "rtk", "statusline"] {
+        assert!(lines_with(&buffer, "] statusline ").is_empty());
+        for kit in ["jdk25", "rtk"] {
             let (_, y) = lines_with(&buffer, &format!("] {kit} "))[0];
             assert!(
                 column_of(&buffer, y, crate::create::ONLY_NOW).is_none(),
@@ -4832,7 +4857,7 @@ mod tests {
         focus_row(&mut app, CreateRow::Name);
         let screen = super::tests_support::render_at(&mut app, 110, 40);
         assert!(
-            screen.contains("label         Claude Code · LiteLLM acme   generated"),
+            screen.contains("label         Claude Code · LiteLLM acme (Statusline)   generated"),
             "the agent, its provider and how it signs in: {screen}"
         );
         for c in "api".chars() {
