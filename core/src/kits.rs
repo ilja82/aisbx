@@ -2312,7 +2312,7 @@ mod tests {
             .map(|a| a.kit.name.as_str())
             .collect();
         addable.sort_unstable();
-        assert_eq!(addable, vec!["jdk25", "rtk", "statusline"]);
+        assert_eq!(addable, vec!["jdk25", "rtk", "statusline", "swiftlint"]);
     }
 
     #[test]
@@ -2514,6 +2514,42 @@ mod tests {
             startup.contains("for part in npm wheels uv cargo; do"),
             "{startup}"
         );
+    }
+
+    #[test]
+    fn the_swiftlint_kit_pins_the_static_linux_build_and_opens_no_network() {
+        let Ok(catalog) = Catalog::load() else { return };
+        let addon = catalog
+            .addons
+            .iter()
+            .find(|a| a.kit.name == "swiftlint")
+            .expect("offered on the form and in the kits editor");
+        assert_eq!(addon.create_time_reason(), None, "joins a running sandbox");
+        let recipe = dockerfile("swiftlint");
+        for want in [
+            "ENV SBX_KIT_SWIFTLINT=1",
+            "V=\"0.65.1\"",
+            "sha256sum -c -",
+            "swiftlint_linux_${TARGETARCH}.zip",
+            "install -m 0755 \"$WORK/swiftlint-static\" /out/usr/local/bin/swiftlint",
+            "test \"$(/out/usr/local/bin/swiftlint version)\" = \"$V\"",
+        ] {
+            assert!(recipe.contains(want), "the swiftlint kit has {want}");
+        }
+        // One digest per architecture.
+        let digests: Vec<&str> = recipe
+            .lines()
+            .filter_map(|l| {
+                l.trim_start()
+                    .strip_prefix("amd64) SUM=\"")
+                    .or_else(|| l.trim_start().strip_prefix("arm64) SUM=\""))
+            })
+            .map(|d| d.split('"').next().unwrap_or_default())
+            .filter(|d| d.len() == 64 && d.bytes().all(|b| b.is_ascii_hexdigit()))
+            .collect();
+        assert_eq!(digests.len(), 2, "{recipe}");
+        // No capabilities at all: no network rules, hooks or volumes.
+        assert!(shipped("swiftlint")["capabilities"].is_badvalue());
     }
 
     #[test]
