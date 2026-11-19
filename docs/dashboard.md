@@ -331,7 +331,9 @@ like a setup assistant. In both, click a step to go there.
 ### Remembered answers and checks
 
 The wizard remembers the answers of your last create: the provider and harness, the account or connection, the kits
-per harness, clone mode, `.git` read-only, skills mode, ports, blocked hosts and MCP servers. The next create opens on
+per harness, clone mode, `.git` read-only, skills mode, ports, blocked hosts and MCP servers (a first create starts with *No MCP
+servers* ticked; untick it to let the agent find the host's servers, or tick specific servers:
+[MCP servers](sandboxes.md#mcp-servers)). The next create opens on
 them, on the Review, headed *Prefilled from your last sandbox*. Create there, or pick a step to change its answers.
 The label, the start folder and the mounted folders belong to each folder.
 

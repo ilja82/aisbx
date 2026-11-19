@@ -449,6 +449,34 @@ fn w6_mcp() {
     app.mcp = notion();
     let expected = answered(&mut app, WizardRow::CreateOnly, |_, form| {
         form.workspace.static_mcp[0] = true;
+        form.workspace.no_mcp = false;
+    });
+    assert_same_job(&wizard, &expected);
+}
+
+#[test]
+fn w6b_mcp_dynamic() {
+    let mut app = new_app();
+    app.mcp = notion();
+    open(&mut app);
+    walk_to(&mut app, CreateStep::Workspace);
+    tick(&mut app, WizardRow::Field(CreateRow::McpNone));
+    let wizard = create_only(&mut app);
+    let create = wizard
+        .steps
+        .iter()
+        .find(|s| s.argv.get(1).map(String::as_str) == Some("create"))
+        .expect("a create step");
+    assert!(
+        create.argv.iter().all(|a| a != "--static-mcp"),
+        "{:?}",
+        create.argv
+    );
+
+    let mut app = new_app();
+    app.mcp = notion();
+    let expected = answered(&mut app, WizardRow::CreateOnly, |_, form| {
+        form.workspace.no_mcp = false;
     });
     assert_same_job(&wizard, &expected);
 }

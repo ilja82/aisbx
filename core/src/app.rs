@@ -627,7 +627,7 @@ impl CreateForm {
                 ports: TextInput::default(),
                 deny_network: TextInput::default(),
                 static_mcp: vec![false; mcp.len()],
-                no_mcp: false,
+                no_mcp: true,
                 mcp,
             },
             wizard: WizardState::default(),
@@ -17504,6 +17504,61 @@ mod tests {
     }
 
     #[test]
+    fn a_fresh_create_form_has_no_mcp_ticked() {
+        let mut app = app_on(&[crate::testkit::acme()], Vec::new());
+        app.mcp = vec![sbx::McpServer {
+            name: "notion".into(),
+            status: "ready".into(),
+            ..sbx::McpServer::default()
+        }];
+        app.open_create();
+        let catalog = Arc::clone(&app.catalog);
+        let Screen::Create(form) = &mut app.screen else {
+            panic!("the create form is open")
+        };
+        assert!(form.workspace.no_mcp);
+        assert_eq!(form.workspace.static_mcp, [false]);
+        assert_eq!(form.selected_mcp(), ["none"]);
+        form.toggle_no_mcp();
+        assert!(form.selected_mcp().is_empty());
+        let defaults = form.defaults(&catalog);
+        assert!(defaults.mcp.is_empty());
+    }
+
+    #[test]
+    fn saved_mcp_answers_apply_as_they_were_saved() {
+        for (mcp, none, ticked) in [
+            ("", false, false),
+            (r#","mcp":[]"#, false, false),
+            (r#","mcp":["none"]"#, true, false),
+            (r#","mcp":["notion"]"#, false, true),
+        ] {
+            let mut app = app_on(&[crate::testkit::acme()], Vec::new());
+            app.mcp = vec![sbx::McpServer {
+                name: "notion".into(),
+                status: "ready".into(),
+                ..sbx::McpServer::default()
+            }];
+            app.open_create();
+            let catalog = Arc::clone(&app.catalog);
+            let Screen::Create(form) = &mut app.screen else {
+                panic!("the create form is open")
+            };
+            let backend = form.defaults(&catalog).backend;
+            let saved = format!(r#"{{"backend":"{backend}"{mcp}}}"#);
+            let defaults: crate::state::CreateDefaults = serde_json::from_str(&saved).unwrap();
+            app.registry.set_create_defaults(defaults);
+            app.screen = Screen::List;
+            app.open_create();
+            let Screen::Create(form) = &app.screen else {
+                panic!("the create form is open")
+            };
+            assert_eq!(form.workspace.no_mcp, none, "{saved}");
+            assert_eq!(form.workspace.static_mcp, [ticked], "{saved}");
+        }
+    }
+
+    #[test]
     fn no_mcp_comes_back_with_the_last_creates_answers() {
         let mut app = app_on(&[crate::testkit::acme()], Vec::new());
         app.mcp = vec![sbx::McpServer {
@@ -17516,7 +17571,6 @@ mod tests {
         let Screen::Create(form) = &mut app.screen else {
             panic!("the create form is open")
         };
-        form.toggle_no_mcp();
         let defaults = form.defaults(&catalog);
         assert_eq!(defaults.mcp, ["none"]);
 
@@ -20618,8 +20672,8 @@ mod form_decision_tests {
             ("Blocked hosts", |f, _| {
                 f.workspace.deny_network = TextInput::new("example.com")
             }),
-            ("MCP servers", |f, _| f.workspace.static_mcp[0] = true),
-            ("MCP servers", |f, _| f.workspace.no_mcp = true),
+            ("MCP servers", |f, _| f.toggle_mcp(0)),
+            ("MCP servers", |f, _| f.toggle_no_mcp()),
         ];
         for (label, change) in seldom {
             app.open_create();
