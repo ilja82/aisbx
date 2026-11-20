@@ -1666,8 +1666,10 @@ fn resolve_future(path: &Path) -> Option<PathBuf> {
     let mut rest: Vec<std::ffi::OsString> = Vec::new();
     let mut at = path;
     let base = loop {
-        if let Ok(real) = std::fs::canonicalize(at) {
-            break real;
+        match std::fs::canonicalize(at) {
+            Ok(real) => break real,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return None,
         }
         match at.components().next_back()? {
             Component::Normal(name) => rest.push(name.to_os_string()),
@@ -1719,10 +1721,20 @@ pub fn staging_refusal(state: &Path, exposed: &[PathBuf]) -> Option<String> {
             rel.display()
         ));
     }
-    let holder = exposed.iter().find(|m| {
-        let real = resolve_future(m).unwrap_or_else(|| m.to_path_buf());
-        stage.starts_with(m) || stage_real.starts_with(&real) || real.starts_with(&stage_real)
-    })?;
+    let mut holder = None;
+    for m in exposed {
+        let Some(real) = resolve_future(m) else {
+            return Some(format!(
+                "{not}: a mount, {}, cannot be resolved to check it against the staging folder",
+                m.display()
+            ));
+        };
+        if stage.starts_with(m) || stage_real.starts_with(&real) || real.starts_with(&stage_real) {
+            holder = Some(m);
+            break;
+        }
+    }
+    let holder = holder?;
     Some(format!(
         "{not}: the staging folder {} is inside {}, which a sandbox mounts, so a sandbox \
          without the addon would see the copy; set XDG_STATE_HOME to a folder outside every \
@@ -1750,11 +1762,28 @@ pub fn stage_exposure_refusal(addons: &[String], state: &Path, own: &[PathBuf]) 
     if copies_host_files(addons) || !holds_a_copy(&stage) {
         return None;
     }
-    let stage_real = resolve_future(&stage)?;
-    let holder = own
-        .iter()
-        .filter(|m| m.is_absolute())
-        .find(|m| stage_real.starts_with(resolve_future(m).unwrap_or_else(|| m.to_path_buf())))?;
+    let Some(stage_real) = resolve_future(&stage) else {
+        return Some(format!(
+            "{} cannot be resolved, so it cannot be ruled out that this sandbox would read the \
+             copy of ~/.gradle/{GRADLE_PROPERTIES_FILE} there; mount another folder",
+            stage.display()
+        ));
+    };
+    let mut holder = None;
+    for m in own.iter().filter(|m| m.is_absolute()) {
+        let Some(real) = resolve_future(m) else {
+            return Some(format!(
+                "{} cannot be resolved, so it cannot be ruled out that it holds the copy of \
+                 ~/.gradle/{GRADLE_PROPERTIES_FILE}; mount another folder",
+                m.display()
+            ));
+        };
+        if stage_real.starts_with(&real) {
+            holder = Some(m);
+            break;
+        }
+    }
+    let holder = holder?;
     Some(format!(
         "{} holds {}, the copy of ~/.gradle/{GRADLE_PROPERTIES_FILE} an earlier sandbox staged, \
          which this sandbox would read without the addon; mount another folder",
@@ -1789,6 +1818,8 @@ pub fn stage_host_files_in(
 pub fn mount_inventory(state: &Path) -> Result<Vec<PathBuf>, String> {
     let list = sbx::list().map_err(|e| format!("could not read the sandboxes' folders ({e:#})"))?;
     let stage = gradle_properties_stage(state);
+    let stage_real = resolve_future(&stage)
+        .ok_or_else(|| format!("could not resolve {}; nothing is copied", stage.display()))?;
     let mut out = Vec::new();
     for entry in &list {
         let inspected = sbx::inspect(&entry.name)
@@ -1813,9 +1844,25 @@ pub fn mount_inventory(state: &Path) -> Result<Vec<PathBuf>, String> {
                     host.display()
                 ));
             }
-            if !own_stage(&host, ro) {
-                out.push(host);
+            if own_stage(&host, ro) {
+                continue;
             }
+            let real = std::fs::canonicalize(&host).map_err(|e| {
+                format!(
+                    "could not resolve a mount of {} ({}: {e}); nothing is copied",
+                    entry.name,
+                    host.display()
+                )
+            })?;
+            if stage_real.starts_with(&real) || real.starts_with(&stage_real) {
+                return Err(format!(
+                    "a mount of {}, {}, overlaps the staging folder {}; nothing is copied",
+                    entry.name,
+                    host.display(),
+                    stage.display()
+                ));
+            }
+            out.push(real);
         }
     }
     Ok(out)

@@ -105,9 +105,10 @@ impl Rig {
 
     fn with_opted_out_sandbox(&self, mount_key: &str, host: &str) {
         let ls = format!(
-            r#"[{{"name":"demo","agent":"claude-anthropic","status":"stopped","workspaces":["{}","{}:ro"]}},{{"name":"other","agent":"claude-anthropic","status":"stopped","workspaces":["/elsewhere"]}}]"#,
+            r#"[{{"name":"demo","agent":"claude-anthropic","status":"stopped","workspaces":["{}","{}:ro"]}},{{"name":"other","agent":"claude-anthropic","status":"stopped","workspaces":["{}"]}}]"#,
             self.work.display(),
-            self.stage().display()
+            self.stage().display(),
+            self.work.display()
         );
         let other = format!(
             r#"{{"name":"other","agent":"claude-anthropic","kits":["/repo/kits/host-gradle"],"{mount_key}":[{{"host_path":"{host}"}}]}}"#
@@ -185,6 +186,7 @@ fn up_refuses_to_stage_where_an_opted_out_sandbox_mounts_a_folder_holding_the_co
         let rig = Rig::new(tag);
         std::fs::write(rig.host_file(), "a=1\n").unwrap();
         rig.existing(&WITH);
+        std::fs::create_dir_all(rig.stage()).unwrap();
         let host = match direct {
             true => rig.stage().display().to_string(),
             false => parent(&rig),
@@ -194,7 +196,7 @@ fn up_refuses_to_stage_where_an_opted_out_sandbox_mounts_a_folder_holding_the_co
         assert_ok(&out);
         assert_eq!(staged(&rig), None, "{tag}");
         assert!(
-            text(&out.stderr).contains("inside"),
+            text(&out.stderr).contains("overlaps") && text(&out.stderr).contains("other"),
             "{tag}: {}",
             text(&out.stderr)
         );
@@ -309,7 +311,8 @@ fn an_opted_out_create_refuses_the_staging_folder_as_the_primary_workspace() {
 fn staging_stops_when_a_mount_of_another_sandbox_cannot_be_read() {
     let rig = Rig::new("up-props-malformed");
     std::fs::write(rig.host_file(), "a=1\n").unwrap();
-    let ls = r#"[{"name":"other","agent":"claude-anthropic","status":"stopped","workspaces":["/elsewhere"]}]"#;
+    let ls =
+        r#"[{"name":"other","agent":"claude-anthropic","status":"stopped","workspaces":["/tmp"]}]"#;
     rig.sbx_state(ls, "{}");
     let other = r#"{"name":"other","agent":"claude-anthropic","kits":["/repo/kits/host-gradle"],"host_mounts":[{"host_path":5}]}"#;
     std::fs::write(rig.base.join("inspect.json.other"), other).unwrap();
@@ -328,7 +331,7 @@ fn staging_stops_on_a_relative_source_or_a_missing_field_of_another_sandbox() {
     ] {
         let rig = Rig::new(tag);
         std::fs::write(rig.host_file(), "a=1\n").unwrap();
-        let ls = r#"[{"name":"other","agent":"claude-anthropic","status":"stopped","workspaces":["/elsewhere"]}]"#;
+        let ls = r#"[{"name":"other","agent":"claude-anthropic","status":"stopped","workspaces":["/tmp"]}]"#;
         rig.sbx_state(ls, "{}");
         let other = format!(
             r#"{{"name":"other","agent":"claude-anthropic","kits":["/repo/kits/host-gradle"],"host_mounts":[{mount}]}}"#
@@ -367,4 +370,36 @@ fn an_opted_out_create_refuses_the_staging_folder_configured_in_mounts_json() {
         text(&out.stderr)
     );
     assert!(!rig.log().contains("create"), "{}", rig.log());
+}
+
+#[test]
+fn staging_stops_on_a_source_that_loops_or_does_not_resolve() {
+    for tag in ["up-props-loop", "up-props-gone"] {
+        let rig = Rig::new(tag);
+        std::fs::write(rig.host_file(), "a=1\n").unwrap();
+        let source = rig.base.join("source");
+        if tag == "up-props-loop" {
+            std::os::unix::fs::symlink(&source, &source).unwrap();
+        }
+        let ls = format!(
+            r#"[{{"name":"other","agent":"claude-anthropic","status":"stopped","workspaces":["{}"]}}]"#,
+            rig.work.display()
+        );
+        rig.sbx_state(&ls, "{}");
+        let other = format!(
+            r#"{{"name":"other","agent":"claude-anthropic","kits":["/repo/kits/host-gradle"],"host_mounts":[{{"host_path":"{}","container_target":"/x","read_only":true}}]}}"#,
+            source.display()
+        );
+        std::fs::write(rig.base.join("inspect.json.other"), other).unwrap();
+        let out = rig.up(&["--kit", "host-gradle-properties"]);
+        assert!(!out.status.success(), "{tag}");
+        assert!(
+            text(&out.stderr).contains("other"),
+            "{tag}: {}",
+            text(&out.stderr)
+        );
+        assert!(staged(&rig).is_none(), "{tag}");
+        assert!(!rig.stage().exists(), "{tag}");
+        assert!(!rig.log().contains("create"), "{tag}: {}", rig.log());
+    }
 }
