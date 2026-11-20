@@ -461,9 +461,11 @@ impl CreateRow {
             | CreateRow::ModelOn(_) => Some(CreateRow::ModelsFold),
             CreateRow::ConfigFile(_) => Some(CreateRow::FilesFold),
             CreateRow::StoreSkill(_) => Some(CreateRow::SkillsFold),
-            CreateRow::Ports | CreateRow::DenyNetwork | CreateRow::McpNone | CreateRow::Mcp(_) => {
-                Some(CreateRow::AdvancedFold)
-            }
+            CreateRow::StatusLine
+            | CreateRow::Ports
+            | CreateRow::DenyNetwork
+            | CreateRow::McpNone
+            | CreateRow::Mcp(_) => Some(CreateRow::AdvancedFold),
             _ => None,
         }
     }
@@ -533,6 +535,9 @@ pub enum CreateRow {
     /// Shows or hides the options seldom needed under it: ports, blocked hosts and the MCP
     /// servers ([`WizardState::advanced_open`]).
     AdvancedFold,
+    /// The [`crate::create::STATUS_LINE_KIT`] addon, ticked on a new form
+    /// ([`CreateForm::status_line_addon`]). Only where it works with the harness.
+    StatusLine,
     /// Ports to publish while the container is built (`-p`).
     Ports,
     /// Hosts to deny this one sandbox (`--deny-network`).
@@ -627,6 +632,9 @@ impl CreateForm {
             },
             wizard: WizardState::default(),
         };
+        if let Some(i) = crate::create::status_line_kit(catalog) {
+            form.kits.addons[i] = true;
+        }
         form.refresh_auto_name(catalog);
         form
     }
@@ -880,7 +888,11 @@ impl CreateForm {
             }
             rows.extend((0..files).map(CreateRow::ConfigFile));
         }
-        rows.extend(self.addon_order(catalog).into_iter().map(CreateRow::Addon));
+        rows.extend(
+            self.kit_step_addons(catalog)
+                .into_iter()
+                .map(CreateRow::Addon),
+        );
         rows.push(CreateRow::Name);
         if self.start_dir_offered(catalog) {
             rows.push(CreateRow::StartDir);
@@ -899,6 +911,9 @@ impl CreateForm {
             }
         }
         rows.push(CreateRow::AdvancedFold);
+        if self.status_line_addon(catalog).is_some() {
+            rows.push(CreateRow::StatusLine);
+        }
         rows.push(CreateRow::Ports);
         rows.push(CreateRow::DenyNetwork);
         rows.push(CreateRow::McpNone);
@@ -955,6 +970,26 @@ impl CreateForm {
         first
     }
 
+    /// The addons the Kits step offers: [`Self::addon_order`] without the status line, which
+    /// [`CreateRow::StatusLine`] offers under *more options*.
+    pub fn kit_step_addons(&self, catalog: &Catalog) -> Vec<usize> {
+        let status_line = self.status_line_addon(catalog);
+        (self.addon_order(catalog).into_iter())
+            .filter(|i| Some(*i) != status_line)
+            .collect()
+    }
+
+    /// The status-line addon, by index into the catalog, where it works with the harness.
+    pub fn status_line_addon(&self, catalog: &Catalog) -> Option<usize> {
+        let i = crate::create::status_line_kit(catalog)?;
+        self.addon_order(catalog).contains(&i).then_some(i)
+    }
+
+    /// Is the status line offered and on?
+    pub fn status_line_on(&self, catalog: &Catalog) -> bool {
+        (self.status_line_addon(catalog)).is_some_and(|i| self.kits.addons[i])
+    }
+
     /// Is addon `i` a host-cache kit that would mount nothing here — drawn greyed out, and never
     /// ticked?
     pub fn addon_unavailable(&self, i: usize) -> bool {
@@ -969,6 +1004,13 @@ impl CreateForm {
     pub(crate) fn toggle_addon(&mut self, i: usize) {
         if !self.addon_unavailable(i) {
             self.kits.addons[i] = !self.kits.addons[i];
+        }
+    }
+
+    /// Space, ↵ and a click on [`CreateRow::StatusLine`]: flip the status-line addon.
+    pub(crate) fn toggle_status_line(&mut self, catalog: &Catalog) {
+        if let Some(i) = self.status_line_addon(catalog) {
+            self.toggle_addon(i);
         }
     }
 
@@ -20548,7 +20590,10 @@ mod form_decision_tests {
         assert_eq!(review.answers[2].value, "Claude Code");
         assert_eq!(review.answers[3].value, crate::create::AGENT_PICKS);
         assert_eq!(review.answers[4].value, "none");
-        assert_eq!(review.answers[5].value, "Claude Code · LiteLLM acme");
+        assert_eq!(
+            review.answers[5].value,
+            "Claude Code · LiteLLM acme (Statusline)"
+        );
         assert_eq!(review.sbx_name, "claude-litellm-proj");
         assert_eq!(review.sbx_name, form.sbx_name(&app));
         assert_eq!(review.mounts, ["/proj"]);

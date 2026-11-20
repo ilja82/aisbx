@@ -6,7 +6,8 @@ Addons are kits that you stack onto any backend: build tools, host caches, web a
 
 Add an addon in one of these ways:
 
-- Tick it in the create wizard (`n`).
+- Tick it in the create wizard (`n`). A new Claude Code sandbox has the status line ticked already, under *More
+  options*.
 - Press `e` on a sandbox. `jdk25`, `rtk`, `statusline` and `swiftlint` join a running sandbox.
 - All other addons join only at creation or with a rebuild, because they have network rules or host folders. See
   [Names, kits and rebuilds](sandboxes.md#names-kits-and-rebuilds).
@@ -235,7 +236,13 @@ copies it into the sandbox and sets npm, pip, uv and cargo offline. Then `npm ci
 ## Status line inside the sandbox
 
 `statusline` adds a two-line [Claude Code status line](https://code.claude.com/docs/en/statusline), so you can tell
-sandboxes on one folder apart. Press `e` to add it to a running sandbox. It does nothing on OpenCode.
+sandboxes on one folder apart. It does nothing on OpenCode.
+
+- The create wizard (`n`) ticks it for every new Claude Code sandbox. To create one without it, untick *Status line*
+  under *More options* on the *Workspace and options* step. The next sandbox on that backend starts with the choice of
+  the last one.
+- Press `e` to add it to a running sandbox, or to remove it.
+- `aisbx up` adds it only when you name it: `aisbx up --kit statusline`.
 
 ```text
 ⬢ claude-token-my-project (jdk25 rtk web) · my-project · Opus 5 (high) · ctx 45k/1M (4.5%)

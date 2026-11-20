@@ -545,7 +545,7 @@ fn kits_rows(
     let catalog = &app.catalog;
     let addons = form.selected_addons(catalog);
     // No blank line above either heading: at 110x40 the step needs every line.
-    let order = form.addon_order(catalog);
+    let order = form.kit_step_addons(catalog);
     let host_rows = order
         .iter()
         .take_while(|i| form.kits.host.get(**i).is_some_and(Option::is_some))
@@ -757,6 +757,18 @@ fn workspace_rows(
     );
     if !open {
         return;
+    }
+    if form.status_line_addon(catalog).is_some() {
+        out.row(
+            option_spans(
+                form.status_line_on(catalog),
+                "status line",
+                crate::create::field_gloss(CreateRow::StatusLine),
+                out.width as usize,
+            ),
+            focused == Some(CreateRow::StatusLine),
+            row_index(CreateRow::StatusLine),
+        );
     }
     // "(none)", not "(auto)": an empty ports field publishes nothing.
     for (row, label, input) in [

@@ -248,6 +248,8 @@ fn g1_defaults() {
                 "create",
                 "--kit",
                 &conn_kit(&app, "claude"),
+                "--kit",
+                &kit(&app, "statusline"),
                 "--name",
                 "claude-litellm-proj",
                 "--static-mcp",
@@ -264,16 +266,38 @@ fn g1_defaults() {
             false,
         )]
     );
-    assert_eq!(job.title, "Creating Claude Code · LiteLLM acme");
+    assert_eq!(
+        job.title,
+        "Creating Claude Code · LiteLLM acme (Statusline)"
+    );
     // The connection the form opened on, remembered only once the create succeeded.
     assert_eq!(job.post.last_litellm.as_deref(), Some("acme"));
     let reg = job.post.register.expect("the sandbox is registered");
     assert_eq!(reg.name, "claude-litellm-proj");
-    assert_eq!(reg.label, "Claude Code · LiteLLM acme");
+    assert_eq!(reg.label, "Claude Code · LiteLLM acme (Statusline)");
     assert!(!reg.clone);
     assert_eq!(reg.skills, Some(sbx::SkillsMode::Readonly));
     assert_eq!(reg.start_dir, None);
     assert_eq!(reg.static_mcp, vec!["none".to_string()]);
+}
+
+#[test]
+fn g1b_without_the_status_line() {
+    let mut app = new_app();
+    app.open_create();
+    choose(&mut app, Provider::Anthropic);
+    enter(&mut app, WizardRow::Connection(ConnChoice::Login));
+    walk_to(&mut app, CreateStep::Workspace);
+    assert!(!form(&app).fold_open(CreateRow::AdvancedFold));
+    tick(&mut app, CreateRow::StatusLine);
+    let job = create_only(&mut app);
+    let argv = &steps(&job)[0].1;
+    assert!(!argv.contains(&kit(&app, "statusline")), "{argv:?}");
+    assert_eq!(
+        argv[..4],
+        strings(&["sbx", "create", "--name", "claude-anthropic-proj"])
+    );
+    assert_eq!(job.title, "Creating Claude Code · Anthropic /login");
 }
 
 #[test]
@@ -363,6 +387,8 @@ fn g3_login() {
                 "create",
                 "--kit",
                 &kit(&app, "jdk25"),
+                "--kit",
+                &kit(&app, "statusline"),
                 "--name",
                 "claude-anthropic-proj",
                 "--static-mcp",
@@ -379,10 +405,16 @@ fn g3_login() {
             false,
         )]
     );
-    assert_eq!(job.title, "Creating Claude Code · Anthropic /login (JDK25)");
+    assert_eq!(
+        job.title,
+        "Creating Claude Code · Anthropic /login (JDK25, Statusline)"
+    );
     let reg = job.post.register.expect("the sandbox is registered");
     assert_eq!(reg.name, "claude-anthropic-proj");
-    assert_eq!(reg.label, "Claude Code · Anthropic /login (JDK25)");
+    assert_eq!(
+        reg.label,
+        "Claude Code · Anthropic /login (JDK25, Statusline)"
+    );
     assert!(!reg.clone);
     assert_eq!(reg.skills, Some(sbx::SkillsMode::Readonly));
     assert_eq!(reg.start_dir, None);
@@ -407,6 +439,8 @@ fn g4_named_token() {
                 "sbx",
                 "create",
                 "--kit",
+                &kit(&app, "statusline"),
+                "--kit",
                 &path(&crate::tokens::kit_dir("private")),
                 "--name",
                 "claude-token-proj",
@@ -424,10 +458,16 @@ fn g4_named_token() {
             false,
         )]
     );
-    assert_eq!(job.title, "Creating Claude Code · Anthropic token private");
+    assert_eq!(
+        job.title,
+        "Creating Claude Code · Anthropic token private (Statusline)"
+    );
     let reg = job.post.register.expect("the sandbox is registered");
     assert_eq!(reg.name, "claude-token-proj");
-    assert_eq!(reg.label, "Claude Code · Anthropic token private");
+    assert_eq!(
+        reg.label,
+        "Claude Code · Anthropic token private (Statusline)"
+    );
     assert!(!reg.clone);
     assert_eq!(
         reg.skills,
@@ -472,6 +512,8 @@ fn g5_new_token() {
                     "sbx",
                     "create",
                     "--kit",
+                    &kit(&app, "statusline"),
+                    "--kit",
                     &path(&crate::tokens::kit_dir("personal")),
                     "--name",
                     "claude-token-proj",
@@ -497,10 +539,16 @@ fn g5_new_token() {
             .all(|s| s.argv.iter().all(|a| !a.contains(TOKEN_VALUE))),
         "the token goes in on stdin, never in an argv"
     );
-    assert_eq!(job.title, "Creating Claude Code · Anthropic token personal");
+    assert_eq!(
+        job.title,
+        "Creating Claude Code · Anthropic token personal (Statusline)"
+    );
     let reg = job.post.register.expect("the sandbox is registered");
     assert_eq!(reg.name, "claude-token-proj");
-    assert_eq!(reg.label, "Claude Code · Anthropic token personal");
+    assert_eq!(
+        reg.label,
+        "Claude Code · Anthropic token personal (Statusline)"
+    );
     assert!(!reg.clone);
     assert_eq!(reg.skills, Some(sbx::SkillsMode::Readonly));
     assert_eq!(reg.start_dir, None);
@@ -531,6 +579,8 @@ fn g6_mcp() {
                 "create",
                 "--kit",
                 &conn_kit(&app, "claude"),
+                "--kit",
+                &kit(&app, "statusline"),
                 "--name",
                 "claude-litellm-proj",
                 "--static-mcp",
@@ -547,12 +597,15 @@ fn g6_mcp() {
             false,
         )]
     );
-    assert_eq!(job.title, "Creating Claude Code · LiteLLM acme");
+    assert_eq!(
+        job.title,
+        "Creating Claude Code · LiteLLM acme (Statusline)"
+    );
     // The connection the form opened on, remembered only once the create succeeded.
     assert_eq!(job.post.last_litellm.as_deref(), Some("acme"));
     let reg = job.post.register.expect("the sandbox is registered");
     assert_eq!(reg.name, "claude-litellm-proj");
-    assert_eq!(reg.label, "Claude Code · LiteLLM acme");
+    assert_eq!(reg.label, "Claude Code · LiteLLM acme (Statusline)");
     assert!(!reg.clone);
     assert_eq!(reg.skills, Some(sbx::SkillsMode::Readonly));
     assert_eq!(reg.start_dir, None);
@@ -628,6 +681,8 @@ fn g7_start_dir() {
                 "create",
                 "--kit",
                 &conn_kit(&app, "claude"),
+                "--kit",
+                &kit(&app, "statusline"),
                 "--name",
                 "claude-litellm-proj",
                 "--static-mcp",
@@ -644,12 +699,15 @@ fn g7_start_dir() {
             false,
         )]
     );
-    assert_eq!(job.title, "Creating Claude Code · LiteLLM acme");
+    assert_eq!(
+        job.title,
+        "Creating Claude Code · LiteLLM acme (Statusline)"
+    );
     // The connection the form opened on, remembered only once the create succeeded.
     assert_eq!(job.post.last_litellm.as_deref(), Some("acme"));
     let reg = job.post.register.expect("the sandbox is registered");
     assert_eq!(reg.name, "claude-litellm-proj");
-    assert_eq!(reg.label, "Claude Code · LiteLLM acme");
+    assert_eq!(reg.label, "Claude Code · LiteLLM acme (Statusline)");
     assert!(!reg.clone);
     assert_eq!(reg.skills, Some(sbx::SkillsMode::Readonly));
     assert_eq!(reg.start_dir, Some(PathBuf::from("sub")));
@@ -697,6 +755,8 @@ fn g7b_more_folders() {
                 "create",
                 "--kit",
                 &conn_kit(&app, "claude"),
+                "--kit",
+                &kit(&app, "statusline"),
                 "--kit",
                 &path(&crate::folders::kit_dir("claude-litellm-proj-more")),
                 "--name",
@@ -849,6 +909,8 @@ fn g9_new_connection() {
                 "create",
                 "--kit",
                 &path(&beta_kit),
+                "--kit",
+                &kit(&app, "statusline"),
                 "--name",
                 "claude-litellm-proj",
                 "--static-mcp",

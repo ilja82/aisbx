@@ -3485,8 +3485,27 @@ mod tests {
         }
     }
 
+    const ALONE_VAR: &str = "AISBX_TEST_ALONE";
+
+    fn run_alone(test: &str) {
+        let out = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test, "--test-threads=1", "--nocapture"])
+            .env(ALONE_VAR, "1")
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).into_owned()
+            + &String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{text}");
+        assert!(text.contains("1 passed"), "{text}");
+    }
+
     #[test]
     fn slots_limit_the_steps_at_once_and_free_when_a_step_ends() {
+        if std::env::var_os(ALONE_VAR).is_none() {
+            return run_alone(
+                "step::tests::slots_limit_the_steps_at_once_and_free_when_a_step_ends",
+            );
+        }
         let dir = std::env::temp_dir().join(format!("aisbx-slots-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let a = take_slot(&dir, 2).unwrap().expect("a free slot");

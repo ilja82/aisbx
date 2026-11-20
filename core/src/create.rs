@@ -391,6 +391,7 @@ impl CreateRow {
             | CreateRow::SkillsFold
             | CreateRow::StoreSkill(_)
             | CreateRow::AdvancedFold
+            | CreateRow::StatusLine
             | CreateRow::Ports
             | CreateRow::DenyNetwork
             | CreateRow::McpNone
@@ -633,13 +634,13 @@ impl CreateForm {
                 false => AccountChoice::Login,
             };
         }
-        let wanted = defaults
-            .addons
-            .get(&defaults.backend)
-            .cloned()
-            .unwrap_or_default();
+        let wanted = defaults.addons.get(&defaults.backend);
+        let status_line = status_line_kit(catalog);
         for (i, addon) in catalog.addons.iter().enumerate() {
-            let on = wanted.contains(&addon.kit.name) && !self.addon_unavailable(i);
+            let on = match wanted {
+                Some(wanted) => wanted.contains(&addon.kit.name) && !self.addon_unavailable(i),
+                None => Some(i) == status_line,
+            };
             self.kits.addons[i] = on;
         }
         let ws = &mut self.workspace;
@@ -971,6 +972,17 @@ pub const ONLY_NOW: &str = "only now";
 /// The tick for `--static-mcp none`, and the Review's and the details' word for it.
 pub const NO_MCP: &str = "no MCP servers";
 
+/// The addon a new form ticks and offers as [`CreateRow::StatusLine`].
+pub const STATUS_LINE_KIT: &str = "statusline";
+
+/// What the Review step and the *more options* fold say while the status line is off.
+pub const NO_STATUS_LINE: &str = "no status line";
+
+/// The catalog's [`STATUS_LINE_KIT`] addon, by index.
+pub fn status_line_kit(catalog: &Catalog) -> Option<usize> {
+    (catalog.addons.iter()).position(|a| a.kit.name == STATUS_LINE_KIT)
+}
+
 /// The details' word for sbx's dynamic MCP mode: the agent finds and adds the host's servers.
 pub const HOST_MCP: &str = "the servers set up on this computer";
 
@@ -1263,8 +1275,13 @@ impl CreateForm {
             None => answer(CreateStep::Models, "Models", AGENT_PICKS.to_string(), true),
         }
         let addons = self.selected_addons(catalog);
-        let kits = or_none(&addons.join(", "));
-        answer(CreateStep::Kits, "Kits", kits, addons.is_empty());
+        let status_line = (self.status_line_addon(catalog)).map(|i| &catalog.addons[i].kit.name);
+        let step_kits: Vec<&str> = (addons.iter())
+            .filter(|a| Some(*a) != status_line)
+            .map(String::as_str)
+            .collect();
+        let kits = or_none(&step_kits.join(", "));
+        answer(CreateStep::Kits, "Kits", kits, step_kits.is_empty());
         let account = self.label_account(catalog);
         let label = match self.workspace.name.value.trim() {
             "" => (self.effective_backend(catalog))
@@ -1331,6 +1348,9 @@ impl CreateForm {
                 false => on.join(", "),
             };
             answer(CreateStep::Workspace, "Shared skills", value, !own);
+        }
+        if status_line.is_some() && !self.status_line_on(catalog) {
+            answer(CreateStep::Workspace, "Status line", "off".into(), false);
         }
         if !ws.ports.value.trim().is_empty() {
             let ports = ws.ports.value.trim().to_string();
@@ -1838,6 +1858,7 @@ impl CreateForm {
                 match row {
                     CreateRow::Backend(i) => self.harness.backend = i,
                     CreateRow::Addon(i) => self.toggle_addon(i),
+                    CreateRow::StatusLine => self.toggle_status_line(catalog),
                     CreateRow::Mcp(i) => self.toggle_mcp(i),
                     CreateRow::McpNone => self.toggle_no_mcp(),
                     CreateRow::StoreSkill(i) => self.toggle_store_skill(i),
@@ -1898,6 +1919,10 @@ impl CreateForm {
                 }
                 CreateRow::Addon(i) => {
                     self.toggle_addon(i);
+                    self.refresh_auto_name(catalog);
+                }
+                CreateRow::StatusLine => {
+                    self.toggle_status_line(catalog);
                     self.refresh_auto_name(catalog);
                 }
                 CreateRow::Clone => self.workspace.clone = !self.workspace.clone,
@@ -2035,6 +2060,9 @@ impl CreateForm {
                 }
             }
             CreateRow::AdvancedFold => {
+                if self.status_line_addon(catalog).is_some() && !self.status_line_on(catalog) {
+                    parts.push(NO_STATUS_LINE.to_string());
+                }
                 if !ws.ports.value.trim().is_empty() {
                     parts.push(format!("ports {}", ws.ports.value.trim()));
                 }
@@ -2270,7 +2298,8 @@ pub fn field_gloss(row: CreateRow) -> &'static str {
         CreateRow::FolderAdd => "a folder outside the project that the agent may use too",
         CreateRow::ModelsFold => "the agent picks them itself unless you do",
         CreateRow::FilesFold => "for your review",
-        CreateRow::AdvancedFold => "ports, blocked hosts, MCP servers",
+        CreateRow::AdvancedFold => "status line, ports, blocked hosts, MCP servers",
+        CreateRow::StatusLine => "sandbox, model, context and usage under Claude Code's prompt",
         CreateRow::SkillsFold => "which shared skills this sandbox gets",
         CreateRow::Ports => "for example 8080:3000",
         CreateRow::DenyNetwork => "for example api.example.com",
@@ -2630,7 +2659,14 @@ impl CreateForm {
             }
             CreateRow::AdvancedFold => Help::new(
                 "more options",
-                "Ports, blocked hosts and MCP servers. Most sandboxes need none of them.",
+                "The status line, ports, blocked hosts and MCP servers. Most sandboxes keep them \
+                 as they are.",
+            ),
+            CreateRow::StatusLine => Help::new(
+                "status line",
+                "When ticked, Claude Code shows a status line: the sandbox, its kits, the model, \
+                 the context fill and the usage. Otherwise, it shows none. On by default; e adds \
+                 or removes it later.",
             ),
             CreateRow::Ports => Help::new(
                 "ports",
@@ -3025,6 +3061,7 @@ mod tests {
             (CreateRow::Clone, CreateStep::Workspace),
             (CreateRow::Skills, CreateStep::Workspace),
             (CreateRow::AdvancedFold, CreateStep::Workspace),
+            (CreateRow::StatusLine, CreateStep::Workspace),
             (CreateRow::Ports, CreateStep::Workspace),
             (CreateRow::DenyNetwork, CreateStep::Workspace),
             (CreateRow::Mcp(0), CreateStep::Workspace),
@@ -3519,6 +3556,135 @@ mod tests {
         );
         assert_eq!(review.mounts.last(), Some(&shown), "{:?}", review.mounts);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn status_line_form(backend: &str) -> (std::sync::Arc<Catalog>, CreateForm) {
+        let mut app = App::for_test(Catalog::load().unwrap(), Vec::new());
+        app.cwd = std::path::PathBuf::from("/proj");
+        app.open_create();
+        let catalog = app.catalog.clone();
+        let mut f = form(&app).clone();
+        let at = catalog.backends.iter().position(|b| b.kit.name == backend);
+        f.harness.backend = at.unwrap_or_else(|| panic!("the checkout ships {backend}"));
+        f.connection.account = AccountChoice::Login;
+        (catalog, f)
+    }
+
+    fn has_status_line(f: &CreateForm, catalog: &Catalog) -> bool {
+        (f.selected_addons(catalog).iter()).any(|a| a == STATUS_LINE_KIT)
+    }
+
+    #[test]
+    fn a_new_claude_sandbox_gets_the_status_line() {
+        let (catalog, f) = status_line_form("claude-anthropic");
+        assert!(
+            has_status_line(&f, &catalog),
+            "{:?}",
+            f.selected_addons(&catalog)
+        );
+        let i = status_line_kit(&catalog).unwrap();
+        assert_eq!(f.status_line_addon(&catalog), Some(i));
+        assert!(f.status_line_on(&catalog));
+    }
+
+    #[test]
+    fn the_status_line_is_switched_under_more_options() {
+        let (catalog, mut f) = status_line_form("claude-anthropic");
+        let i = status_line_kit(&catalog).unwrap();
+        let kits = f.rows_of(CreateStep::Kits, &catalog);
+        assert!(!kits.contains(&CreateRow::Addon(i)), "{kits:?}");
+        assert!(!f.kit_step_addons(&catalog).contains(&i));
+        assert_eq!(CreateRow::StatusLine.step(), CreateStep::Workspace);
+        assert_eq!(CreateRow::StatusLine.fold(), Some(CreateRow::AdvancedFold));
+        let ws = f.rows_of(CreateStep::Workspace, &catalog);
+        let fold = ws.iter().position(|r| *r == CreateRow::AdvancedFold);
+        assert_eq!(
+            ws.get(fold.unwrap() + 1),
+            Some(&CreateRow::StatusLine),
+            "the fold's first row: {ws:?}"
+        );
+        assert!(!f.fold_open(CreateRow::AdvancedFold), "closed while on");
+        assert!(!f.row_shown(CreateRow::StatusLine));
+        f.set_fold(CreateRow::AdvancedFold, true);
+        assert!(f.row_shown(CreateRow::StatusLine));
+
+        f.field_key(&catalog, CreateRow::StatusLine, key(KeyCode::Char(' ')));
+        assert!(!has_status_line(&f, &catalog));
+        f.field_key(&catalog, CreateRow::StatusLine, key(KeyCode::Enter));
+        assert!(has_status_line(&f, &catalog));
+    }
+
+    #[test]
+    fn other_harnesses_get_no_status_line() {
+        for backend in ["opencode-litellm", "codex-openai", "claude-bare-local"] {
+            let (catalog, f) = status_line_form(backend);
+            let rows = f.rows(&catalog);
+            assert!(!rows.contains(&CreateRow::StatusLine), "{backend}");
+            assert!(!has_status_line(&f, &catalog), "{backend}");
+            assert_eq!(f.status_line_addon(&catalog), None, "{backend}");
+            assert_eq!(
+                f.fold_summary(&app_ref(&catalog), CreateRow::AdvancedFold),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn the_review_and_the_fold_name_the_status_line_only_when_off() {
+        let (catalog, mut f) = status_line_form("claude-anthropic");
+        let app = app_ref(&catalog);
+        let line = |f: &CreateForm| {
+            let review = f.review(&app);
+            let found = review.answers.iter().find(|a| a.label == "Status line");
+            found.map(|a| (a.step, a.value.clone()))
+        };
+        let kits = |f: &CreateForm| {
+            let review = f.review(&app);
+            (review.answers.iter())
+                .find(|a| a.label == "Kits")
+                .map(|a| a.value.clone())
+        };
+        assert_eq!(line(&f), None);
+        assert_eq!(kits(&f).as_deref(), Some("none"));
+        assert_eq!(f.fold_summary(&app, CreateRow::AdvancedFold), None);
+        assert!(field_gloss(CreateRow::AdvancedFold).contains("status line"));
+        let help = f.help(&app, WizardRow::Field(CreateRow::AdvancedFold));
+        assert!(help.text.contains("status line"), "{}", help.text);
+        let help = f.help(&app, WizardRow::Field(CreateRow::StatusLine));
+        assert!(help.text.contains("status line"), "{}", help.text);
+
+        f.toggle_status_line(&catalog);
+        assert_eq!(line(&f), Some((CreateStep::Workspace, "off".to_string())));
+        assert_eq!(kits(&f).as_deref(), Some("none"));
+        let summary = f.fold_summary(&app, CreateRow::AdvancedFold);
+        assert_eq!(summary.as_deref(), Some(NO_STATUS_LINE));
+    }
+
+    #[test]
+    fn the_last_creates_status_line_choice_is_kept() {
+        let (catalog, f) = status_line_form("claude-anthropic");
+        let prefilled = |addons: Option<&[&str]>| {
+            let mut f = f.clone();
+            let mut defaults = crate::state::CreateDefaults {
+                backend: "claude-anthropic".into(),
+                ..Default::default()
+            };
+            if let Some(addons) = addons {
+                let addons = addons.iter().map(|a| a.to_string()).collect();
+                defaults.addons.insert("claude-anthropic".into(), addons);
+            }
+            assert!(f.apply_defaults(&catalog, &defaults, crate::sbx::SkillsMode::default()));
+            f
+        };
+        assert!(!has_status_line(&prefilled(Some(&[])), &catalog));
+        assert!(!has_status_line(&prefilled(Some(&["rtk"])), &catalog));
+        assert!(has_status_line(&prefilled(Some(&["statusline"])), &catalog));
+        assert!(
+            has_status_line(&prefilled(None), &catalog),
+            "no create on this backend yet: the default"
+        );
+        let off = prefilled(Some(&[]));
+        assert!(!off.fold_open(CreateRow::AdvancedFold));
     }
 
     /// An app for `help` to read: the one the form was opened in is borrowed by the form.
