@@ -672,7 +672,12 @@ pub fn kit_hue(kit: &str) -> Hue {
     match kit {
         "web" => Hue::Red,
         "rtk" => Hue::Green,
-        "host-gradle" | "host-maven" | "host-npm" | "host-pip" | "host-skills" => Hue::Blue,
+        "host-gradle"
+        | "host-gradle-properties"
+        | "host-maven"
+        | "host-npm"
+        | "host-pip"
+        | "host-skills" => Hue::Blue,
         k if k.starts_with("jdk") => Hue::Yellow,
         _ => Hue::Magenta,
     }
@@ -1352,6 +1357,145 @@ fn host_cache_mounts_in(addons: &[String], home: Option<&Path>) -> Vec<String> {
         .collect()
 }
 
+/// The addons that copy one file of the host's home instead of mounting a folder.
+pub const HOST_FILE_KITS: [&str; 1] = ["host-gradle-properties"];
+
+/// The folder of the state folder that holds the staged copy, and the one name the addon's hook
+/// finds the mount by.
+pub const GRADLE_PROPERTIES_STAGE_DIR: &str = "aisbx-gradle-properties";
+
+const GRADLE_PROPERTIES_FILE: &str = "gradle.properties";
+
+pub const GRADLE_PROPERTIES_MARKER: &str = ".aisbx-staging";
+
+fn gradle_properties_host_file(home: &Path) -> PathBuf {
+    home.join(".gradle").join(GRADLE_PROPERTIES_FILE)
+}
+
+/// Copies the host's `~/.gradle/gradle.properties` to `<state>/aisbx-gradle-properties/`
+/// (folder 0700, file 0600; a symlink is read through), or removes the copy when the host file
+/// is gone. Every call overwrites the copy. The folder is made private, and refused when it is a
+/// symlink, before anything is written or removed; it is there either way, so the mount
+/// [`kit_mounts_in`] lists exists. Each writer has a fresh exclusive temporary file, and the copy
+/// appears by rename.
+pub fn stage_gradle_properties(home: &Path, state: &Path) -> std::io::Result<()> {
+    let dir = state.join(GRADLE_PROPERTIES_STAGE_DIR);
+    let staged = dir.join(GRADLE_PROPERTIES_FILE);
+    let source = gradle_properties_host_file(home);
+    private_dir(&dir)?;
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dir.join(GRADLE_PROPERTIES_MARKER))
+    {
+        Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(e),
+        _ => {}
+    }
+    match std::fs::metadata(&source) {
+        Ok(meta) if meta.is_file() => {}
+        Ok(_) => return remove_staged(&staged),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return remove_staged(&staged),
+        Err(e) => return Err(e),
+    }
+    let bytes = std::fs::read(&source)?;
+    let tmp = write_private_temp(&dir, &bytes)?;
+    std::fs::rename(&tmp, &staged).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+
+fn remove_staged(staged: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(staged) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
+}
+
+fn private_dir(dir: &Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(dir) {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => {
+            return Err(std::io::Error::other(format!(
+                "{} is not a folder",
+                dir.display()
+            )))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let missing: Vec<&Path> = dir
+                .ancestors()
+                .take_while(|a| std::fs::symlink_metadata(a).is_err())
+                .collect();
+            for made in missing.into_iter().rev() {
+                match std::fs::create_dir(made) {
+                    Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(e),
+                    _ => {}
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mode = std::fs::metadata(made)?.permissions().mode();
+                    if mode & 0o700 != 0o700 {
+                        std::fs::set_permissions(
+                            made,
+                            std::fs::Permissions::from_mode((mode & 0o7777) | 0o700),
+                        )?;
+                    }
+                }
+            }
+        }
+        Err(e) => return Err(e),
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn write_private_temp(dir: &Path, bytes: &[u8]) -> std::io::Result<PathBuf> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    let mut last = None;
+    for _ in 0..16 {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = dir.join(format!(
+            ".{GRADLE_PROPERTIES_FILE}.{}.{n}",
+            std::process::id()
+        ));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&path) {
+            Ok(mut file) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if let Err(e) = file.set_permissions(std::fs::Permissions::from_mode(0o600)) {
+                        let _ = std::fs::remove_file(&path);
+                        return Err(e);
+                    }
+                }
+                return match file.write_all(bytes).and_then(|()| file.sync_all()) {
+                    Ok(()) => Ok(path),
+                    Err(e) => {
+                        let _ = std::fs::remove_file(&path);
+                        Err(e)
+                    }
+                };
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = Some(e),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| std::io::Error::other("no temporary file")))
+}
+
 /// What a create would mount for one host-cache addon now: the create form greys a kit out by
 /// it. Read through the same functions as [`kit_mounts`].
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -1406,6 +1550,7 @@ pub fn host_cache_detection_in(kit: &str, home: Option<&Path>) -> Option<HostDet
 /// list these first, under *Host caches*: what they offer depends on this host, not on the kit.
 pub fn is_host_folder_kit(kit: &str) -> bool {
     HOST_JVM_KITS.contains(&kit)
+        || HOST_FILE_KITS.contains(&kit)
         || HOST_FOLDER_KITS.contains(&kit)
         || crate::skill_source::needs_mounts(kit)
 }
@@ -1415,6 +1560,18 @@ fn host_cache_detection_on(kit: &str, home: Option<&Path>, os: &str) -> Option<H
         return None;
     }
     let addons = [kit.to_string()];
+    if HOST_FILE_KITS.contains(&kit) {
+        let file = home.map(gradle_properties_host_file);
+        return Some(HostDetect {
+            mounts: file
+                .filter(|f| f.is_file())
+                .map(|f| format!("{}:ro", f.display()))
+                .into_iter()
+                .collect(),
+            notes: Vec::new(),
+            looked_for: vec![format!("~/.gradle/{GRADLE_PROPERTIES_FILE}")],
+        });
+    }
     if HOST_JVM_KITS.contains(&kit) {
         return Some(HostDetect {
             mounts: host_cache_mounts_in(&addons, home),
@@ -1456,12 +1613,267 @@ pub struct KitMounts {
 /// Every read-only mount the chosen addons need. Headless `up`, the dashboard's create and its
 /// rebuild all take their mounts from here.
 pub fn kit_mounts(addons: &[String]) -> KitMounts {
-    let packages = package_cache_mounts(addons, home_dir().as_deref());
-    let mut mounts = host_cache_mounts(addons);
+    kit_mounts_in(addons, home_dir().as_deref(), &crate::state::state_dir())
+}
+
+/// [`kit_mounts`] for a given home and state folder. It only reads. The staging folder of
+/// [`HOST_FILE_KITS`] is listed whenever such an addon is chosen, with or without the host file:
+/// [`stage_host_files_in`] makes it when the create runs.
+pub fn kit_mounts_in(addons: &[String], home: Option<&Path>, state: &Path) -> KitMounts {
+    let packages = package_cache_mounts(addons, home);
+    let mut mounts = host_cache_mounts_in(addons, home);
     mounts.extend(packages.mounts);
+    if home.is_some() && copies_host_files(addons) {
+        mounts.push(format!("{}:ro", gradle_properties_stage(state).display()));
+    }
     KitMounts {
         mounts,
         notes: packages.notes,
+    }
+}
+
+fn gradle_properties_stage(state: &Path) -> PathBuf {
+    state.join(GRADLE_PROPERTIES_STAGE_DIR)
+}
+
+/// Takes the staging folder's mount out of `mounts`: a job that stages when it runs adds it to
+/// its create then ([`add_stage_mount`]), once the folder exists.
+pub fn take_stage_mount(mounts: &mut Vec<String>, state: &Path) -> Option<String> {
+    let spec = format!("{}:ro", gradle_properties_stage(state).display());
+    let at = mounts.iter().position(|m| *m == spec)?;
+    Some(mounts.remove(at))
+}
+
+/// Puts `spec` after the mounts of every `sbx create` in `steps`.
+pub fn add_stage_mount(steps: &mut [crate::job::Step], spec: &str) {
+    for step in steps {
+        if step.argv.get(1).map(String::as_str) == Some("create") {
+            step.argv.push(spec.to_string());
+        }
+    }
+}
+
+/// Whether one of the chosen addons copies a host file ([`HOST_FILE_KITS`]).
+pub fn copies_host_files(addons: &[String]) -> bool {
+    addons.iter().any(|a| HOST_FILE_KITS.contains(&a.as_str()))
+}
+
+/// `path` with its nearest existing ancestor resolved and the rest appended, so a folder that
+/// does not exist yet is judged where it would be made. `None` when the rest has a `..` or the
+/// ancestor cannot be resolved.
+fn resolve_future(path: &Path) -> Option<PathBuf> {
+    use std::path::Component;
+    let mut rest: Vec<std::ffi::OsString> = Vec::new();
+    let mut at = path;
+    let base = loop {
+        if let Ok(real) = std::fs::canonicalize(at) {
+            break real;
+        }
+        match at.components().next_back()? {
+            Component::Normal(name) => rest.push(name.to_os_string()),
+            Component::CurDir => {}
+            _ => return None,
+        }
+        at = at.parent()?;
+    };
+    Some(rest.iter().rev().fold(base, |acc, n| acc.join(n)))
+}
+
+/// Why the host file must not be staged in `state`: a path sbx cannot take as a mount source (not
+/// absolute, not UTF-8, a `,`, or a `:` — a Windows drive letter aside), or a folder in
+/// `exposed` (the workspaces and extra mounts of the sandboxes) that holds it, through which a
+/// sandbox without the addon would see the copy.
+pub fn staging_refusal(state: &Path, exposed: &[PathBuf]) -> Option<String> {
+    let shown = state.display().to_string();
+    let not = format!("~/.gradle/{GRADLE_PROPERTIES_FILE} is not copied");
+    let Some(text) = state.to_str().filter(|_| state.is_absolute()) else {
+        return Some(format!(
+            "{not}: the state folder {shown} is not an absolute UTF-8 path; set XDG_STATE_HOME \
+             to one"
+        ));
+    };
+    let b = text.as_bytes();
+    let drive = cfg!(windows)
+        && b.len() >= 3
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && (b[2] == b'\\' || b[2] == b'/');
+    let rest = if drive { &text[2..] } else { text };
+    if rest.contains(':') || rest.contains(',') {
+        return Some(format!(
+            "{not}: the state folder {shown} has a ':' or ',' in its path, which sbx reads as \
+             mount syntax; set XDG_STATE_HOME to a folder without one"
+        ));
+    }
+    let stage = gradle_properties_stage(state);
+    let Some(stage_real) = resolve_future(&stage) else {
+        return Some(format!(
+            "{not}: the state folder {shown} cannot be resolved to check it against the \
+             sandboxes' folders"
+        ));
+    };
+    let holder = exposed.iter().filter(|m| m.is_absolute()).find(|m| {
+        let real = resolve_future(m).unwrap_or_else(|| m.to_path_buf());
+        stage.starts_with(m) || stage_real.starts_with(real)
+    })?;
+    Some(format!(
+        "{not}: the staging folder {} is inside {}, which a sandbox mounts, so a sandbox \
+         without the addon would see the copy; set XDG_STATE_HOME to a folder outside every \
+         sandbox's mounts",
+        stage.display(),
+        holder.display()
+    ))
+}
+
+/// Whether `stage` holds a copy: any entry but the marker, so a temp file an interrupted staging
+/// left counts.
+fn holds_a_copy(stage: &Path) -> bool {
+    match std::fs::read_dir(stage) {
+        Ok(entries) => entries
+            .filter_map(Result::ok)
+            .any(|e| e.file_name() != GRADLE_PROPERTIES_MARKER),
+        Err(_) => false,
+    }
+}
+
+/// Why a sandbox created without the addon must not mount `own` (its workspace and extra
+/// mounts): one of them holds a copy an earlier create staged in `state`.
+pub fn stage_exposure_refusal(addons: &[String], state: &Path, own: &[PathBuf]) -> Option<String> {
+    let stage = gradle_properties_stage(state);
+    if copies_host_files(addons) || !holds_a_copy(&stage) {
+        return None;
+    }
+    let stage_real = resolve_future(&stage)?;
+    let holder = own
+        .iter()
+        .filter(|m| m.is_absolute())
+        .find(|m| stage_real.starts_with(resolve_future(m).unwrap_or_else(|| m.to_path_buf())))?;
+    Some(format!(
+        "{} holds {}, the copy of ~/.gradle/{GRADLE_PROPERTIES_FILE} an earlier sandbox staged, \
+         which this sandbox would read without the addon; mount another folder",
+        holder.display(),
+        stage.display()
+    ))
+}
+
+/// Stages the host files the chosen addons copy ([`stage_gradle_properties`]); nothing when no
+/// such addon is chosen. This is the only writer: a create, a rebuild and `up` call it at the
+/// moment they run, never while only planning. A [`staging_refusal`] for `exposed` stages
+/// nothing. The error is a sentence for the user.
+pub fn stage_host_files_in(
+    addons: &[String],
+    home: Option<&Path>,
+    state: &Path,
+    exposed: &[PathBuf],
+) -> Result<(), String> {
+    let Some(home) = home.filter(|_| copies_host_files(addons)) else {
+        return Ok(());
+    };
+    if let Some(refusal) = staging_refusal(state, exposed) {
+        return Err(refusal);
+    }
+    stage_gradle_properties(home, state)
+        .map_err(|e| format!("could not copy ~/.gradle/{GRADLE_PROPERTIES_FILE} ({e})"))
+}
+
+/// Every host folder any sandbox mounts now, read from sbx: its workspaces and, from `inspect`,
+/// every bind mount, those added with `sbx mount` too. An error when sbx cannot say, so that no
+/// copy is staged unchecked.
+pub fn mount_inventory(state: &Path) -> Result<Vec<PathBuf>, String> {
+    let list = sbx::list().map_err(|e| format!("could not read the sandboxes' folders ({e:#})"))?;
+    let stage = gradle_properties_stage(state);
+    let mut out = Vec::new();
+    for entry in &list {
+        let inspected = sbx::inspect(&entry.name)
+            .map_err(|e| format!("could not read the mounts of {} ({e:#})", entry.name))?;
+        let installed: Vec<String> = (inspected.kits.iter())
+            .filter_map(|k| Path::new(k).file_name()?.to_str().map(String::from))
+            .collect();
+        let copies = copies_host_files(&installed);
+        let own_stage =
+            |host: &Path, read_only: bool| copies && read_only && same_folder(host, &stage);
+        let listed = (entry.workspaces.iter())
+            .map(|s| crate::folders::spec_host(s))
+            .map(|(p, ro)| (PathBuf::from(p), ro));
+        let bound = strict_mounts(&entry.name, &inspected)?
+            .into_iter()
+            .map(|m| (PathBuf::from(m.host_path), m.read_only));
+        out.extend(
+            listed
+                .chain(bound)
+                .filter(|(host, ro)| !own_stage(host, *ro))
+                .map(|(host, _)| host),
+        );
+    }
+    Ok(out)
+}
+
+/// The mounts of `inspected` ([`sbx::InspectEntry::host_mounts`] and `runtime_mounts`), none
+/// skipped: an element that does not decode, or names no host folder, is an error naming the
+/// sandbox, so staging never goes on with a mount it cannot see.
+fn strict_mounts(
+    name: &str,
+    inspected: &sbx::InspectEntry,
+) -> Result<Vec<sbx::RuntimeMount>, String> {
+    inspected
+        .host_mounts
+        .iter()
+        .chain(&inspected.runtime_mounts)
+        .map(|v| {
+            serde_json::from_value::<sbx::RuntimeMount>(v.clone())
+                .ok()
+                .filter(|m| !m.host_path.is_empty())
+                .ok_or_else(|| format!("could not read a mount of {name}; nothing is copied"))
+        })
+        .collect()
+}
+
+fn same_folder(a: &Path, b: &Path) -> bool {
+    a == b
+        || match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
+}
+
+/// The host folders of mounts as sbx lists them (`PATH[:TARGET][:ro]`).
+pub fn mount_hosts(specs: &[String]) -> Vec<PathBuf> {
+    specs
+        .iter()
+        .map(|s| PathBuf::from(crate::folders::spec_host(s).0))
+        .collect()
+}
+
+/// What `up` on an existing sandbox whose installed kits copy a host file does: stages again, so
+/// an edit reaches it and a deleted host file loses its copy. `workspaces`: the sandbox's mounts
+/// as `sbx ls` lists them; `exposed` as for [`stage_host_files_in`]. The notes are warnings: a
+/// refusal, a failed copy, or a sandbox that does not mount the staging folder.
+pub fn refresh_host_files_in(
+    installed: &[String],
+    home: Option<&Path>,
+    state: &Path,
+    workspaces: &[String],
+    exposed: Result<Vec<PathBuf>, String>,
+) -> Vec<String> {
+    if !copies_host_files(installed) {
+        return Vec::new();
+    }
+    let staged = exposed.and_then(|e| stage_host_files_in(installed, home, state, &e));
+    if let Err(e) = staged {
+        return vec![format!("host-gradle-properties: {e}")];
+    }
+    let stage = gradle_properties_stage(state);
+    let real = |p: &Path| std::fs::canonicalize(p).ok();
+    let mounted = mount_hosts(workspaces)
+        .iter()
+        .any(|m| *m == stage || (real(m).is_some() && real(m) == real(&stage)));
+    match mounted {
+        true => Vec::new(),
+        false => vec![format!(
+            "host-gradle-properties: this sandbox does not mount {}, so the copy does not reach \
+             it; rebuild it to include the file",
+            stage.display()
+        )],
     }
 }
 
@@ -2335,6 +2747,407 @@ mod tests {
             kit_mounts(&strings(&["rtk", "web", "jdk25"])),
             KitMounts::default()
         );
+    }
+
+    fn properties_fixture(name: &str, content: Option<&str>) -> (PathBuf, PathBuf, PathBuf) {
+        let base =
+            std::env::temp_dir().join(format!("aisbx-tests-props-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (home, state) = (base.join("home"), base.join("state dir"));
+        std::fs::create_dir_all(home.join(".gradle")).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        if let Some(content) = content {
+            std::fs::write(home.join(".gradle/gradle.properties"), content).unwrap();
+        }
+        (base, home, state)
+    }
+
+    fn staged_in(state: &Path) -> PathBuf {
+        state
+            .join(GRADLE_PROPERTIES_STAGE_DIR)
+            .join("gradle.properties")
+    }
+
+    /// The plan `up`, a create and a rebuild take, then the staging they run with it.
+    fn plan_and_stage(addons: &[String], home: &Path, state: &Path) -> KitMounts {
+        let plan = kit_mounts_in(addons, Some(home), state);
+        stage_host_files_in(addons, Some(home), state, &[]).unwrap();
+        plan
+    }
+
+    /// Without the addon, the same plan as before and nothing staged, through the decision `up`,
+    /// a create and a rebuild take.
+    #[test]
+    fn the_properties_addon_not_chosen_mounts_and_stages_nothing() {
+        let (base, home, state) = properties_fixture("off", Some("a=1\n"));
+        let off = strings(&["host-gradle", "rtk"]);
+        let got = plan_and_stage(&off, &home, &state);
+        let before = KitMounts {
+            mounts: host_cache_mounts_in(&off, Some(home.as_path())),
+            notes: package_cache_mounts(&off, Some(home.as_path())).notes,
+        };
+        assert_eq!(got, before);
+        assert!(!state.join(GRADLE_PROPERTIES_STAGE_DIR).exists());
+        assert!(
+            refresh_host_files_in(&off, Some(home.as_path()), &state, &[], Ok(Vec::new()))
+                .is_empty()
+        );
+        assert!(!state.join(GRADLE_PROPERTIES_STAGE_DIR).exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Chosen: the same decision stages the file (0600 in a 0700 folder, also when the state
+    /// folder has a space in its path), lists the folder as a read-only mount, copies an edit,
+    /// reads a symlink through and drops the copy with the host file; the folder stays mounted.
+    #[cfg(unix)]
+    #[test]
+    fn the_properties_addon_stages_a_private_copy_and_mounts_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let (base, home, state) = properties_fixture("on", Some("a=1\n"));
+        let on = strings(&["host-gradle-properties"]);
+        let run = || plan_and_stage(&on, &home, &state);
+        let dir = state.join(GRADLE_PROPERTIES_STAGE_DIR);
+        let staged = staged_in(&state);
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+
+        let got = run();
+        assert_eq!(got.mounts, vec![format!("{}:ro", dir.display())]);
+        assert!(got.notes.is_empty());
+        assert_eq!(std::fs::read_to_string(&staged).unwrap(), "a=1\n");
+        assert_eq!((mode(&dir), mode(&staged)), (0o700, 0o600));
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+
+        std::fs::write(home.join(".gradle/gradle.properties"), "a=2\n").unwrap();
+        run();
+        assert_eq!(std::fs::read_to_string(&staged).unwrap(), "a=2\n");
+        assert_eq!(mode(&staged), 0o600);
+
+        let real = base.join("real.properties");
+        std::fs::rename(home.join(".gradle/gradle.properties"), &real).unwrap();
+        std::os::unix::fs::symlink(&real, home.join(".gradle/gradle.properties")).unwrap();
+        run();
+        assert!(!std::fs::symlink_metadata(&staged).unwrap().is_symlink());
+        assert_eq!(std::fs::read_to_string(&staged).unwrap(), "a=2\n");
+
+        std::fs::remove_file(home.join(".gradle/gradle.properties")).unwrap();
+        assert_eq!(run().mounts, vec![format!("{}:ro", dir.display())]);
+        assert!(!staged.exists());
+        assert_eq!(mode(&dir), 0o700);
+        run();
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Planning reads only: the plan lists the mount and writes nothing.
+    #[test]
+    fn planning_the_properties_mount_writes_nothing() {
+        let (base, home, state) = properties_fixture("plan", Some("a=1\n"));
+        let on = strings(&["host-gradle-properties"]);
+        let plan = kit_mounts_in(&on, Some(home.as_path()), &state);
+        assert_eq!(plan.mounts.len(), 1);
+        assert!(!state.join(GRADLE_PROPERTIES_STAGE_DIR).exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A stale entry, a loose folder or a link where the staging writes never decides what is
+    /// written or where: a link in the folder's place fails and writes nothing.
+    #[cfg(unix)]
+    #[test]
+    fn staging_writes_through_a_fresh_private_file_and_follows_no_link() {
+        use std::os::unix::fs::PermissionsExt;
+        let (base, home, state) = properties_fixture("harden", Some("a=1\n"));
+        let dir = state.join(GRADLE_PROPERTIES_STAGE_DIR);
+        let staged = staged_in(&state);
+        let victim = base.join("victim");
+        std::fs::write(&victim, "keep").unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(&staged, "old").unwrap();
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o644)).unwrap();
+        for old in [".gradle.properties.tmp", "gradle.properties.tmp"] {
+            std::os::unix::fs::symlink(&victim, dir.join(old)).unwrap();
+        }
+        stage_gradle_properties(&home, &state).unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!((mode(&dir), mode(&staged)), (0o700, 0o600));
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+        assert_eq!(std::fs::read_to_string(&staged).unwrap(), "a=1\n");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+        let elsewhere = base.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &dir).unwrap();
+        assert!(stage_gradle_properties(&home, &state).is_err());
+        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+
+        std::fs::write(elsewhere.join("gradle.properties"), "theirs").unwrap();
+        std::fs::remove_file(home.join(".gradle/gradle.properties")).unwrap();
+        assert!(stage_gradle_properties(&home, &state).is_err());
+        assert_eq!(
+            std::fs::read_to_string(elsewhere.join("gradle.properties")).unwrap(),
+            "theirs",
+            "the clean-up deletes nothing through a linked folder"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Writers racing each other each publish a whole file, and leave no temporary one behind.
+    #[test]
+    fn concurrent_staging_publishes_whole_files() {
+        let (base, home, state) = properties_fixture("race", Some(&"k=v\n".repeat(20_000)));
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    for _ in 0..5 {
+                        stage_gradle_properties(&home, &state).unwrap();
+                        let seen = std::fs::read_to_string(staged_in(&state)).unwrap();
+                        assert_eq!(seen.len(), 80_000);
+                    }
+                });
+            }
+        });
+        let mut left: Vec<_> = std::fs::read_dir(state.join(GRADLE_PROPERTIES_STAGE_DIR))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        left.sort();
+        assert_eq!(left, [GRADLE_PROPERTIES_MARKER, "gradle.properties"]);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `aisbx up` on an existing sandbox: an edit is staged again, a deleted host file loses its
+    /// copy, a sandbox without the exact staging mount is told to rebuild.
+    #[test]
+    fn up_on_an_existing_sandbox_stages_again() {
+        let (base, home, state) = properties_fixture("reuse", Some("a=1\n"));
+        let on = strings(&["host-gradle-properties"]);
+        let dir = state.join(GRADLE_PROPERTIES_STAGE_DIR);
+        let mounted = vec![
+            "/proj".to_string(),
+            format!("{}:ro", dir.display()),
+            "/x/other:ro".to_string(),
+        ];
+        let refresh = |workspaces: &[String]| {
+            refresh_host_files_in(
+                &on,
+                Some(home.as_path()),
+                &state,
+                workspaces,
+                Ok(Vec::new()),
+            )
+        };
+        assert!(refresh(&mounted).is_empty());
+        assert_eq!(std::fs::read_to_string(staged_in(&state)).unwrap(), "a=1\n");
+        std::fs::write(home.join(".gradle/gradle.properties"), "a=2\n").unwrap();
+        assert!(refresh(&mounted).is_empty());
+        assert_eq!(std::fs::read_to_string(staged_in(&state)).unwrap(), "a=2\n");
+        let elsewhere = format!("/x/{GRADLE_PROPERTIES_STAGE_DIR}:ro");
+        let notes = refresh(&["/proj".to_string(), elsewhere]);
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("rebuild"), "{notes:?}");
+        std::fs::remove_file(home.join(".gradle/gradle.properties")).unwrap();
+        assert!(refresh(&mounted).is_empty());
+        assert!(!staged_in(&state).exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The staging refuses, and writes nothing, for a state folder with a `:` in its path (a drive
+    /// letter aside) and for one inside a folder a sandbox mounts, such as the workspace of a
+    /// sandbox without the addon; any other state folder is staged.
+    #[test]
+    fn staging_refuses_a_state_folder_with_a_colon_or_inside_a_mounted_folder() {
+        let (base, home, state) = properties_fixture("refuse", Some("a=1\n"));
+        let on = strings(&["host-gradle-properties"]);
+        let stage = |state: &Path, exposed: &[PathBuf]| {
+            stage_host_files_in(&on, Some(home.as_path()), state, exposed)
+        };
+
+        let colon = base.join("cache:/state");
+        let refused = stage(&colon, &[]).unwrap_err();
+        assert!(refused.contains("':'"), "{refused}");
+        assert!(!base.join("cache:").exists(), "nothing was created");
+        for bad in ["x:state", "a:/state", ":state", "relative/state"] {
+            assert!(staging_refusal(Path::new(bad), &[]).is_some(), "{bad}");
+        }
+        let comma = base.join("a,b");
+        assert!(staging_refusal(&comma, &[]).unwrap().contains("','"));
+        let drive = Path::new("C:\\Users\\u\\AppData\\Local\\aisbx\\state");
+        assert_eq!(staging_refusal(drive, &[]).is_none(), cfg!(windows));
+
+        let workspaces = mount_hosts(&strings(&["/proj", &format!("{}:ro", base.display())]));
+        let refused = stage(&state, &workspaces).unwrap_err();
+        assert!(refused.contains("inside"), "{refused}");
+        assert!(refused.contains(&base.display().to_string()), "{refused}");
+        assert!(!state.join(GRADLE_PROPERTIES_STAGE_DIR).exists());
+        assert!(refresh_host_files_in(
+            &on,
+            Some(home.as_path()),
+            &state,
+            &[],
+            Ok(workspaces.clone())
+        )
+        .iter()
+        .any(|n| n.contains("inside")));
+        assert!(!state.join(GRADLE_PROPERTIES_STAGE_DIR).exists());
+
+        let others = mount_hosts(&strings(&["/proj", "", &format!("{}:ro", home.display())]));
+        assert_eq!(staging_refusal(&state, &others), None);
+        stage(&state, &others).unwrap();
+        assert_eq!(std::fs::read_to_string(staged_in(&state)).unwrap(), "a=1\n");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A state folder that does not exist yet, below a symlinked parent that leads into a mounted
+    /// folder, is refused at the first staging, and nothing is made there.
+    #[cfg(unix)]
+    #[test]
+    fn staging_resolves_a_missing_state_folder_through_a_symlinked_parent() {
+        let (base, home, _) = properties_fixture("link", Some("a=1\n"));
+        let on = strings(&["host-gradle-properties"]);
+        let workspace = base.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::os::unix::fs::symlink(&workspace, base.join("via")).unwrap();
+        let state = base.join("via/new/state");
+        let exposed = vec![workspace.clone()];
+        let refused = stage_host_files_in(&on, Some(home.as_path()), &state, &exposed);
+        assert!(refused.unwrap_err().contains("inside"));
+        assert_eq!(std::fs::read_dir(&workspace).unwrap().count(), 0);
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, base.join("ok")).unwrap();
+        let state = base.join("ok/new/state");
+        stage_host_files_in(&on, Some(home.as_path()), &state, &exposed).unwrap();
+        assert!(staged_in(&state).is_file());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// An opted-out sandbox that mounts the staging folder itself gets no copy; the staging
+    /// folder with only its marker holds no copy to refuse an opted-out create for.
+    #[test]
+    fn staging_refuses_a_direct_mount_of_its_folder_and_a_marker_alone_exposes_nothing() {
+        let (base, home, state) = properties_fixture("direct", None);
+        let on = strings(&["host-gradle-properties"]);
+        let off = strings(&["host-gradle"]);
+        let stage = state.join(GRADLE_PROPERTIES_STAGE_DIR);
+        std::fs::create_dir_all(&stage).unwrap();
+        let direct = vec![stage.clone()];
+        let refused = stage_host_files_in(&on, Some(home.as_path()), &state, &direct);
+        assert!(refused.unwrap_err().contains("inside"));
+        assert!(!stage.join(GRADLE_PROPERTIES_MARKER).exists());
+        stage_host_files_in(&on, Some(home.as_path()), &state, &[]).unwrap();
+        assert!(stage.join(GRADLE_PROPERTIES_MARKER).exists());
+        assert_eq!(stage_exposure_refusal(&off, &state, &direct), None);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// An interrupted staging leaves a temp file next to the marker: that is a copy too.
+    #[test]
+    fn a_leftover_temp_file_beside_the_marker_counts_as_a_copy() {
+        let (base, _home, state) = properties_fixture("leftover", None);
+        let off = strings(&["host-gradle"]);
+        let stage = state.join(GRADLE_PROPERTIES_STAGE_DIR);
+        std::fs::create_dir_all(&stage).unwrap();
+        let own = vec![base.clone()];
+        std::fs::write(stage.join(GRADLE_PROPERTIES_MARKER), "").unwrap();
+        assert_eq!(stage_exposure_refusal(&off, &state, &own), None);
+        std::fs::write(stage.join(".gradle.properties.tmp123"), "a=1\n").unwrap();
+        let refused = stage_exposure_refusal(&off, &state, &own).unwrap();
+        assert!(refused.contains("earlier sandbox staged"), "{refused}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A sandbox created without the addon must not mount a folder that holds an earlier copy.
+    #[test]
+    fn a_create_without_the_addon_refuses_a_folder_that_holds_the_copy() {
+        let (base, home, state) = properties_fixture("exposure", Some("a=1\n"));
+        let off = strings(&["host-gradle"]);
+        let on = strings(&["host-gradle-properties"]);
+        let own = vec![base.clone()];
+        assert_eq!(
+            stage_exposure_refusal(&off, &state, &own),
+            None,
+            "no copy yet"
+        );
+        stage_host_files_in(&on, Some(home.as_path()), &state, &[]).unwrap();
+        let refused = stage_exposure_refusal(&off, &state, &own).unwrap();
+        assert!(refused.contains("earlier sandbox staged"), "{refused}");
+        assert_eq!(
+            stage_exposure_refusal(&on, &state, &own),
+            None,
+            "the addon's own mount"
+        );
+        let elsewhere = vec![PathBuf::from("/proj"), home.clone()];
+        assert_eq!(stage_exposure_refusal(&off, &state, &elsewhere), None);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A host file that cannot be read says so and keeps the last copy; only a missing file
+    /// removes it.
+    #[cfg(unix)]
+    #[test]
+    fn a_host_file_that_cannot_be_read_keeps_the_last_copy() {
+        let (base, home, state) = properties_fixture("unreadable", Some("a=1\n"));
+        stage_gradle_properties(&home, &state).unwrap();
+        let host = home.join(".gradle/gradle.properties");
+        std::fs::remove_file(&host).unwrap();
+        std::os::unix::fs::symlink(&host, &host).unwrap();
+        assert!(stage_gradle_properties(&home, &state).is_err());
+        assert_eq!(std::fs::read_to_string(staged_in(&state)).unwrap(), "a=1\n");
+        std::fs::remove_file(&host).unwrap();
+        stage_gradle_properties(&home, &state).unwrap();
+        assert!(!staged_in(&state).exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The copy is 0600 whatever the caller's umask: a child test process runs the staging under
+    /// umask 0777.
+    #[cfg(unix)]
+    #[test]
+    fn staging_is_private_under_a_restrictive_umask() {
+        use std::os::unix::fs::PermissionsExt;
+        const NAME: &str = "model::tests::staging_is_private_under_a_restrictive_umask";
+        if let Ok(base) = std::env::var("AISBX_TEST_UMASK_BASE") {
+            let base = PathBuf::from(base);
+            stage_gradle_properties(&base.join("home"), &base.join("fresh/state dir")).unwrap();
+            return;
+        }
+        let (base, _, _) = properties_fixture("umask", Some("a=1\n"));
+        let state = base.join("fresh/state dir");
+        let exe = std::env::current_exe().unwrap();
+        let status = std::process::Command::new("sh")
+            .args([
+                "-c",
+                "umask 0777; exec \"$0\" --exact \"$1\" --test-threads=1",
+            ])
+            .arg(exe)
+            .arg(NAME)
+            .env("AISBX_TEST_UMASK_BASE", &base)
+            .output()
+            .unwrap();
+        assert!(status.status.success(), "{status:?}");
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&staged_in(&state)), 0o600);
+        assert_eq!(mode(&state.join(GRADLE_PROPERTIES_STAGE_DIR)), 0o700);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// No host file: the row is not detected and names the file; a file is detected, and
+    /// detection writes nothing.
+    #[test]
+    fn the_properties_addon_is_detected_by_its_file() {
+        let (base, home, state) = properties_fixture("detect", None);
+        let detect =
+            |h: &Path| host_cache_detection_on("host-gradle-properties", Some(h), "linux").unwrap();
+        let none = detect(&home);
+        assert!(!none.detected());
+        assert_eq!(
+            none.reason("host-gradle-properties"),
+            "no ~/.gradle/gradle.properties"
+        );
+        std::fs::write(home.join(".gradle/gradle.properties"), "").unwrap();
+        assert!(detect(&home).detected());
+        assert!(is_host_folder_kit("host-gradle-properties"));
+        assert!(!state.join(GRADLE_PROPERTIES_STAGE_DIR).exists());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// Each JVM kit mounts its own tool's folders, read-only and at their own paths, and only the

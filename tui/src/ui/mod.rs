@@ -4321,6 +4321,35 @@ mod tests {
     }
 
     #[test]
+    fn the_kits_editor_keeps_the_whole_properties_label_for_an_added_or_removed_row() {
+        const LABEL: &str = "Gradle properties file (may contain secrets!)";
+        for width in [80u16, 110] {
+            for added in [true, false] {
+                let mut app = app_with(populated());
+                app.open_kits("claude-anthropic-proj");
+                let catalog = std::sync::Arc::clone(&app.catalog);
+                let at = catalog
+                    .addons
+                    .iter()
+                    .position(|a| a.kit.name == "host-gradle-properties")
+                    .unwrap();
+                if let Screen::Kits(form) = &mut app.screen {
+                    form.original[at] = !added;
+                    form.addons[at] = added;
+                }
+                let screen = super::tests_support::render_at(&mut app, width, 60);
+                let row = screen
+                    .lines()
+                    .find(|l| l.contains("host-gradle-properties "))
+                    .unwrap_or_else(|| panic!("{width}: {screen}"));
+                assert!(row.contains(LABEL), "{width} {added}: {row}");
+                let change = if added { "+" } else { "−" };
+                assert!(row.contains(change), "{width} {added}: {row}");
+            }
+        }
+    }
+
+    #[test]
     fn the_kits_editor_names_the_agent_as_the_overview_does() {
         let mut app = app_with(populated());
         app.open_kits("claude-anthropic-proj");
@@ -4693,6 +4722,57 @@ mod tests {
     }
 
     #[test]
+    fn the_properties_row_shows_its_whole_label_or_its_whole_reason_and_its_help_the_warning() {
+        const LABEL: &str = "Gradle properties file (may contain secrets!)";
+        const FULL: &str = "a copy of your ~/.gradle/gradle.properties. The agent can read and \
+                            edit the copy. Beware: this file may contain secrets!";
+        for width in [80u16, 110] {
+            for found in [false, true] {
+                let mut app = app_with(Vec::new());
+                open_wizard(&mut app, CreateStep::Kits);
+                let catalog = std::sync::Arc::clone(&app.catalog);
+                let Screen::Create(form) = &mut app.screen else {
+                    unreachable!("the create form is open")
+                };
+                let at = catalog
+                    .addons
+                    .iter()
+                    .position(|a| a.kit.name == "host-gradle-properties")
+                    .unwrap();
+                form.kits.host[at] = Some(crate::model::HostDetect {
+                    mounts: found
+                        .then(|| "/h/.gradle/gradle.properties:ro".to_string())
+                        .into_iter()
+                        .collect(),
+                    notes: Vec::new(),
+                    looked_for: vec!["~/.gradle/gradle.properties".into()],
+                });
+                if found {
+                    app.on_key(KeyEvent::from(KeyCode::Down));
+                }
+                let screen = super::tests_support::render_at(&mut app, width, 44);
+                let row = screen
+                    .lines()
+                    .find(|l| l.contains("host-gradle-properties "))
+                    .unwrap_or_else(|| panic!("{width}: {screen}"));
+                let want = match found {
+                    true => LABEL,
+                    false => "no ~/.gradle/gradle.properties",
+                };
+                assert!(row.contains(want), "{width} {found}: {row}");
+                if found {
+                    let flat = screen
+                        .replace('"', " ")
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    assert!(flat.contains(FULL), "{width}: {screen}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn a_wizard_key_repaints_only_the_lines_it_changes() {
         let (width, height) = (110, 40);
         let mut app = app_with(Vec::new());
@@ -4707,7 +4787,10 @@ mod tests {
         let buttons = lines_with(&before, "[ Next ]")[0].1;
         let rule = lines_with(&before, "─ so far ")[0].1;
         let row = |b: &ratatui::buffer::Buffer, kit: &str| lines_with(b, &format!("] {kit} "))[0].1;
-        let (gradle, maven) = (row(&before, "host-gradle"), row(&before, "host-maven"));
+        let (gradle, maven) = (
+            row(&before, "host-gradle"),
+            row(&before, "host-gradle-properties"),
+        );
 
         app.on_key(KeyEvent::from(KeyCode::Down));
         let after = buffer_at(&mut app, width, height);

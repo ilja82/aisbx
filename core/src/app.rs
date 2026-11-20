@@ -117,6 +117,22 @@ fn litellm_root() -> PathBuf {
     }
 }
 
+/// The chosen addons whose host files a create copies: what [`PostJob::stage_host_files`] holds.
+fn staged_addons(addons: &[String]) -> Vec<String> {
+    addons
+        .iter()
+        .filter(|a| model::HOST_FILE_KITS.contains(&a.as_str()))
+        .cloned()
+        .collect()
+}
+
+/// The workspace and extra mounts of the sandbox a job creates: [`PostJob::stage_beside`].
+fn own_folders(workspace: &Path, mounts: &[String]) -> Vec<PathBuf> {
+    std::iter::once(workspace.to_path_buf())
+        .chain(model::mount_hosts(mounts))
+        .collect()
+}
+
 /// [`App::host_home`]: the real home folder, or under `cargo test` none.
 fn host_home() -> Option<PathBuf> {
     if cfg!(any(test, feature = "test-support")) {
@@ -2972,6 +2988,14 @@ pub struct PostJob {
     pub record_origins: Option<OriginRecord>,
     /// A skill left the store: drop its switches and its origin.
     pub forget_store_skill: Option<String>,
+    /// The addons whose host files the job's create copies ([`model::stage_host_files_in`]):
+    /// staged when the job starts, never while it is only planned or asked about.
+    pub stage_host_files: Vec<String>,
+    /// The folders the job's sandbox mounts, which the staging refuses to put the copy in
+    /// ([`model::staging_refusal`]) as it refuses those of the listed sandboxes.
+    pub stage_beside: Vec<PathBuf>,
+    /// The staging folder's read-only mount, added to the create once the copy is staged.
+    pub stage_mount: Option<String>,
     // No field for detached mode: `sbx ls --json` reports it (`detached`).
 }
 
@@ -10754,7 +10778,8 @@ impl App {
         let model::KitMounts {
             mounts: mut ro_mounts,
             notes,
-        } = model::kit_mounts(&addons);
+        } = model::kit_mounts_in(&addons, self.host_home.as_deref(), &self.mounts_state);
+        let stage_mount = model::take_stage_mount(&mut ro_mounts, &self.mounts_state);
         let mut folder_plan = self.folder_plan(&workspace);
         let home = model::home_dir();
         let picked = typed_folders.iter().map(String::as_str);
@@ -10910,6 +10935,9 @@ impl App {
                 last_litellm: litellm,
                 defaults: Some(defaults),
                 restore: create_restore,
+                stage_host_files: staged_addons(&addons),
+                stage_beside: own_folders(&workspace, &ro_mounts),
+                stage_mount,
                 ..Default::default()
             },
             fallback: None,
@@ -11427,6 +11455,15 @@ impl App {
             let _ = self.notice_tx.send((true, reason));
             return None;
         }
+        if sb.mountless() && model::copies_host_files(addons) {
+            let _ = self.notice_tx.send((
+                true,
+                "The Gradle properties file needs a workspace for its read-only mount, and \
+                 this sandbox has no host folder; it stays as it is"
+                    .into(),
+            ));
+            return None;
+        }
         let agent = backend_kit.agent.clone();
         // A workload backend is the agent positional (see `sbx::Create`).
         let agent_kit = backend_kit
@@ -11436,7 +11473,8 @@ impl App {
         let model::KitMounts {
             mounts: mut ro_mounts,
             notes: mut mount_notes,
-        } = model::kit_mounts(addons);
+        } = model::kit_mounts_in(addons, self.host_home.as_deref(), &self.mounts_state);
+        let stage_mount = model::take_stage_mount(&mut ro_mounts, &self.mounts_state);
         // The host folders as the lists say now, those picked for this sandbox alone, and the
         // `.git` guard the sandbox has.
         let git_guard = folders::has_git_guard(&sb.workspace, &sb.ro_mounts);
@@ -11566,6 +11604,16 @@ impl App {
                         conn.as_ref().map(|c| c.name.as_str()),
                     ),
                     prune_kit_images: true,
+                    stage_host_files: staged_addons(addons),
+                    stage_beside: own_folders(&sb.workspace, &ro_mounts)
+                        .into_iter()
+                        .chain(
+                            sb.runtime_mounts
+                                .iter()
+                                .map(|m| PathBuf::from(&m.host_path)),
+                        )
+                        .collect(),
+                    stage_mount,
                     ..Default::default()
                 },
                 fallback: None,
@@ -11803,7 +11851,57 @@ impl App {
         })
     }
 
-    fn start_job(&mut self, pending: PendingJob) {
+    fn mount_inventory(&self) -> Result<Vec<PathBuf>, String> {
+        if cfg!(any(test, feature = "test-support")) {
+            return Ok((self.sandboxes.iter())
+                .flat_map(|s| {
+                    let stage = self.mounts_state.join(model::GRADLE_PROPERTIES_STAGE_DIR);
+                    let copies = model::copies_host_files(&s.addons);
+                    let own = std::iter::once(&s.workspace);
+                    let kept = own
+                        .chain(&s.ro_mounts)
+                        .chain(&s.rw_mounts)
+                        .filter(|m| !(copies && **m == stage))
+                        .cloned();
+                    let runtime = s.runtime_mounts.iter().map(|m| PathBuf::from(&m.host_path));
+                    kept.chain(runtime).collect::<Vec<_>>()
+                })
+                .collect());
+        }
+        model::mount_inventory(&self.mounts_state)
+    }
+
+    fn start_job(&mut self, mut pending: PendingJob) {
+        let staged = &pending.post.stage_host_files;
+        let checked = match model::copies_host_files(staged) {
+            true => self.mount_inventory().and_then(|mut exposed| {
+                exposed.extend(pending.post.stage_beside.iter().cloned());
+                model::stage_host_files_in(
+                    staged,
+                    self.host_home.as_deref(),
+                    &self.mounts_state,
+                    &exposed,
+                )
+            }),
+            false => match model::stage_exposure_refusal(
+                staged,
+                &self.mounts_state,
+                &pending.post.stage_beside,
+            ) {
+                Some(refusal) => Err(refusal),
+                None => Ok(()),
+            },
+        };
+        if let Err(e) = checked {
+            self.set_error(format!("{e}; nothing was started"));
+            if let Some(restore) = pending.post.restore.clone() {
+                self.restore_screen(restore);
+            }
+            return;
+        }
+        if let Some(spec) = pending.post.stage_mount.clone() {
+            model::add_stage_mount(&mut pending.steps, &spec);
+        }
         // Never run the steps under test: they would create sandboxes and overwrite host secrets.
         let steps = if cfg!(any(test, feature = "test-support")) {
             Vec::new()
@@ -16061,6 +16159,162 @@ mod tests {
             .argv
             .iter()
             .any(|a| a.contains("/gone/from/the/list")));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The properties file is copied when the rebuild runs, not when its confirmation opens or
+    /// is cancelled, and the mount is there whatever the host file did meanwhile; the addon off
+    /// copies nothing; a refused or failed copy starts nothing.
+    #[test]
+    fn a_rebuild_stages_the_properties_file_only_when_it_starts() {
+        let root =
+            std::env::temp_dir().join(format!("aisbx-tests-rebuild-props-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for d in ["proj", "home/.gradle", "state"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let host = root.join("home/.gradle/gradle.properties");
+        std::fs::write(&host, "a=1\n").unwrap();
+        let root = crate::sbx::plain_path(std::fs::canonicalize(&root).unwrap());
+        let host = root.join("home/.gradle/gradle.properties");
+        let mut sb = model::sample(
+            "claude-litellm-rebuild-props",
+            Some("claude-litellm"),
+            &["host-gradle-properties"],
+        );
+        sb.workspace = root.join("proj");
+        let name = sb.name.clone();
+        let mut app = App::for_test(Catalog::load().unwrap(), vec![sb]);
+        app.mounts_state = root.join("state");
+        app.host_home = Some(root.join("home"));
+        let stage = root.join("state").join(model::GRADLE_PROPERTIES_STAGE_DIR);
+        let staged = stage.join("gradle.properties");
+        let on = vec!["host-gradle-properties".to_string()];
+        let mounts = |steps: &[Step]| {
+            let create = (steps.iter())
+                .find(|s| s.argv.get(1).is_some_and(|a| a == "create"))
+                .unwrap();
+            create.argv.contains(&format!("{}:ro", stage.display()))
+        };
+        let started = |app: &App| match &app.modal {
+            Some(Modal::Running(_, p)) => mounts(&p.steps),
+            _ => panic!("no job started"),
+        };
+
+        let confirm = app
+            .recreate_confirm(&name, &on, None, "Recreate", Vec::new())
+            .expect("a managed sandbox");
+        assert!(
+            !mounts(&confirm.job.steps),
+            "the mount is decided at the answer"
+        );
+        assert!(confirm.job.post.stage_mount.is_some());
+        assert!(!stage.exists(), "an open confirmation copies nothing");
+        assert!(
+            app.modal.is_none(),
+            "a confirmation that is not answered starts nothing"
+        );
+        app.start_job(confirm.job.clone());
+        assert_eq!(std::fs::read_to_string(&staged).unwrap(), "a=1\n");
+        assert!(started(&app), "the answer adds the mount with the copy");
+        app.modal = None;
+
+        std::fs::remove_file(&host).unwrap();
+        app.start_job(confirm.job.clone());
+        assert!(stage.is_dir(), "the mount the job names exists");
+        assert!(!staged.exists(), "a host file gone before the answer");
+        assert!(started(&app));
+        app.modal = None;
+        std::fs::remove_dir_all(&stage).unwrap();
+
+        let absent = app
+            .recreate_confirm(&name, &on, None, "Recreate", Vec::new())
+            .expect("a managed sandbox");
+        std::fs::write(&host, "b=2\n").unwrap();
+        app.start_job(absent.job);
+        assert_eq!(std::fs::read_to_string(&staged).unwrap(), "b=2\n");
+        assert!(started(&app), "a file that appeared before the answer");
+        app.modal = None;
+        std::fs::remove_dir_all(&stage).unwrap();
+
+        let off = app
+            .recreate_confirm(&name, &[], None, "Recreate", Vec::new())
+            .expect("a managed sandbox");
+        assert!(off.job.post.stage_host_files.is_empty());
+        assert!(off.job.post.stage_mount.is_none());
+        app.start_job(off.job);
+        assert!(!stage.exists(), "no addon, no copy");
+        assert!(!started(&app));
+        app.modal = None;
+
+        std::fs::write(&host, "a=1\n").unwrap();
+        app.start_job(confirm.job.clone());
+        app.modal = None;
+        assert!(staged.exists());
+        app.sandboxes[0].runtime_mounts = vec![crate::sbx::RuntimeMount {
+            host_path: root.display().to_string(),
+            ..Default::default()
+        }];
+        let removed = app
+            .recreate_confirm(&name, &[], None, "Recreate", Vec::new())
+            .expect("a managed sandbox");
+        app.start_job(removed.job);
+        assert!(
+            app.modal.is_none(),
+            "a replayed run-time mount holds the copy"
+        );
+        assert!(
+            app.status
+                .as_ref()
+                .is_some_and(|(t, ..)| t.contains("earlier sandbox staged")),
+            "{:?}",
+            app.status
+        );
+        app.sandboxes[0].runtime_mounts.clear();
+        std::fs::remove_dir_all(&stage).unwrap();
+
+        let mut opted_out = model::sample("claude-litellm-root", Some("claude-litellm"), &[]);
+        opted_out.workspace = root.clone();
+        app.sandboxes.push(opted_out);
+        app.start_job(confirm.job.clone());
+        assert!(app.modal.is_none(), "a refused copy starts nothing");
+        assert!(
+            app.status
+                .as_ref()
+                .is_some_and(|(t, ..)| t.contains("inside")),
+            "{:?}",
+            app.status
+        );
+        assert!(!stage.exists(), "and copies nothing");
+        app.sandboxes.pop();
+
+        let mut runtime = model::sample("claude-litellm-runtime", Some("claude-litellm"), &[]);
+        runtime.workspace = PathBuf::from("/elsewhere");
+        runtime.runtime_mounts = vec![crate::sbx::RuntimeMount {
+            host_path: root.display().to_string(),
+            ..Default::default()
+        }];
+        app.sandboxes.push(runtime);
+        app.start_job(confirm.job.clone());
+        assert!(app.modal.is_none(), "a run-time mount holds the copy too");
+        assert!(!stage.exists());
+        app.sandboxes.pop();
+
+        let mut mountless = model::sample("claude-litellm-bare", Some("claude-litellm"), &[]);
+        mountless.workspace = PathBuf::new();
+        let bare = mountless.name.clone();
+        app.sandboxes.push(mountless);
+        assert!(app
+            .recreate_confirm(&bare, &on, None, "Recreate", Vec::new())
+            .is_none());
+        assert!(!stage.exists(), "a mountless sandbox stays as it is");
+        app.sandboxes.pop();
+
+        app.mounts_state = root.join("proj/not-a-folder");
+        std::fs::write(&app.mounts_state, "").unwrap();
+        app.start_job(confirm.job);
+        assert!(app.modal.is_none(), "a failed copy starts nothing");
+        assert!(app.status.is_some());
         std::fs::remove_dir_all(&root).unwrap();
     }
 

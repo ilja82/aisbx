@@ -777,7 +777,6 @@ pub(crate) fn up_inner(raw: &[String]) -> Result<String, Fail> {
     let list = sbx::list().map_err(|e| Fail::sandbox(format!("{e:#}")))?;
     let names: Vec<String> = list.iter().map(|e| e.name.clone()).collect();
     let name = up_name(wanted, &backend.kit.name, &workspace, &names)?;
-
     if let Some(existing) = list.into_iter().find(|e| e.name == name) {
         template_reuse(&name, template.as_deref())?;
         if let Some(refusal) = reuse_refusal(&name, &existing.agent, &backend_name, &backend.agent)
@@ -867,6 +866,14 @@ pub(crate) fn up_inner(raw: &[String]) -> Result<String, Fail> {
                 );
             }
         }
+        if let Ok(i) = &inspected {
+            warn_all(&refresh_reused(
+                i,
+                &existing.workspaces,
+                model::home_dir().as_deref(),
+                &state::state_dir(),
+            ));
+        }
         eprintln!("aisbx: {name} exists ({}) — reusing it", existing.status);
         match inspected {
             Ok(inspected) => approve_credentials(&inspected.kits),
@@ -943,6 +950,7 @@ pub(crate) fn up_inner(raw: &[String]) -> Result<String, Fail> {
     for note in &kit_mounts.notes {
         eprintln!("aisbx: warning: {note}");
     }
+    let generated_mounts = kit_mounts.mounts.clone();
     let mut mounts = kit_mounts.mounts;
     if args.has("git-readonly") {
         match folders::git_guard(&workspace) {
@@ -978,6 +986,28 @@ pub(crate) fn up_inner(raw: &[String]) -> Result<String, Fail> {
             copies
         }
     };
+    let mut beside = match model::copies_host_files(&addons) {
+        true => model::mount_inventory(&state::state_dir())
+            .map_err(|e| Fail::usage(format!("{e}; nothing was created")))?,
+        false => Vec::new(),
+    };
+    let stage_dir = state::state_dir().join(model::GRADLE_PROPERTIES_STAGE_DIR);
+    let addon_mount_hosts = model::mount_hosts(&generated_mounts);
+    let mut own: Vec<PathBuf> = vec![workspace.clone()];
+    let mut skipped_addon_mount = addon_mount_hosts.contains(&stage_dir);
+    for host in model::mount_hosts(&mounts) {
+        if skipped_addon_mount && host == stage_dir {
+            skipped_addon_mount = false;
+            continue;
+        }
+        own.push(host);
+    }
+    if let Some(refusal) = model::stage_exposure_refusal(&addons, &state::state_dir(), &own) {
+        return Err(Fail::usage(format!("{refusal}; nothing was created")));
+    }
+    beside.extend(own);
+    model::stage_host_files_in(&addons, home.as_deref(), &state::state_dir(), &beside)
+        .map_err(|e| Fail::usage(format!("{e}; nothing was created")))?;
     approve_credentials(&kit_dirs);
     let kit_refs: Vec<&Path> = kit_dirs.iter().map(PathBuf::as_path).collect();
     let static_mcp = static_mcp_for(&args);
@@ -1357,6 +1387,24 @@ fn label_after_add(
             addons: &after,
         },
     )
+}
+
+/// `up` on an existing sandbox: the host files its installed kits copy are staged again. The kits
+/// are those `sbx inspect` reports, not this call's `--kit`.
+fn refresh_reused(
+    inspected: &sbx::InspectEntry,
+    workspaces: &[String],
+    home: Option<&Path>,
+    state: &Path,
+) -> Vec<String> {
+    let installed: Vec<String> = (inspected.kits.iter())
+        .filter_map(|k| Path::new(k).file_name()?.to_str().map(String::from))
+        .collect();
+    let exposed = match model::copies_host_files(&installed) {
+        true => model::mount_inventory(state),
+        false => Ok(Vec::new()),
+    };
+    model::refresh_host_files_in(&installed, home, state, workspaces, exposed)
 }
 
 /// The requested addons, in request order, that no kit dir in `kits` is named after.

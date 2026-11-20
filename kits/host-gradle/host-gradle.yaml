@@ -17,6 +17,9 @@ capabilities:
         - command: ["sh", "/usr/local/lib/aisbx/host-jvm-caches/startup.sh", "gradle"]
           user: agent
           description: "Symlink the mounted host Gradle caches under ~/.host-caches and seed Gradle wrapper dists (idempotent; tolerates missing mounts)"
+        - command: ["sh", "/usr/local/lib/aisbx/host-gradle/stub-path.sh"]
+          user: agent
+          description: "Link the small helper command into a writable PATH folder (idempotent; never fails the boot)"
 
   # The agent's instructions. No filename: the workload owns the context file.
   - type: com.docker.sandbox/agent-context@1
@@ -27,5 +30,6 @@ capabilities:
         downloads land in the sandbox-local ~/.gradle/caches. Gradle wrapper dists the
         host already has are pre-seeded into ~/.gradle/wrapper/dists, so ./gradlew
         starts without download egress for those versions (others still download as
-        usual). Never write under /home/agent/.host-caches or the /Users/... | /home/...
-        mounts - they are read-only.
+        usual). A small helper command on the PATH prints a placeholder token, so Gradle
+        plugins that ask for one work offline. Never write under /home/agent/.host-caches or
+        the /Users/... | /home/... mounts - they are read-only.
