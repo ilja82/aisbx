@@ -13,7 +13,7 @@ tool=$1
 # sbx mounts the host caches at their host paths. Link them to stable paths for the image's variables.
 base=${HOST_JVM_BASE:-/home/agent/.host-caches}
 home=${base%/*}
-homes=${HOST_JVM_HOMES:-/Users/*/ /home/*/}
+homes=${HOST_JVM_HOMES:-/Users/*/ /home/*/ /?/Users/*/}
 
 case "$tool" in
   gradle | maven) ;;

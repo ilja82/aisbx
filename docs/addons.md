@@ -141,7 +141,8 @@ exist:
 | `host-gradle` | `~/.gradle/caches`, `~/.gradle/wrapper/dists` |
 | `host-maven` | `~/.m2/repository`, `~/.m2/wrapper/dists` |
 
-New artifacts go into the sandbox's own caches.
+On a Windows host sbx mounts them at `/c/Users/<user>/…` (the drive letter in lower case); the kits find them
+there too. New artifacts go into the sandbox's own caches.
 
 ### Why read-only, and only the caches
 

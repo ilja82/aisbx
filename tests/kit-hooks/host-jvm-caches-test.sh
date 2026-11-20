@@ -84,8 +84,8 @@ static() {
   check "the hook ends in exit 0" same "$(tail -n 1 "$hook")" "exit 0"
   check "the default base is /home/agent/.host-caches" grep -qF \
     'base=${HOST_JVM_BASE:-/home/agent/.host-caches}' "$hook"
-  check "the default host homes are /Users/*/ and /home/*/" grep -qF \
-    'homes=${HOST_JVM_HOMES:-/Users/*/ /home/*/}' "$hook"
+  check "the default host homes are /Users/*/, /home/*/ and /?/Users/*/" grep -qF \
+    'homes=${HOST_JVM_HOMES:-/Users/*/ /home/*/ /?/Users/*/}' "$hook"
 }
 
 # --- behaviour -----------------------------------------------------------------------------------
@@ -103,8 +103,16 @@ fresh() {
   mkdir -p "$HU" "$H"
 }
 rc=0
+rooted_homes() {   # the hook's own default search list, each pattern under $R
+  list=$(sed -n 's/^homes=\${HOST_JVM_HOMES:-\(.*\)}$/\1/p' "$hook")
+  out=""
+  set -f
+  for pattern in $list; do out="$out $R$pattern"; done
+  set +f
+  printf '%s' "${out# }"
+}
 hook() {   # hook <tool>: the hook as the startup dispatcher runs it, plus the test seams
-  env HOME="$H" HOST_JVM_BASE="$B" HOST_JVM_HOMES="$R/Users/*/ $R/home/*/" \
+  env HOME="$H" HOST_JVM_BASE="$B" HOST_JVM_HOMES="$(rooted_homes)" \
     sh "$hook" "$@" >> "$scratch/hook.log" 2>&1
   rc=$?
 }
@@ -203,6 +211,29 @@ behaviour() {
   hook ant
   check "an unknown tool: exit 0" same "$rc" 0
   check "…and nothing made" absent "$B"
+
+  echo "# 6. a Windows host mounts its home at /<drive>/Users/<user>"
+  fresh win
+  HU=$R/c/Users/u
+  mkdir -p "$HU"
+  host_gradle
+  host_maven
+  hook gradle
+  check "exit 0" same "$rc" 0
+  check "gradle-caches links the Windows host cache" links_to "$B/gradle-caches" "$HU/.gradle/caches"
+  check "gradle-wrapper-dists links the Windows host dists" links_to "$B/gradle-wrapper-dists" "$HU/.gradle/wrapper/dists"
+  d=$H/.gradle/wrapper/dists/gradle-8.10-bin/h1
+  check "the Gradle dist is seeded" links_to "$d/gradle-8.10" "$B/gradle-wrapper-dists/gradle-8.10-bin/h1/gradle-8.10"
+  check "…with its .ok marker" test -f "$d/gradle-8.10-bin.zip.ok"
+  hook maven
+  check "maven exits 0" same "$rc" 0
+  check "m2-repository links the Windows host repository" links_to "$B/m2-repository" "$HU/.m2/repository"
+  check "the Maven dist is seeded" links_to \
+    "$H/.m2/wrapper/dists/apache-maven-3.9.9-bin/m1" "$B/m2-wrapper-dists/apache-maven-3.9.9-bin/m1"
+  fresh winlong
+  mkdir -p "$R/cc/Users/u/.gradle/caches"
+  hook gradle
+  check "a two-letter folder is no drive" real_dir "$B/gradle-caches"
 }
 
 case ${1:-} in
