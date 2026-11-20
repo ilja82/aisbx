@@ -89,6 +89,7 @@ fn open(args: &Args) -> State {
     match App::new(catalog, args.show_other, version, true, args.auto_update) {
         Ok(mut app) => {
             app.disable_telemetry_by_default();
+            app.enable_clipboard_by_default();
             State::Ready(Box::new(app))
         }
         Err(e) => blocked(e, false),

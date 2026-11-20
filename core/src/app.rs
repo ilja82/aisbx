@@ -2852,6 +2852,25 @@ impl AuthRecord {
     }
 }
 
+pub fn clipboard_status(change: &sbx::ClipboardChange) -> Option<(String, bool)> {
+    let mut parts = Vec::new();
+    if !change.turned_on.is_empty() {
+        parts.push(format!("{} on; off in T", change.turned_on.join(", ")));
+    }
+    if !change.failed.is_empty() {
+        let keys: Vec<&str> = change.failed.iter().map(|(key, _)| *key).collect();
+        parts.push(format!("{} failed", keys.join(", ")));
+    }
+    if change.registry_unreadable {
+        parts.push("clipboard unchanged: registry.json unreadable".to_string());
+    }
+    if change.not_saved {
+        parts.push("not saved".to_string());
+    }
+    let is_error = !change.failed.is_empty() || change.registry_unreadable || change.not_saved;
+    (!parts.is_empty()).then(|| (parts.join("; "), is_error))
+}
+
 /// The status line after aisbx turned sbx's telemetry off on a host where it was left on.
 pub const TELEMETRY_TURNED_OFF: &str =
     "sbx's telemetry is now off (telemetry.disabled true); turn it back on in Settings (T)";
@@ -3075,6 +3094,8 @@ pub struct App {
     pub screen: Screen,
     pub modal: Option<Modal>,
     pub status: Option<(String, bool, Instant)>,
+    clipboard_notice: Option<(String, bool)>,
+    clipboard_shown: Option<Instant>,
     /// The header's refresh mark: a refresh someone waits for, or a poll slower than
     /// [`SLOW_REFRESH`].
     pub loading: bool,
@@ -3219,6 +3240,8 @@ impl App {
             screen: Screen::List,
             modal: None,
             status: None,
+            clipboard_notice: None,
+            clipboard_shown: None,
             loading: true,
             quit: false,
             handoff: None,
@@ -3612,7 +3635,11 @@ impl App {
                     }
                     self.start_due_skill_update();
                 }
-                Err(e) => self.set_error(format!("{e:#}")),
+                Err(e) => {
+                    if !self.clipboard_notice_holds_status() {
+                        self.set_error(format!("{e:#}"));
+                    }
+                }
             }
             if stale {
                 self.refresh_pending = false;
@@ -3643,6 +3670,13 @@ impl App {
         if let Some((_, _, at)) = self.status {
             if at.elapsed() > STATUS_TTL {
                 self.status = None;
+            }
+        }
+        if self.status.is_none() {
+            if let Some((msg, is_error)) = self.clipboard_notice.take() {
+                let now = Instant::now();
+                self.status = Some((msg, is_error, now));
+                self.clipboard_shown = Some(now);
             }
         }
 
@@ -4357,6 +4391,19 @@ impl App {
             Ok(false) => {}
             Err(e) => self.set_error(format!("could not turn sbx's telemetry off: {e:#}")),
         }
+    }
+
+    fn clipboard_notice_holds_status(&self) -> bool {
+        self.clipboard_notice.is_some()
+            || self
+                .status
+                .as_ref()
+                .is_some_and(|(_, _, at)| Some(*at) == self.clipboard_shown)
+    }
+
+    pub fn enable_clipboard_by_default(&mut self) {
+        let change = sbx::enable_clipboard_by_default(&mut self.registry);
+        self.clipboard_notice = clipboard_status(&change);
     }
 
     pub fn set_info(&mut self, msg: impl Into<String>) {
@@ -11790,6 +11837,8 @@ impl App {
             screen: Screen::List,
             modal: None,
             status: None,
+            clipboard_notice: None,
+            clipboard_shown: None,
             loading: false,
             quit: false,
             handoff: None,
@@ -12112,6 +12161,125 @@ mod tests {
     /// The store's link step a start runs right after the label, with no skill switched on.
     fn no_store_skills(name: &str, dir: &str) -> Vec<String> {
         store_skills::link_argv(name, &[dir.to_string()], &[])
+    }
+
+    #[test]
+    fn the_clipboard_notice_fits_80_columns_in_every_combination() {
+        let both = vec![sbx::CLIPBOARD_TEXT_COPY, sbx::CLIPBOARD_IMAGE_PASTE];
+        let ons = [
+            Vec::new(),
+            vec![sbx::CLIPBOARD_TEXT_COPY],
+            vec![sbx::CLIPBOARD_IMAGE_PASTE],
+            both.clone(),
+        ];
+        for turned_on in ons {
+            for failed in [
+                Vec::new(),
+                vec![sbx::CLIPBOARD_TEXT_COPY, sbx::CLIPBOARD_IMAGE_PASTE],
+            ] {
+                let failed: Vec<(&'static str, String)> = failed
+                    .into_iter()
+                    .filter(|k| !turned_on.contains(k))
+                    .map(|k| (k, "denied".to_string()))
+                    .collect();
+                for not_saved in [false, true] {
+                    for registry_unreadable in [false, true] {
+                        if registry_unreadable && (!turned_on.is_empty() || !failed.is_empty()) {
+                            continue;
+                        }
+                        let change = sbx::ClipboardChange {
+                            turned_on: turned_on.clone(),
+                            failed: failed.clone(),
+                            not_saved,
+                            registry_unreadable,
+                        };
+                        let Some((text, error)) = clipboard_status(&change) else {
+                            assert!(turned_on.is_empty() && failed.is_empty());
+                            continue;
+                        };
+                        let footer = " ✓ ".chars().count() + text.chars().count();
+                        assert!(footer <= 80, "{footer} columns: {text}");
+                        assert_eq!(
+                            error,
+                            !failed.is_empty() || not_saved || registry_unreadable
+                        );
+                        for key in &turned_on {
+                            assert!(text.contains(key), "{text}");
+                        }
+                        if !turned_on.is_empty() {
+                            assert!(text.contains("off in T"), "{text}");
+                        }
+                        for (key, _) in &failed {
+                            assert!(text.contains(key) && text.contains("failed"), "{text}");
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(clipboard_status(&sbx::ClipboardChange::default()), None);
+    }
+
+    #[test]
+    fn the_clipboard_notice_names_both_keys_and_the_way_off() {
+        let change = sbx::ClipboardChange {
+            turned_on: vec![sbx::CLIPBOARD_TEXT_COPY, sbx::CLIPBOARD_IMAGE_PASTE],
+            ..sbx::ClipboardChange::default()
+        };
+        let (text, error) = clipboard_status(&change).unwrap();
+        assert!(!error);
+        assert!(text.contains("clipboard.textCopy") && text.contains("clipboard.imagePaste"));
+        assert!(text.contains("off in T"));
+    }
+
+    #[test]
+    fn the_clipboard_notice_waits_for_the_status_and_starts_its_own_time_when_shown() {
+        let mut app = App::for_test(Catalog::load().unwrap(), Vec::new());
+        app.set_error("could not turn sbx's telemetry off: denied");
+        app.clipboard_notice = Some(("clipboard.textCopy on; off in T".to_string(), false));
+        app.tick();
+        let (text, error, _) = app.status.clone().expect("the telemetry error stays");
+        assert!(error && text.contains("telemetry"), "{text}");
+        let old = Instant::now()
+            .checked_sub(STATUS_TTL * 2)
+            .expect("the clock is past the status time");
+        app.status = app.status.take().map(|(m, e, _)| (m, e, old));
+        app.tick();
+        let (text, error, at) = app.status.clone().expect("the notice shows");
+        assert!(!error && text.contains("clipboard.textCopy"), "{text}");
+        assert!(at.elapsed() < STATUS_TTL);
+        app.tick();
+        assert!(app
+            .status
+            .as_ref()
+            .is_some_and(|(m, _, _)| m.contains("clipboard")));
+        assert!(app.clipboard_notice.is_none());
+    }
+
+    #[test]
+    fn repeating_refresh_errors_never_hide_the_clipboard_notice_and_its_time_starts_when_shown() {
+        let mut app = App::for_test(Catalog::load().unwrap(), Vec::new());
+        app.clipboard_notice = Some(("clipboard.textCopy on; off in T".to_string(), false));
+        for _ in 0..3 {
+            app.tx.send(Err(anyhow::anyhow!("sbx ls failed"))).unwrap();
+            app.tick();
+        }
+        let (text, error, shown) = app.status.clone().expect("the notice shows");
+        assert!(!error && text.contains("clipboard.textCopy"), "{text}");
+        assert!(app.clipboard_notice.is_none());
+        app.tx.send(Err(anyhow::anyhow!("sbx ls failed"))).unwrap();
+        app.tick();
+        let (text, _, at) = app.status.clone().unwrap();
+        assert!(text.contains("clipboard.textCopy"), "{text}");
+        assert_eq!(
+            at, shown,
+            "a refresh error neither replaces it nor restarts its time"
+        );
+        let old = Instant::now().checked_sub(STATUS_TTL * 2).unwrap();
+        app.status = app.status.take().map(|(m, e, _)| (m, e, old));
+        app.tx.send(Err(anyhow::anyhow!("sbx ls failed"))).unwrap();
+        app.tick();
+        let (text, error, _) = app.status.clone().unwrap();
+        assert!(error && text.contains("sbx ls failed"), "{text}");
     }
 
     #[test]
