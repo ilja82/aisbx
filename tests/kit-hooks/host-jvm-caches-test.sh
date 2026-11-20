@@ -103,8 +103,16 @@ fresh() {
   mkdir -p "$HU" "$H"
 }
 rc=0
+rooted_homes() {   # the hook's own default search list, each pattern under $R
+  list=$(sed -n 's/^homes=\${HOST_JVM_HOMES:-\(.*\)}$/\1/p' "$hook")
+  out=""
+  set -f
+  for pattern in $list; do out="$out $R$pattern"; done
+  set +f
+  printf '%s' "${out# }"
+}
 hook() {   # hook <tool>: the hook as the startup dispatcher runs it, plus the test seams
-  env HOME="$H" HOST_JVM_BASE="$B" HOST_JVM_HOMES="$R/Users/*/ $R/home/*/ $R/?/Users/*/" \
+  env HOME="$H" HOST_JVM_BASE="$B" HOST_JVM_HOMES="$(rooted_homes)" \
     sh "$hook" "$@" >> "$scratch/hook.log" 2>&1
   rc=$?
 }
