@@ -390,8 +390,7 @@ impl Registry {
         if !self.dirty {
             return Ok(());
         }
-        // Never under `cargo test`: a test's `Registry::load` holds the real registry of whoever
-        // runs the suite. Tests assert on the in-memory document, or save to a `Registry::at` one.
+        // Under test, only a scratch registry writes; the real one is the user's.
         if cfg!(any(test, feature = "test-support")) && !self.scratch {
             self.dirty = false;
             return Ok(());
