@@ -72,7 +72,9 @@ aisbx remembers only what sbx does not report: labels, clone mode, the skills mo
 preferences. It also keeps the MCP servers chosen at creation, for a sandbox whose MCP gateway sbx does not report. It never stores a token. The registry is
 `${XDG_STATE_HOME:-~/.local/state}/aisbx/registry.json` (`%LOCALAPPDATA%\aisbx\state\` on Windows). The
 generated kits are next to it, in `tokens/` and `models/`. You can delete all of it: labels fall back to sbx names,
-and the next rebuild writes the generated kits again.
+and the next rebuild writes the generated kits again. Deleting `registry.json` also forgets which clipboard switches
+aisbx has handled, so a switch you turned off can be turned on again at the next start
+([The host clipboard](#the-host-clipboard-t)).
 
 ## Ports (`p` / `u`)
 
@@ -201,8 +203,17 @@ first. Each connection creates its own [mountless sandbox](#mountless-sandboxes)
 
 ## The host clipboard (`T`)
 
-sbx keeps sandboxes away from your clipboard. Press `T` (or *Settings* in the window's header) to change that, for
-every sandbox on this host:
+sbx's own default keeps sandboxes away from your clipboard. The first time `aisbx` or `aisbx-ui` starts on a host (or
+`aisbx up`, `run`, `step`, `ls`, `status`, `stop` or `rm` runs), it turns each of the two switches below on, if sbx
+reports its default (off) and no environment variable sets it, and says so once. It does this once per switch: it
+records the switch in `registry.json` in its state folder and never reads or sets that switch at start again. Switch
+one off with `T` (or *Settings* in the window's header) or with `sbx settings set <key> false`, and it stays off at
+every later start, as long as `registry.json` keeps the handled switches. sbx forgets an earlier explicit `false`, so one set before the first start of this version looks
+like the default and is turned on once; switch it off again after that start. A switch that could not be read or set
+is tried again at the next start. If `registry.json` exists but cannot be read, aisbx leaves both switches alone and
+warns. If the record cannot be saved, aisbx may turn the switch on again at the next start. A value stored with
+`true`, or set through the environment, is left as it is. The *Settings* screen still reads the live values. The
+switches apply to every sandbox on this host:
 
 - **Clipboard copy** lets a sandbox copy text to your clipboard: a copy in Codex, for example, then reaches the host.
   While it is on, any process in any sandbox can put text on your clipboard.
@@ -213,8 +224,8 @@ every sandbox on this host:
 Pasting text needs neither setting: the terminal sends it. Without the dashboard:
 
 ```console
-$ sbx settings set clipboard.textCopy true     # false turns it off again
-$ sbx settings set clipboard.imagePaste true
+$ sbx settings set clipboard.textCopy false     # true turns it on again
+$ sbx settings set clipboard.imagePaste false
 ```
 
 ## FUSE filesystems (`T`)

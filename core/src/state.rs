@@ -76,6 +76,8 @@ struct Ui {
         deserialize_with = "lenient"
     )]
     create: Option<CreateDefaults>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    clipboard_handled: Vec<String>,
 }
 
 /// The create form's answers that the next form starts from: everything but what names this one
@@ -119,19 +121,31 @@ pub struct Registry {
     path: PathBuf,
     doc: Document,
     dirty: bool,
+    unreadable: bool,
+    scratch: bool,
 }
 
 impl Registry {
     pub fn load() -> Self {
         let path = state_dir().join("registry.json");
-        let doc: Document = fs::read_to_string(&path)
-            .ok()
-            .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_default();
+        Self::read(path)
+    }
+
+    fn read(path: PathBuf) -> Self {
+        let (doc, unreadable) = match fs::read_to_string(&path) {
+            Ok(text) => match serde_json::from_str(&text) {
+                Ok(doc) => (doc, false),
+                Err(_) => (Document::default(), true),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Document::default(), false),
+            Err(_) => (Document::default(), true),
+        };
         Self {
             path,
             doc,
             dirty: false,
+            unreadable,
+            scratch: false,
         }
     }
 
@@ -143,6 +157,16 @@ impl Registry {
             path: std::env::temp_dir().join("aisbx-test-registry.json"),
             doc: Document::default(),
             dirty: false,
+            unreadable: false,
+            scratch: false,
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn at(dir: &Path) -> Self {
+        Self {
+            scratch: true,
+            ..Self::read(dir.join("registry.json"))
         }
     }
 
@@ -249,6 +273,22 @@ impl Registry {
         }
     }
 
+    pub fn clipboard_handled(&self, key: &str) -> bool {
+        self.doc.ui.clipboard_handled.iter().any(|k| k == key)
+    }
+
+    pub fn is_unreadable(&self) -> bool {
+        self.unreadable
+    }
+
+    pub fn record_clipboard(&mut self, key: &str) -> Result<()> {
+        if !self.clipboard_handled(key) {
+            self.doc.ui.clipboard_handled.push(key.to_string());
+            self.dirty = true;
+        }
+        self.save()
+    }
+
     /// The token last used to create a sandbox, so the create form can offer it again. Cleared
     /// implicitly by disappearing from `sbx secret ls` — the caller checks it still exists.
     pub fn last_token(&self) -> Option<&str> {
@@ -351,8 +391,8 @@ impl Registry {
             return Ok(());
         }
         // Never under `cargo test`: a test's `Registry::load` holds the real registry of whoever
-        // runs the suite. Tests assert on the in-memory document.
-        if cfg!(any(test, feature = "test-support")) {
+        // runs the suite. Tests assert on the in-memory document, or save to a `Registry::at` one.
+        if cfg!(any(test, feature = "test-support")) && !self.scratch {
             self.dirty = false;
             return Ok(());
         }
@@ -585,6 +625,44 @@ mod tests {
         assert_eq!(back.ui.create.as_ref(), Some(kept));
     }
 
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("aisbx-tests-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_missing_registry_is_empty_and_a_broken_one_is_unreadable() {
+        let dir = scratch("registry-readable");
+        let missing = Registry::at(&dir);
+        assert!(!missing.is_unreadable());
+        fs::write(dir.join("registry.json"), b"{ not json").unwrap();
+        let broken = Registry::at(&dir);
+        assert!(broken.is_unreadable());
+        fs::write(dir.join("registry.json"), br#"{"ui": {"last_token": "t"}}"#).unwrap();
+        assert!(!Registry::at(&dir).is_unreadable());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_handled_clipboard_keys_stay_out_of_an_old_file_and_round_trip() {
+        let old: Document = serde_json::from_str(r#"{"ui": {"last_token": "t"}}"#).unwrap();
+        assert!(old.ui.clipboard_handled.is_empty());
+        let mut reg = Registry::empty();
+        assert!(!reg.clipboard_handled("clipboard.textCopy"));
+        reg.record_clipboard("clipboard.textCopy").unwrap();
+        reg.record_clipboard("clipboard.textCopy").unwrap();
+        assert!(reg.clipboard_handled("clipboard.textCopy"));
+        assert_eq!(reg.doc.ui.clipboard_handled, ["clipboard.textCopy"]);
+        let empty = serde_json::to_string(&Document::default()).unwrap();
+        assert!(!empty.contains("clipboard_handled"), "{empty}");
+        let back: Document =
+            serde_json::from_str(r#"{"ui": {"clipboard_handled": ["clipboard.textCopy"]}}"#)
+                .unwrap();
+        assert_eq!(back.ui.clipboard_handled, ["clipboard.textCopy"]);
+    }
+
     #[test]
     fn the_last_litellm_connection_round_trips_and_clears() {
         let doc: Document =
@@ -593,6 +671,8 @@ mod tests {
             path: PathBuf::from("/nonexistent/registry.json"),
             doc,
             dirty: false,
+            unreadable: false,
+            scratch: false,
         };
         assert_eq!(reg.last_litellm(), Some("acme"));
         reg.clear_last_litellm("other");
@@ -627,6 +707,8 @@ mod tests {
             path: PathBuf::from("/nonexistent/registry.json"),
             doc: back,
             dirty: false,
+            unreadable: false,
+            scratch: false,
         };
         assert_eq!(reg.extra_folders("a"), specs);
         assert!(reg.extra_folders("unknown").is_empty());

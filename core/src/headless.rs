@@ -262,6 +262,9 @@ pub fn main(args: &[String]) -> u8 {
     if runs_sandboxes(cmd) {
         telemetry_off_by_default();
     }
+    if runs_sandboxes(cmd) {
+        clipboard_on_by_default(&mut std::io::stderr());
+    }
     if let Some(line) = skill_repos_note(cmd, rest) {
         eprintln!("{line}");
     }
@@ -314,6 +317,76 @@ fn skill_repos_note(cmd: &str, rest: &[String]) -> Option<String> {
 /// chose a value.
 fn runs_sandboxes(cmd: &str) -> bool {
     matches!(cmd, "up" | "run" | "step" | "ls" | "status" | "stop" | "rm")
+}
+
+fn clipboard_on_by_default(err: &mut dyn Write) {
+    let change = sbx::enable_clipboard_by_default(&mut state::Registry::load());
+    let _ = write_clipboard_change(&change, err);
+}
+
+const CLIPBOARD_LINE_WIDTH: usize = 80;
+
+fn clipboard_key_names(keys: &[&str]) -> String {
+    let names: Vec<&str> = keys
+        .iter()
+        .map(|k| k.strip_prefix("clipboard.").unwrap_or(k))
+        .collect();
+    match names.as_slice() {
+        [one] => format!("clipboard.{one}"),
+        _ => format!("clipboard.{{{}}}", names.join(",")),
+    }
+}
+
+fn clipboard_line(change: &sbx::ClipboardChange) -> Option<String> {
+    let mut parts = Vec::new();
+    if !change.turned_on.is_empty() {
+        parts.push(format!(
+            "{} on (sbx settings set <key> false)",
+            clipboard_key_names(&change.turned_on)
+        ));
+    }
+    for (key, _) in &change.failed {
+        let name = key.strip_prefix("clipboard.").unwrap_or(key);
+        parts.push(format!("{name} failed"));
+    }
+    if change.registry_unreadable {
+        parts.push("registry.json unreadable, clipboard settings unchanged".to_string());
+    }
+    if change.not_saved {
+        parts.push("not saved, may be turned on again".to_string());
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    let mut line = format!("aisbx: {}", parts.join("; "));
+    if line.chars().count() > CLIPBOARD_LINE_WIDTH {
+        line = line
+            .chars()
+            .take(CLIPBOARD_LINE_WIDTH - 1)
+            .collect::<String>()
+            + "…";
+    } else if let [(_, error)] = change.failed.as_slice() {
+        let error = error.split_whitespace().collect::<Vec<_>>().join(" ");
+        let room = CLIPBOARD_LINE_WIDTH - line.chars().count();
+        if room > 3 && !error.is_empty() {
+            let detail: String = error.chars().take(room - 2).collect();
+            let at = line.rfind(" failed").map(|i| i + " failed".len());
+            if let Some(at) = at {
+                line.insert_str(at, &format!(": {detail}"));
+            }
+        }
+    }
+    Some(line)
+}
+
+fn write_clipboard_change(
+    change: &sbx::ClipboardChange,
+    err: &mut dyn Write,
+) -> std::io::Result<()> {
+    match clipboard_line(change) {
+        Some(line) => writeln!(err, "{line}"),
+        None => Ok(()),
+    }
 }
 
 /// [`sbx::disable_telemetry_by_default`], said on stderr; a failure only warns.
@@ -4119,6 +4192,78 @@ fn sync_args(raw: &[String]) -> Result<(String, bool), Fail> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn clipboard_stderr_line(change: &sbx::ClipboardChange) -> String {
+        let mut err = Vec::new();
+        write_clipboard_change(change, &mut err).unwrap();
+        let text = String::from_utf8(err).unwrap();
+        assert_eq!(text.lines().count(), 1, "{text}");
+        assert!(text.ends_with('\n'));
+        let line = text.trim_end().to_string();
+        assert!(line.starts_with("aisbx: "), "{line}");
+        assert!(
+            line.chars().count() <= 80,
+            "{} columns: {line}",
+            line.chars().count()
+        );
+        line
+    }
+
+    #[test]
+    fn the_clipboard_line_names_both_keys_and_the_way_off_in_80_columns() {
+        let line = clipboard_stderr_line(&sbx::ClipboardChange {
+            turned_on: vec![sbx::CLIPBOARD_TEXT_COPY, sbx::CLIPBOARD_IMAGE_PASTE],
+            ..sbx::ClipboardChange::default()
+        });
+        assert!(
+            line.contains("textCopy") && line.contains("imagePaste"),
+            "{line}"
+        );
+        assert!(line.contains("sbx settings set <key> false"), "{line}");
+        let mut quiet = Vec::new();
+        write_clipboard_change(&sbx::ClipboardChange::default(), &mut quiet).unwrap();
+        assert!(quiet.is_empty());
+    }
+
+    #[test]
+    fn a_partial_clipboard_result_is_one_line_in_both_orders_without_line_breaks() {
+        for (on, failed) in [
+            (sbx::CLIPBOARD_IMAGE_PASTE, sbx::CLIPBOARD_TEXT_COPY),
+            (sbx::CLIPBOARD_TEXT_COPY, sbx::CLIPBOARD_IMAGE_PASTE),
+        ] {
+            let line = clipboard_stderr_line(&sbx::ClipboardChange {
+                turned_on: vec![on],
+                failed: vec![(failed, "denied\nby\r\npolicy".to_string())],
+                ..sbx::ClipboardChange::default()
+            });
+            assert!(
+                line.contains(on) && line.contains("sbx settings set <key> false"),
+                "{line}"
+            );
+            assert!(
+                line.contains(failed.trim_start_matches("clipboard.")),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_clipboard_line_covers_an_unreadable_registry_and_a_failed_save() {
+        let unreadable = clipboard_stderr_line(&sbx::ClipboardChange {
+            registry_unreadable: true,
+            ..sbx::ClipboardChange::default()
+        });
+        assert!(unreadable.contains("registry.json") && unreadable.contains("unchanged"));
+        let unsaved = clipboard_stderr_line(&sbx::ClipboardChange {
+            turned_on: vec![sbx::CLIPBOARD_TEXT_COPY, sbx::CLIPBOARD_IMAGE_PASTE],
+            not_saved: true,
+            ..sbx::ClipboardChange::default()
+        });
+        assert!(
+            unsaved.contains("sbx settings set <key> false"),
+            "{unsaved}"
+        );
+    }
 
     fn ls_entry(name: &str, workspaces: &[&str]) -> sbx::LsEntry {
         sbx::LsEntry {

@@ -9,6 +9,8 @@ use std::process::Command;
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::state::Registry;
+
 /// The oldest sbx release the dashboard accepts. docs/development.md, *sbx version*, says why.
 pub const REQUIRED_VERSION: &str = "0.54.0";
 
@@ -2466,6 +2468,100 @@ pub fn disable_telemetry_by_default() -> Result<bool> {
     Ok(true)
 }
 
+pub const CLIPBOARD_DEFAULT_ON: [&str; 2] = [CLIPBOARD_TEXT_COPY, CLIPBOARD_IMAGE_PASTE];
+
+pub fn clipboard_left_off(setting: &Setting) -> bool {
+    CLIPBOARD_DEFAULT_ON.contains(&setting.key.as_str())
+        && setting.source == "default"
+        && setting.value == serde_json::Value::Bool(false)
+}
+
+pub fn clipboard_set_argv(key: &str) -> Vec<String> {
+    setting_set_argv(key, "true")
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ClipboardChange {
+    pub turned_on: Vec<&'static str>,
+    pub failed: Vec<(&'static str, String)>,
+    pub not_saved: bool,
+    pub registry_unreadable: bool,
+}
+
+pub fn enable_clipboard_by_default(registry: &mut Registry) -> ClipboardChange {
+    if cfg!(any(test, feature = "test-support")) {
+        return ClipboardChange::default();
+    }
+    enable_clipboard_with(registry, &mut setting, &mut run_setting_set)
+}
+
+fn enable_clipboard_with(
+    registry: &mut Registry,
+    read: &mut dyn FnMut(&str) -> Result<Setting>,
+    write: &mut dyn FnMut(&[String]) -> Result<()>,
+) -> ClipboardChange {
+    let mut change = ClipboardChange::default();
+    if registry.is_unreadable() {
+        change.registry_unreadable = true;
+        return change;
+    }
+    for key in CLIPBOARD_DEFAULT_ON {
+        if registry.clipboard_handled(key) {
+            continue;
+        }
+        match clipboard_key_on(key, read, write) {
+            Ok(turned_on) => {
+                if turned_on {
+                    change.turned_on.push(key);
+                }
+                if registry.record_clipboard(key).is_err() {
+                    change.not_saved = true;
+                }
+            }
+            Err(e) => change.failed.push((key, format!("{e:#}"))),
+        }
+    }
+    change
+}
+
+fn clipboard_key_on(
+    key: &str,
+    read: &mut dyn FnMut(&str) -> Result<Setting>,
+    write: &mut dyn FnMut(&[String]) -> Result<()>,
+) -> Result<bool> {
+    let current = read(key)?;
+    anyhow::ensure!(
+        current.key == key,
+        "sbx settings get {key} answered for `{}`",
+        current.key
+    );
+    if clipboard_left_off(&current) {
+        write(&clipboard_set_argv(key))?;
+        return Ok(true);
+    }
+    anyhow::ensure!(
+        current.value.is_boolean()
+            && matches!(current.source.as_str(), "default" | "override" | "envvar"),
+        "sbx settings get {key} gave an answer aisbx does not know"
+    );
+    Ok(false)
+}
+
+fn run_setting_set(argv: &[String]) -> Result<()> {
+    let line = argv.join(" ");
+    let out = Command::new(&argv[0])
+        .args(&argv[1..])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .with_context(|| format!("running `{line}`"))?;
+    anyhow::ensure!(
+        out.status.success(),
+        "`{line}` failed: {}",
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
+    Ok(())
+}
+
 /// Store a setting on this host. It asks nothing, also without a terminal.
 pub fn setting_set_argv(key: &str, value: &str) -> Vec<String> {
     vec![
@@ -3603,6 +3699,327 @@ mod tests {
             ..at(false, "default")
         };
         assert!(!telemetry_left_on(&other));
+    }
+
+    #[test]
+    fn clipboard_is_turned_on_only_where_nobody_chose() {
+        let at = |key: &str, value: bool, source: &str| Setting {
+            key: key.into(),
+            value: serde_json::Value::Bool(value),
+            source: source.into(),
+            ..Setting::default()
+        };
+        for key in [CLIPBOARD_TEXT_COPY, CLIPBOARD_IMAGE_PASTE] {
+            assert!(clipboard_left_off(&at(key, false, "default")), "{key}");
+            assert!(!clipboard_left_off(&at(key, false, "override")), "{key}");
+            assert!(!clipboard_left_off(&at(key, false, "envvar")), "{key}");
+            assert!(!clipboard_left_off(&at(key, true, "default")), "{key}");
+            assert!(!clipboard_left_off(&at(key, true, "override")), "{key}");
+        }
+        assert!(!clipboard_left_off(&at(
+            TELEMETRY_DISABLED,
+            false,
+            "default"
+        )));
+        assert!(!clipboard_left_off(&at(SANDBOX_FUSE, false, "default")));
+        let mut registry = Registry::empty();
+        let change = enable_clipboard_by_default(&mut registry);
+        assert_eq!(change, ClipboardChange::default());
+        assert!(!registry.clipboard_handled(CLIPBOARD_TEXT_COPY));
+    }
+
+    struct FakeClipboard {
+        stored: std::cell::RefCell<std::collections::BTreeMap<String, (bool, &'static str)>>,
+        reads: std::cell::RefCell<Vec<String>>,
+        writes: std::cell::RefCell<Vec<Vec<String>>>,
+        read_fails: Vec<&'static str>,
+        write_fails: Vec<&'static str>,
+    }
+
+    impl FakeClipboard {
+        fn new() -> Self {
+            let stored = CLIPBOARD_DEFAULT_ON
+                .iter()
+                .map(|key| (key.to_string(), (false, "default")))
+                .collect();
+            Self {
+                stored: std::cell::RefCell::new(stored),
+                reads: Default::default(),
+                writes: Default::default(),
+                read_fails: Vec::new(),
+                write_fails: Vec::new(),
+            }
+        }
+
+        fn run(&self, registry: &mut Registry) -> ClipboardChange {
+            enable_clipboard_with(
+                registry,
+                &mut |key: &str| {
+                    self.reads.borrow_mut().push(key.to_string());
+                    if self.read_fails.contains(&key) {
+                        anyhow::bail!("sbx is not answering");
+                    }
+                    let (value, source) = self.stored.borrow()[key];
+                    Ok(Setting {
+                        key: key.into(),
+                        value: serde_json::Value::Bool(value),
+                        source: source.into(),
+                        ..Setting::default()
+                    })
+                },
+                &mut |argv: &[String]| {
+                    self.writes.borrow_mut().push(argv.to_vec());
+                    if self.write_fails.contains(&argv[3].as_str()) {
+                        anyhow::bail!("denied");
+                    }
+                    self.stored
+                        .borrow_mut()
+                        .insert(argv[3].clone(), (true, "override"));
+                    Ok(())
+                },
+            )
+        }
+
+        fn forget_calls(&self) {
+            self.reads.borrow_mut().clear();
+            self.writes.borrow_mut().clear();
+        }
+    }
+
+    fn set_true(key: &str) -> Vec<String> {
+        ["sbx", "settings", "set", key, "true"]
+            .map(String::from)
+            .to_vec()
+    }
+
+    fn clip_dir(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("aisbx-tests-clip-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn the_clipboard_path_sends_set_true_for_each_key_and_records_it() {
+        let fake = FakeClipboard::new();
+        let mut registry = Registry::empty();
+        let change = fake.run(&mut registry);
+        assert_eq!(
+            change,
+            ClipboardChange {
+                turned_on: vec![CLIPBOARD_TEXT_COPY, CLIPBOARD_IMAGE_PASTE],
+                ..ClipboardChange::default()
+            }
+        );
+        let sent = vec![
+            set_true(CLIPBOARD_TEXT_COPY),
+            set_true(CLIPBOARD_IMAGE_PASTE),
+        ];
+        assert_eq!(*fake.writes.borrow(), sent);
+        for key in CLIPBOARD_DEFAULT_ON {
+            assert!(registry.clipboard_handled(key), "{key}");
+        }
+    }
+
+    #[test]
+    fn a_clipboard_key_switched_off_afterwards_is_never_read_or_written_again() {
+        let fake = FakeClipboard::new();
+        let dir = clip_dir("opt-out");
+        let mut first = Registry::at(&dir);
+        fake.run(&mut first);
+        let saved = std::fs::read_to_string(dir.join("registry.json")).unwrap();
+        for key in CLIPBOARD_DEFAULT_ON {
+            assert!(saved.contains(key), "{saved}");
+            fake.stored
+                .borrow_mut()
+                .insert(key.to_string(), (false, "default"));
+        }
+        fake.forget_calls();
+        let mut second = Registry::at(&dir);
+        assert_eq!(fake.run(&mut second), ClipboardChange::default());
+        assert!(fake.reads.borrow().is_empty());
+        assert!(fake.writes.borrow().is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_first_key_is_on_disk_before_the_second_is_read() {
+        let dir = clip_dir("record-first");
+        let file = dir.join("registry.json");
+        let mut registry = Registry::at(&dir);
+        let mut seen = Vec::new();
+        enable_clipboard_with(
+            &mut registry,
+            &mut |key: &str| {
+                seen.push(std::fs::read_to_string(&file).unwrap_or_default());
+                Ok(Setting {
+                    key: key.into(),
+                    value: serde_json::Value::Bool(true),
+                    source: "override".into(),
+                    ..Setting::default()
+                })
+            },
+            &mut |_: &[String]| Ok(()),
+        );
+        assert!(!seen[0].contains(CLIPBOARD_TEXT_COPY));
+        assert!(seen[1].contains(CLIPBOARD_TEXT_COPY), "{}", seen[1]);
+        assert!(!seen[1].contains(CLIPBOARD_IMAGE_PASTE));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_value_somebody_chose_is_recorded_and_not_written() {
+        let fake = FakeClipboard::new();
+        fake.stored
+            .borrow_mut()
+            .insert(CLIPBOARD_TEXT_COPY.into(), (false, "override"));
+        fake.stored
+            .borrow_mut()
+            .insert(CLIPBOARD_IMAGE_PASTE.into(), (true, "envvar"));
+        let mut registry = Registry::empty();
+        assert_eq!(fake.run(&mut registry), ClipboardChange::default());
+        assert!(fake.writes.borrow().is_empty());
+        for key in CLIPBOARD_DEFAULT_ON {
+            assert!(registry.clipboard_handled(key), "{key}");
+        }
+    }
+
+    #[test]
+    fn a_failed_clipboard_key_reports_the_other_one_that_changed_and_is_tried_again() {
+        for failing in CLIPBOARD_DEFAULT_ON {
+            let changed = CLIPBOARD_DEFAULT_ON
+                .iter()
+                .copied()
+                .find(|k| *k != failing)
+                .unwrap();
+            for on_write in [false, true] {
+                let mut fake = FakeClipboard::new();
+                if on_write {
+                    fake.write_fails.push(failing);
+                } else {
+                    fake.read_fails.push(failing);
+                }
+                let mut registry = Registry::empty();
+                let change = fake.run(&mut registry);
+                assert_eq!(change.turned_on, [changed]);
+                assert_eq!(change.failed.len(), 1);
+                assert_eq!(change.failed[0].0, failing);
+                assert!(registry.clipboard_handled(changed));
+                assert!(!registry.clipboard_handled(failing));
+                fake.read_fails.clear();
+                fake.write_fails.clear();
+                fake.forget_calls();
+                let retry = fake.run(&mut registry);
+                assert_eq!(retry.turned_on, [failing]);
+                assert!(retry.failed.is_empty());
+                assert_eq!(*fake.reads.borrow(), [failing]);
+            }
+        }
+    }
+
+    #[test]
+    fn an_unrecognized_clipboard_answer_is_a_read_failure_that_is_tried_again() {
+        let answers = [
+            (serde_json::Value::Null, "default"),
+            (serde_json::Value::Bool(false), ""),
+            (serde_json::Value::Bool(false), "somewhere"),
+        ];
+        for (value, source) in answers {
+            let mut registry = Registry::empty();
+            let writes = std::cell::RefCell::new(0);
+            let change = enable_clipboard_with(
+                &mut registry,
+                &mut |key: &str| -> Result<Setting> {
+                    Ok(Setting {
+                        key: key.into(),
+                        value: value.clone(),
+                        source: source.into(),
+                        ..Setting::default()
+                    })
+                },
+                &mut |_: &[String]| -> Result<()> {
+                    *writes.borrow_mut() += 1;
+                    Ok(())
+                },
+            );
+            let unrecognized = source != "default" || value.is_null();
+            assert_eq!(
+                unrecognized,
+                !change.failed.is_empty(),
+                "{value} {source:?}"
+            );
+            if unrecognized {
+                assert!(change.turned_on.is_empty());
+                assert_eq!(*writes.borrow(), 0);
+                for key in CLIPBOARD_DEFAULT_ON {
+                    assert!(!registry.clipboard_handled(key), "{key}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_clipboard_answer_for_another_key_is_a_read_failure() {
+        let writes = std::cell::RefCell::new(Vec::new());
+        let mut registry = Registry::empty();
+        let change = enable_clipboard_with(
+            &mut registry,
+            &mut |_: &str| -> Result<Setting> {
+                Ok(Setting {
+                    key: CLIPBOARD_IMAGE_PASTE.into(),
+                    value: serde_json::Value::Bool(false),
+                    source: "default".into(),
+                    ..Setting::default()
+                })
+            },
+            &mut |argv: &[String]| -> Result<()> {
+                writes.borrow_mut().push(argv.to_vec());
+                Ok(())
+            },
+        );
+        assert_eq!(change.turned_on, [CLIPBOARD_IMAGE_PASTE]);
+        assert_eq!(change.failed.len(), 1);
+        assert_eq!(change.failed[0].0, CLIPBOARD_TEXT_COPY);
+        assert_eq!(*writes.borrow(), vec![set_true(CLIPBOARD_IMAGE_PASTE)]);
+        assert!(!registry.clipboard_handled(CLIPBOARD_TEXT_COPY));
+    }
+
+    #[test]
+    fn an_unreadable_registry_leaves_both_keys_alone() {
+        let fake = FakeClipboard::new();
+        let dir = clip_dir("unreadable");
+        std::fs::write(dir.join("registry.json"), b"{ not json").unwrap();
+        let mut registry = Registry::at(&dir);
+        let change = fake.run(&mut registry);
+        assert_eq!(
+            change,
+            ClipboardChange {
+                registry_unreadable: true,
+                ..ClipboardChange::default()
+            }
+        );
+        assert!(fake.reads.borrow().is_empty());
+        assert!(fake.writes.borrow().is_empty());
+        assert_eq!(
+            std::fs::read(dir.join("registry.json")).unwrap(),
+            b"{ not json"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_missing_registry_means_nothing_is_handled_yet() {
+        let fake = FakeClipboard::new();
+        let dir = clip_dir("missing");
+        let mut registry = Registry::at(&dir);
+        let change = fake.run(&mut registry);
+        assert_eq!(
+            change.turned_on,
+            [CLIPBOARD_TEXT_COPY, CLIPBOARD_IMAGE_PASTE]
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

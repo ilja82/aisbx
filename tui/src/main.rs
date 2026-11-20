@@ -115,6 +115,7 @@ fn run() -> Result<()> {
 
     let mut app = App::new(catalog, show_other, version, mouse, auto_update)?;
     app.disable_telemetry_by_default();
+    app.enable_clipboard_by_default();
     let mut terminal = quiet::init();
     mouse_off_on_panic();
     let mut mouse_on = false;
