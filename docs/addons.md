@@ -173,6 +173,10 @@ Gradle finds the repository settings you use on the host.
 > **Beware: this file may contain secrets!** Everything in the sandbox can read the copy, so tick the addon only
 > for a sandbox you trust with them. The hook never prints the content. On Windows, aisbx sets no access rights of
 > its own on the copy: it gets those the state folder passes on, so keep that folder private to your account.
+>
+> Two risks are accepted and not guarded: two aisbx processes that run at the same moment (one create without the
+> addon, one with it) can race, as there is no lock between processes; and an interruption between the two renames
+> in the sandbox's start hook leaves the copy in place, no longer refreshed, which keeps the file and fails safe.
 
 How it works: `sbx` mounts folders only. When a create, a rebuild or `aisbx up` really runs, aisbx copies the host file
 to `<state folder>/aisbx-gradle-properties/gradle.properties` (folder 0700, file 0600; a symlink is read through) and

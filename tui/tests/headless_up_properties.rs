@@ -319,3 +319,52 @@ fn staging_stops_when_a_mount_of_another_sandbox_cannot_be_read() {
     assert!(staged(&rig).is_none());
     assert!(!rig.log().contains("create"), "{}", rig.log());
 }
+
+#[test]
+fn staging_stops_on_a_relative_source_or_a_missing_field_of_another_sandbox() {
+    for (tag, mount) in [
+        ("up-props-relative", r#"{"host_path":"relative/dir"}"#),
+        ("up-props-nopath", r#"{"read_only":true}"#),
+    ] {
+        let rig = Rig::new(tag);
+        std::fs::write(rig.host_file(), "a=1\n").unwrap();
+        let ls = r#"[{"name":"other","agent":"claude-anthropic","status":"stopped","workspaces":["/elsewhere"]}]"#;
+        rig.sbx_state(ls, "{}");
+        let other = format!(
+            r#"{{"name":"other","agent":"claude-anthropic","kits":["/repo/kits/host-gradle"],"host_mounts":[{mount}]}}"#
+        );
+        std::fs::write(rig.base.join("inspect.json.other"), other).unwrap();
+        let out = rig.up(&["--kit", "host-gradle-properties"]);
+        assert!(!out.status.success(), "{tag}");
+        assert!(
+            text(&out.stderr).contains("other"),
+            "{tag}: {}",
+            text(&out.stderr)
+        );
+        assert!(staged(&rig).is_none(), "{tag}");
+        assert!(!rig.stage().exists(), "{tag}");
+        assert!(!rig.log().contains("create"), "{tag}: {}", rig.log());
+    }
+}
+
+#[test]
+fn an_opted_out_create_refuses_the_staging_folder_configured_in_mounts_json() {
+    let rig = Rig::new("up-props-configured");
+    std::fs::write(rig.host_file(), "a=1\n").unwrap();
+    rig.sbx_state("[]", "{}");
+    assert_ok(&rig.up(&["--kit", "host-gradle-properties"]));
+    let _ = std::fs::remove_file(rig.base.join("log"));
+    let config = format!(
+        r#"{{"version":1,"folders":[{{"path":"{}","access":"read"}}]}}"#,
+        rig.stage().display()
+    );
+    std::fs::write(rig.state.join("aisbx/mounts.json"), config).unwrap();
+    let out = rig.up(&["--kit", "host-gradle"]);
+    assert!(!out.status.success(), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("earlier sandbox staged"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(!rig.log().contains("create"), "{}", rig.log());
+}

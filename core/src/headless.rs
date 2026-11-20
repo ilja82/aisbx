@@ -1002,6 +1002,7 @@ pub(crate) fn up_inner(raw: &[String]) -> Result<String, Fail> {
         }
         own.push(host);
     }
+    own.extend(model::mount_hosts(&folder_plan.sbx_specs()));
     if let Some(refusal) = model::stage_exposure_refusal(&addons, &state::state_dir(), &own) {
         return Err(Fail::usage(format!("{refusal}; nothing was created")));
     }

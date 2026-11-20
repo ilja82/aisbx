@@ -1712,9 +1712,16 @@ pub fn staging_refusal(state: &Path, exposed: &[PathBuf]) -> Option<String> {
              sandboxes' folders"
         ));
     };
-    let holder = exposed.iter().filter(|m| m.is_absolute()).find(|m| {
+    if let Some(rel) = exposed.iter().find(|m| !m.is_absolute()) {
+        return Some(format!(
+            "{not}: a mount, {}, is not an absolute path, so it cannot be checked against the \
+             staging folder",
+            rel.display()
+        ));
+    }
+    let holder = exposed.iter().find(|m| {
         let real = resolve_future(m).unwrap_or_else(|| m.to_path_buf());
-        stage.starts_with(m) || stage_real.starts_with(real)
+        stage.starts_with(m) || stage_real.starts_with(&real) || real.starts_with(&stage_real)
     })?;
     Some(format!(
         "{not}: the staging folder {} is inside {}, which a sandbox mounts, so a sandbox \
@@ -1730,9 +1737,9 @@ pub fn staging_refusal(state: &Path, exposed: &[PathBuf]) -> Option<String> {
 fn holds_a_copy(stage: &Path) -> bool {
     match std::fs::read_dir(stage) {
         Ok(entries) => entries
-            .filter_map(Result::ok)
-            .any(|e| e.file_name() != GRADLE_PROPERTIES_MARKER),
-        Err(_) => false,
+            .map(|e| e.map(|e| e.file_name()))
+            .any(|name| name.map_or(true, |n| n != GRADLE_PROPERTIES_MARKER)),
+        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
     }
 }
 
@@ -1798,12 +1805,18 @@ pub fn mount_inventory(state: &Path) -> Result<Vec<PathBuf>, String> {
         let bound = strict_mounts(&entry.name, &inspected)?
             .into_iter()
             .map(|m| (PathBuf::from(m.host_path), m.read_only));
-        out.extend(
-            listed
-                .chain(bound)
-                .filter(|(host, ro)| !own_stage(host, *ro))
-                .map(|(host, _)| host),
-        );
+        for (host, ro) in listed.chain(bound) {
+            if !host.is_absolute() {
+                return Err(format!(
+                    "could not place a mount of {} ({}); nothing is copied",
+                    entry.name,
+                    host.display()
+                ));
+            }
+            if !own_stage(&host, ro) {
+                out.push(host);
+            }
+        }
     }
     Ok(out)
 }
@@ -1822,7 +1835,7 @@ fn strict_mounts(
         .map(|v| {
             serde_json::from_value::<sbx::RuntimeMount>(v.clone())
                 .ok()
-                .filter(|m| !m.host_path.is_empty())
+                .filter(|m| Path::new(&m.host_path).is_absolute())
                 .ok_or_else(|| format!("could not read a mount of {name}; nothing is copied"))
         })
         .collect()
@@ -2989,7 +3002,10 @@ mod tests {
         .any(|n| n.contains("inside")));
         assert!(!state.join(GRADLE_PROPERTIES_STAGE_DIR).exists());
 
-        let others = mount_hosts(&strings(&["/proj", "", &format!("{}:ro", home.display())]));
+        let relative = mount_hosts(&strings(&["/proj", "rel/dir"]));
+        let refused = staging_refusal(&state, &relative).unwrap();
+        assert!(refused.contains("not an absolute path"), "{refused}");
+        let others = mount_hosts(&strings(&["/proj", &format!("{}:ro", home.display())]));
         assert_eq!(staging_refusal(&state, &others), None);
         stage(&state, &others).unwrap();
         assert_eq!(std::fs::read_to_string(staged_in(&state)).unwrap(), "a=1\n");
@@ -3052,6 +3068,27 @@ mod tests {
         std::fs::write(stage.join(".gradle.properties.tmp123"), "a=1\n").unwrap();
         let refused = stage_exposure_refusal(&off, &state, &own).unwrap();
         assert!(refused.contains("earlier sandbox staged"), "{refused}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A staging folder that cannot be listed is treated as holding a copy.
+    #[cfg(unix)]
+    #[test]
+    fn a_staging_folder_that_cannot_be_listed_counts_as_a_copy() {
+        use std::os::unix::fs::PermissionsExt;
+        let (base, _home, state) = properties_fixture("unlistable", None);
+        let off = strings(&["host-gradle"]);
+        let stage = state.join(GRADLE_PROPERTIES_STAGE_DIR);
+        std::fs::create_dir_all(&stage).unwrap();
+        std::fs::write(stage.join(GRADLE_PROPERTIES_MARKER), "").unwrap();
+        let own = vec![base.clone()];
+        std::fs::set_permissions(&stage, std::fs::Permissions::from_mode(0o300)).unwrap();
+        let unreadable = std::fs::read_dir(&stage).is_err();
+        let refused = stage_exposure_refusal(&off, &state, &own);
+        std::fs::set_permissions(&stage, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if unreadable {
+            assert!(refused.is_some());
+        }
         let _ = std::fs::remove_dir_all(&base);
     }
 
