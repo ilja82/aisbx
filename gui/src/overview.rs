@@ -349,6 +349,10 @@ fn account(auth: &Auth, users: usize) -> Row {
             danger(format!("setup token “{name}” — not stored")),
             danger("it cannot sign in until one is stored"),
         ),
+        Auth::NoToken => (
+            danger("no setup token"),
+            danger("it cannot sign in until it is given one"),
+        ),
         Auth::Token { name, .. } => {
             let others = match users {
                 0 | 1 => "no other sandbox uses it".to_string(),

@@ -2413,7 +2413,7 @@ fn current_spans(current: &Auth, users: usize) -> Vec<Span<'static>> {
     let (text, note) = crate::create::auth_now(current, users);
     let style = match current {
         Auth::Login => Style::default(),
-        Auth::Token { stored: false, .. } => theme::danger(),
+        Auth::Token { stored: false, .. } | Auth::NoToken => theme::danger(),
         Auth::Token { .. } => Style::default().fg(theme::RUNNING),
     };
     vec![

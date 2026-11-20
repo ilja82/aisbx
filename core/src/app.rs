@@ -1271,8 +1271,8 @@ impl AuthForm {
             return true;
         }
         match (self.target_placeholder(), self.placeholder()) {
-            (Some(target), Some(current)) => target != current,
-            _ => false,
+            (Some(target), current) => current != Some(target.as_str()),
+            (None, _) => false,
         }
     }
 
@@ -9129,7 +9129,7 @@ impl App {
 
         let steps = vec![Step::new("sbx rm --force", sbx::rm_argv(&name))];
         // A named token stays on the host.
-        if let Some(token) = sb.auth.as_ref().and_then(|a| a.token_name()) {
+        if let Some(token) = sb.token.as_deref() {
             body.push(String::new());
             body.push(match self.sandboxes_on(token, &name).as_slice() {
                 [] => format!(
@@ -9318,11 +9318,15 @@ impl App {
             .token_name()
             .unwrap_or(DEFAULT_TOKEN_NAME)
             .to_string();
+        let mut tokens = self.token_names();
         let account = match &current {
             Auth::Login => AccountChoice::Login,
             Auth::Token { name, .. } => AccountChoice::Named(name.clone()),
+            Auth::NoToken => match tokens.first() {
+                Some(first) => AccountChoice::Named(first.clone()),
+                None => AccountChoice::New,
+            },
         };
-        let mut tokens = self.token_names();
         // A name with no stored token still needs its row, so it can be selected and fixed.
         if let AccountChoice::Named(named) = &account {
             if !tokens.iter().any(|t| t == named) {
@@ -9529,7 +9533,7 @@ impl App {
             .unwrap_or(DEFAULT_TOKEN_NAME)
             .to_string();
         body.push(String::new());
-        if form.current.on_token() {
+        if form.current.token_name().is_some() {
             body.push(format!(
                 "The token “{token}” itself stays on the host — other sandboxes can still use it, \
                  and this one can be pointed back at it."
@@ -11058,8 +11062,13 @@ impl App {
             .find(|s| s.name == name)
             .and_then(|sb| {
                 let backend = sb.backend.as_deref()?;
-                let token = sb.auth.as_ref().and_then(|a| a.token_name());
-                self.relabel(sb, backend, &wanted, token, sb.litellm.as_deref())
+                self.relabel(
+                    sb,
+                    backend,
+                    &wanted,
+                    sb.token.as_deref(),
+                    sb.litellm.as_deref(),
+                )
             });
         self.start_job(PendingJob {
             title: format!("Adding {what} to {name}"),
@@ -11229,12 +11238,7 @@ impl App {
     ) -> Option<RebuildPlan> {
         let sb = self.sandboxes.iter().find(|s| s.name == name)?;
         let backend = sb.backend.clone()?;
-        // Keep whatever account it is on: a kit edit is not a place to lose one.
-        let token = sb
-            .auth
-            .as_ref()
-            .and_then(|a| a.token_name())
-            .map(str::to_string);
+        let token = sb.token.clone();
         let models = models.cloned().unwrap_or_else(|| sb.models.clone());
         self.rebuild_plan(
             name,
@@ -11290,11 +11294,7 @@ impl App {
         connection: Option<&str>,
     ) -> Option<(String, String)> {
         let was = self.catalog.backend(sb.backend.as_deref()?)?;
-        let was_account = model::label_account(
-            was,
-            sb.auth.as_ref().and_then(|a| a.token_name()),
-            sb.litellm.as_deref(),
-        );
+        let was_account = model::label_account(was, sb.token.as_deref(), sb.litellm.as_deref());
         let account = model::label_account(self.catalog.backend(backend)?, token, connection);
         model::regenerated_label(
             &self.catalog,
@@ -11778,19 +11778,20 @@ impl App {
             (true, false) => body.push("It then stops after its last session.".into()),
             _ => {}
         }
-        match &sb.auth {
-            Some(auth) if auth.on_token() => {
+        match (&sb.auth, &sb.token) {
+            (_, Some(token)) => {
                 body.push(String::new());
-                body.push(format!(
-                    "It stays on the setup token “{}”.",
-                    auth.token_name().unwrap_or(DEFAULT_TOKEN_NAME)
-                ));
+                body.push(format!("It stays on the setup token “{token}”."));
             }
-            Some(_) => {
+            (Some(Auth::NoToken), None) => {
+                body.push(String::new());
+                body.push("It stays without a setup token: A gives it one.".into());
+            }
+            (Some(Auth::Login), None) => {
                 body.push(String::new());
                 body.push("It stays on the /login.".into());
             }
-            None => {}
+            _ => {}
         }
         Some(Confirm {
             title: title.into(),
@@ -12078,9 +12079,7 @@ fn key_steps(conn: &crate::litellm::Connection, key: String) -> Vec<Step> {
 }
 
 fn on_token(sb: &Sandbox, token: &str) -> bool {
-    sb.auth
-        .as_ref()
-        .is_some_and(|a| a.token_name() == Some(token))
+    sb.token.as_deref() == Some(token)
 }
 
 /// The prune confirmation's disk lines, from `sbx df`: what the containers of the sandboxes
@@ -12365,6 +12364,7 @@ mod tests {
         let mut sb = model::sample(name, Some("claude-token"), &[]);
         sb.workspace = PathBuf::from("/proj");
         sb.auth = Some(on_named(token, true));
+        sb.token = Some(token.into());
         app.sandboxes.push(sb);
     }
 
@@ -12376,6 +12376,7 @@ mod tests {
         };
         let mut sb = model::sample(SB, Some(backend), &[]);
         sb.workspace = PathBuf::from("/proj");
+        sb.token = current.token_name().map(str::to_string);
         sb.auth = Some(current);
         let mut app = App::for_test(Catalog::load().unwrap(), vec![sb]);
         app.secrets = Some(sbx::Secrets {
@@ -12405,6 +12406,54 @@ mod tests {
             other => panic!("expected a job, got {other:?}"),
         };
         job.steps.iter().map(|s| s.argv.join(" ")).collect()
+    }
+
+    #[test]
+    fn a_kit_edit_keeps_the_token_when_the_secret_store_did_not_answer() {
+        let mut app = app_with_auth(on_named("private", true), vec![stored_token("private")]);
+        app.secrets = None;
+        app.sandboxes[0].auth = None;
+        let job = app
+            .recreate_job(SB, &["host-maven".to_string()], None)
+            .expect("the rebuild is planned");
+        let create = job
+            .steps
+            .iter()
+            .map(|s| s.argv.join(" "))
+            .find(|s| s.contains("sbx create"))
+            .expect("a create step");
+        assert!(
+            create.contains(&format!("{}", tokens::kit_dir("private").display())),
+            "{create}"
+        );
+    }
+
+    #[test]
+    fn a_token_sandbox_without_a_token_kit_gets_one_from_the_account_editor() {
+        let mut app = app_with_auth(Auth::NoToken, vec![stored_token("private")]);
+        assert!(app.can_edit_auth());
+        app.action_edit_auth();
+        let Screen::AuthEdit(form) = &app.screen else {
+            panic!("the auth editor is open: {:?}", app.screen)
+        };
+        assert_eq!(form.account, AccountChoice::Named("private".into()));
+        assert!(form.needs_recreate());
+        let plan = planned(&mut app, AccountChoice::Named("private".into()), "", "");
+        assert!(matches!(plan, AuthPlan::Confirm(_)), "{plan:?}");
+        let steps = step_argv(&plan);
+        let create = steps.iter().find(|s| s.contains("sbx create")).unwrap();
+        assert!(create.contains("kits/claude-token"), "{steps:?}");
+        assert!(
+            create.contains(&format!("{}", tokens::kit_dir("private").display())),
+            "{steps:?}"
+        );
+
+        let mut app = app_with_auth(Auth::NoToken, Vec::new());
+        app.action_edit_auth();
+        let Screen::AuthEdit(form) = &app.screen else {
+            panic!("the auth editor is open")
+        };
+        assert_eq!(form.account, AccountChoice::New);
     }
 
     #[test]
@@ -14461,6 +14510,7 @@ mod tests {
         let mut sb = model::sample(SB, Some("claude-token"), &[]);
         sb.workspace = PathBuf::from("/proj");
         sb.auth = Some(on_named("private", true));
+        sb.token = Some("private".into());
         let mut app = App::for_test(Catalog::load().unwrap(), vec![sb]);
         app.secrets = Some(crate::testkit::sample_secrets());
         app

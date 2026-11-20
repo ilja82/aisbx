@@ -1056,6 +1056,10 @@ pub fn auth_now(current: &crate::model::Auth, users: usize) -> (String, String) 
             "/login".to_string(),
             "shared with every /login sandbox".to_string(),
         ),
+        Auth::NoToken => (
+            "no setup token".to_string(),
+            "it cannot sign in until it is given a token below".to_string(),
+        ),
         Auth::Token {
             name,
             stored: false,

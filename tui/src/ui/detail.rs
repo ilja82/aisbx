@@ -645,6 +645,10 @@ fn account_spans(auth: &Auth, users: usize) -> Vec<Span<'static>> {
             ),
             Span::styled("   it cannot sign in: A stores one", theme::danger()),
         ],
+        Auth::NoToken => vec![
+            Span::styled("no setup token", theme::danger()),
+            Span::styled("   it cannot sign in: A gives it one", theme::danger()),
+        ],
         Auth::Token { name, .. } => vec![
             Span::styled(
                 format!("setup token “{name}”"),

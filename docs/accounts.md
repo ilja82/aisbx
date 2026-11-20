@@ -58,6 +58,8 @@ Later sandboxes pick the token by its name. The host keychain keeps the token on
 - **Move** a sandbox to another token with `A`. This rebuilds it.
 - **Deleting a sandbox never deletes its token.** Delete the token in `S`. Its sandboxes then show
   `⚠ no token — press A`.
+- **A setup-token sandbox built without its token kit** (for example by a plain `sbx` command) also shows
+  `⚠ no token — press A`. Claude Code inside asks for `/login`. Pick a token with `A`, which rebuilds it.
 
 **Without the dashboard**, store the token, then add the token kit that aisbx writes for that name:
 

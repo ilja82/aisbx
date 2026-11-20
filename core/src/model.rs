@@ -84,6 +84,9 @@ pub enum Auth {
         /// Is a token actually stored behind the placeholder?
         stored: bool,
     },
+    /// The setup-token backend with no token kit in its kit list: the container carries no
+    /// `CLAUDE_CODE_OAUTH_TOKEN`, so Claude Code asks for `/login`.
+    NoToken,
 }
 
 impl Auth {
@@ -95,7 +98,7 @@ impl Auth {
     pub fn token_name(&self) -> Option<&str> {
         match self {
             Auth::Token { name, .. } => Some(name),
-            Auth::Login => None,
+            Auth::Login | Auth::NoToken => None,
         }
     }
 
@@ -104,7 +107,7 @@ impl Auth {
     pub fn placeholder(&self) -> Option<&str> {
         match self {
             Auth::Token { placeholder, .. } => Some(placeholder),
-            Auth::Login => None,
+            Auth::Login | Auth::NoToken => None,
         }
     }
 
@@ -116,12 +119,13 @@ impl Auth {
                 name, stored: true, ..
             } => format!("token {name}"),
             Auth::Token { name, .. } => format!("token {name} missing"),
+            Auth::NoToken => "no token".into(),
         }
     }
 
     /// The sandbox cannot authenticate as things stand.
     pub fn broken(&self) -> bool {
-        matches!(self, Auth::Token { stored: false, .. })
+        matches!(self, Auth::Token { stored: false, .. } | Auth::NoToken)
     }
 }
 
@@ -134,10 +138,10 @@ fn auth_of(
     if account == crate::kits::Account::Login {
         return Some(Auth::Login);
     }
-    // A failed `sbx secret ls` is "unknown", not "no token", and so is a sandbox without a token
-    // kit: sbx reported no kit list for it.
+    let Some(named) = token else {
+        return Some(Auth::NoToken);
+    };
     let secrets = secrets?;
-    let named = token?;
     let placeholder = sbx::named_token_placeholder(named);
     Some(Auth::Token {
         stored: secrets.holds(&placeholder),
@@ -222,6 +226,9 @@ pub struct Sandbox {
     /// Which Anthropic account this sandbox is on — `None` for every backend that does not
     /// authenticate against a subscription (the gateway kits, and anything not from this repo).
     pub auth: Option<Auth>,
+    /// The named setup token its kit list carries ([`crate::tokens`]), also when `sbx secret ls`
+    /// failed and [`Sandbox::auth`] is `None`.
+    pub token: Option<String>,
     /// Which model each of Claude Code's aliases resolves to, read off the generated model kit
     /// ([`crate::models`]). Empty means Claude Code's own defaults.
     pub models: crate::models::Overrides,
@@ -876,6 +883,7 @@ pub fn resolve(snapshot: &Snapshot, catalog: &Catalog, registry: &mut Registry) 
             sessions: inspect.sessions,
             auth_mode: inspect.auth_mode,
             auth,
+            token,
             models,
             litellm,
             network: inspect.network,
@@ -1688,6 +1696,7 @@ pub fn sample(name: &str, backend: Option<&str>, addons: &[&str]) -> Sandbox {
             }),
             _ => None,
         },
+        token: (backend == Some("claude-token")).then(|| crate::app::DEFAULT_TOKEN_NAME.into()),
         models: crate::models::Overrides::default(),
         // A LiteLLM sandbox is on the connection every test app has (`testkit::acme`).
         litellm: matches!(
@@ -2455,6 +2464,7 @@ mod note_tests {
             placeholder: sbx::named_token_placeholder("private"),
             stored: false,
         });
+        sb.token = Some("private".into());
     }
     fn drifted(sb: &mut Sandbox) {
         sb.drift = Some(crate::model::Drift::Changed(vec!["Statusline".into()]));
@@ -3112,21 +3122,27 @@ mod checkout_tests {
         let dangling = on_named_token("private", Vec::new());
         assert!(auth(&dangling, &mut registry).unwrap().broken());
 
-        // Without a token kit sbx reported no kit list: the account is unknown, never a guess,
-        // and a scoped row does not change that.
+        // The token backend without a token kit carries no token at all, whatever the secret
+        // store holds: a scoped row does not wire it.
         let bare = with_secrets("claude-token", vec![scoped_secret("s")]);
-        assert_eq!(auth(&bare, &mut registry), None);
+        assert_eq!(auth(&bare, &mut registry), Some(Auth::NoToken));
+        assert!(Auth::NoToken.broken());
+        let mut bare_unknown = with_secrets("claude-token", Vec::new());
+        bare_unknown.secrets = None;
+        assert_eq!(auth(&bare_unknown, &mut registry), Some(Auth::NoToken));
 
         // A gateway backend has no Anthropic account at all.
         registry.forget("s");
         let gateway = with_secrets("claude-litellm", vec![scoped_secret("s")]);
         assert_eq!(auth(&gateway, &mut registry), None);
 
-        // `sbx secret ls` failing is "unknown", never "no token".
+        // `sbx secret ls` failing is "unknown", never "no token", and the token kit is still read.
         registry.forget("s");
-        let mut unknown = with_secrets("claude-token", Vec::new());
+        let mut unknown = on_named_token("private", Vec::new());
         unknown.secrets = None;
-        assert_eq!(auth(&unknown, &mut registry), None);
+        let resolved = resolve(&unknown, &catalog, &mut registry);
+        assert_eq!(resolved[0].auth, None);
+        assert_eq!(resolved[0].token.as_deref(), Some("private"));
 
         registry.forget("s");
     }

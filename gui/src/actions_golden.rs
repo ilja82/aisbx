@@ -963,6 +963,7 @@ fn no_overview_row_names_a_list_key() {
         placeholder: sbx::named_token_placeholder("work"),
         stored: false,
     });
+    sb.token = Some("work".into());
     let mut app = App::for_test(Catalog::load().unwrap(), vec![sb.clone()]);
     app.approvals = vec![aisbx_core::testkit::held("box", "example.org:443")];
     for ssh_ready in [true, false] {
