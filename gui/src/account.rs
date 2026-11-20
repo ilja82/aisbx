@@ -70,7 +70,7 @@ pub fn show_auth(ui: &mut egui::Ui, app: &mut App) {
         let (text, note) = create::auth_now(&auth.current, users);
         let color = match &auth.current {
             Auth::Login => None,
-            Auth::Token { stored: false, .. } => Some(theme::danger(dark)),
+            Auth::Token { stored: false, .. } | Auth::NoToken => Some(theme::danger(dark)),
             Auth::Token { .. } => Some(theme::running(dark)),
         };
         ui.label(form::with_hint(ui, &text, color, &note));
