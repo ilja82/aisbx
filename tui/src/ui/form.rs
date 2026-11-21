@@ -557,7 +557,8 @@ fn kits_rows(
     };
     let column = order
         .iter()
-        .map(|i| text(*i).chars().count())
+        .filter(|i| !model::HOST_FILE_KITS.contains(&catalog.addons[**i].kit.name.as_str()))
+        .map(|i| name_extra(&catalog.addons[*i].kit.name) + text(*i).chars().count())
         .max()
         .unwrap_or(0);
     for (n, &i) in order.iter().enumerate() {
@@ -1980,7 +1981,7 @@ pub(super) fn render_kits(frame: &mut Frame, app: &App, area: Rect) -> Hits {
     let column = catalog
         .addons
         .iter()
-        .map(|a| a.kit.display_name.chars().count())
+        .map(|a| name_extra(&a.kit.name) + a.kit.display_name.chars().count())
         .max()
         .unwrap_or(0);
     let order: Vec<usize> = rows
@@ -2009,19 +2010,39 @@ pub(super) fn render_kits(frame: &mut Frame, app: &App, area: Rect) -> Hits {
             (true, false) => Some(("− remove", theme::DANGER)),
             _ => None,
         };
+        let name = addon.kit.name.as_str();
+        let create_time = format!(
+            "{:<width$}",
+            match addon.create_time_only() {
+                true => CREATE_TIME,
+                false => "",
+            },
+            width = CREATE_TIME.chars().count()
+        );
+        let marker = Marker::Quiet(&create_time);
+        let (marker, change) = match model::HOST_FILE_KITS.contains(&name) {
+            true => {
+                let own = 5 + 14 + name_extra(name) + addon.kit.display_name.chars().count();
+                let fits = |more: usize| own + more <= out.width as usize;
+                let change_width = change.map_or(0, |(label, _)| label.chars().count() + 2);
+                let change = change.map(|(label, color)| match fits(change_width) {
+                    true => (label, color),
+                    false => (
+                        &label[..label.chars().next().map_or(0, char::len_utf8)],
+                        color,
+                    ),
+                });
+                let kept = fits(marker.width() + change_width).then_some(marker);
+                (kept, change)
+            }
+            false => (Some(marker), change),
+        };
         out.row(
             addon_spans(
-                addon.kit.name.as_str(),
+                name,
                 &addon.kit.display_name,
                 now,
-                Some(Marker::Quiet(&format!(
-                    "{:<width$}",
-                    match addon.create_time_only() {
-                        true => CREATE_TIME,
-                        false => "",
-                    },
-                    width = CREATE_TIME.chars().count()
-                ))),
+                marker,
                 change,
                 column,
                 out.width as usize,
@@ -2492,6 +2513,12 @@ fn option_spans(checked: bool, label: &str, gloss: &str, width: usize) -> Vec<Sp
 /// What a host-cache addon's row says beside its name: what it found on this host, or why it
 /// would mount nothing.
 fn host_cache_text(addon: &crate::kits::Addon, found: &model::HostDetect) -> String {
+    if model::HOST_FILE_KITS.contains(&addon.kit.name.as_str()) {
+        return match found.detected() {
+            true => addon.short(),
+            false => found.reason(&addon.kit.name),
+        };
+    }
     format!("{} · {}", addon.short(), found.reason(&addon.kit.name))
 }
 
@@ -2508,13 +2535,17 @@ fn host_cache_spans(
     let name = addon.kit.name.as_str();
     let text = host_cache_text(addon, found);
     if found.detected() {
+        let own = 5 + 14 + name_extra(name) + text.chars().count();
+        let marker =
+            marker.filter(|m| !model::HOST_FILE_KITS.contains(&name) || own + m.width() <= width);
         return addon_spans(name, &text, checked, marker, None, column, width);
     }
+    let name_width = 14 + name_extra(name);
     vec![
         Span::styled(" [-] ", theme::muted()),
-        Span::styled(format!("{name:<14}"), theme::muted()),
+        Span::styled(format!("{name:<name_width$}"), theme::muted()),
         Span::styled(
-            super::clip(&text, width.saturating_sub(5 + 14)),
+            super::clip(&text, width.saturating_sub(5 + name_width)),
             theme::muted(),
         ),
     ]
@@ -2554,6 +2585,11 @@ impl Marker<'_> {
     }
 }
 
+/// The columns a kit's name takes beyond its fixed 14, with a gap after a longer one.
+fn name_extra(name: &str) -> usize {
+    (name.chars().count() + 1).saturating_sub(14)
+}
+
 /// One kit checkbox. `column`: the width the display text is padded to before the marker, so the
 /// markers of a block line up (0 for none).
 fn addon_spans(
@@ -2568,12 +2604,13 @@ fn addon_spans(
     // The display name gives up its columns first: the marker and the change matter more.
     let tail =
         marker.map_or(0, Marker::width) + change.map_or(0, |(label, _)| label.chars().count() + 2);
-    let room = width.saturating_sub(5 + 14 + tail);
+    let name_width = 14 + name_extra(name);
+    let room = width.saturating_sub(5 + name_width + tail);
     let display = match marker {
         Some(_) => format!(
             "{:<pad$}",
             super::clip(display, room),
-            pad = column.min(room)
+            pad = column.saturating_sub(name_extra(name)).min(room)
         ),
         None => super::clip(display, room),
     };
@@ -2583,7 +2620,7 @@ fn addon_spans(
             Style::default().fg(theme::ACCENT),
         ),
         Span::styled(
-            format!("{name:<14}"),
+            format!("{name:<name_width$}"),
             Style::default()
                 .fg(theme::kit_color(name))
                 .add_modifier(if checked {

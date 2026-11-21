@@ -599,9 +599,24 @@ impl Addon {
             .or_else(|| self.needs_mounts().then_some("extra workspaces"))
     }
 
+    /// The line a form shows under this addon: what the host has for it, or else its first
+    /// sentence. A kit that copies a host file leads with its sentence, which holds its warning.
+    pub fn detail(&self, found: Option<&crate::model::HostDetect>) -> String {
+        let status = match found {
+            Some(found) if found.detected() => format!("Found {}", found.found().join(", ")),
+            Some(found) => format!("Not found: {}", found.reason(&self.kit.name)),
+            None => return self.kit.first_sentence().to_string(),
+        };
+        match crate::model::HOST_FILE_KITS.contains(&self.kit.name.as_str()) {
+            true => format!("{} {status}", self.kit.first_sentence()),
+            false => status,
+        }
+    }
+
     /// Needs extra read-only workspaces, which are fixed at sandbox creation.
     pub fn needs_mounts(&self) -> bool {
         crate::model::HOST_JVM_KITS.contains(&self.kit.name.as_str())
+            || crate::model::HOST_FILE_KITS.contains(&self.kit.name.as_str())
             || crate::model::HOST_FOLDER_KITS.contains(&self.kit.name.as_str())
             || crate::skill_source::needs_mounts(&self.kit.name)
     }
@@ -612,6 +627,7 @@ pub fn short_kit_label(name: &str) -> String {
         "rtk" => "RTK".into(),
         "web" => "Web".into(),
         "host-gradle" => "Host Gradle".into(),
+        "host-gradle-properties" => "Gradle properties file (may contain secrets!)".into(),
         "host-maven" => "Host Maven".into(),
         "host-npm" => "Host npm".into(),
         "host-pip" => "Host pip".into(),
@@ -2293,6 +2309,7 @@ mod tests {
             vec![
                 ("headroom", "network rules"),
                 ("host-gradle", "extra workspaces"),
+                ("host-gradle-properties", "extra workspaces"),
                 ("host-maven", "extra workspaces"),
                 ("host-npm", "volumes"),
                 ("host-pip", "volumes"),
@@ -2602,6 +2619,7 @@ mod tests {
         assert_eq!(HEADLESS_ONLY, ["pkg-cache"]);
         for (name, reason) in [
             ("host-gradle", "extra workspaces"),
+            ("host-gradle-properties", "extra workspaces"),
             ("host-maven", "extra workspaces"),
             ("host-npm", "volumes"),
             ("host-pip", "volumes"),
@@ -2794,6 +2812,54 @@ mod tests {
         let parent = manifest.parent().expect("core sits in the checkout");
         assert!(parent.join("kits").is_dir(), "{}", parent.display());
         assert!(find_repo_root().unwrap().join("kits").is_dir());
+    }
+
+    /// The properties addon's row label and the sentence every form shows for it, which carry the
+    /// warning in the owner's words.
+    #[test]
+    fn the_properties_addon_words_its_warning_in_the_row_and_the_sentence() {
+        let catalog = Catalog::load().unwrap();
+        let addon = catalog.addon("host-gradle-properties").expect("shipped");
+        assert_eq!(
+            addon.short(),
+            "Gradle properties file (may contain secrets!)"
+        );
+        assert_eq!(addon.kit.display_name, addon.short());
+        assert_eq!(
+            addon.kit.first_sentence(),
+            "include ~/.gradle/gradle.properties (Beware: This file may contain secrets!)."
+        );
+        assert!(addon.needs_mounts() && addon.create_time_only());
+    }
+
+    /// The detail line under the properties addon carries the whole warning sentence beside what
+    /// the host has, found or not; another host kit's line says only that.
+    #[test]
+    fn the_properties_addon_detail_leads_with_its_warning() {
+        let catalog = Catalog::load().unwrap();
+        let addon = catalog.addon("host-gradle-properties").expect("shipped");
+        let warning =
+            "include ~/.gradle/gradle.properties (Beware: This file may contain secrets!).";
+        let found = crate::model::HostDetect {
+            mounts: vec!["/h/.gradle/gradle.properties:ro".into()],
+            looked_for: vec!["~/.gradle/gradle.properties".into()],
+            ..Default::default()
+        };
+        let missing = crate::model::HostDetect {
+            mounts: Vec::new(),
+            ..found.clone()
+        };
+        let available = addon.detail(Some(&found));
+        assert!(available.starts_with(warning), "{available}");
+        assert!(available.ends_with(&format!("Found {}", found.found().join(", "))));
+        let unavailable = addon.detail(Some(&missing));
+        assert_eq!(
+            unavailable,
+            format!("{warning} Not found: no ~/.gradle/gradle.properties")
+        );
+        let gradle = catalog.addon("host-gradle").expect("shipped");
+        assert!(gradle.detail(Some(&missing)).starts_with("Not found: "));
+        assert_eq!(gradle.detail(None), gradle.kit.first_sentence());
     }
 
     #[test]
