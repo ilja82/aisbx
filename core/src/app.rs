@@ -11883,6 +11883,7 @@ impl App {
                     &exposed,
                 )
             }),
+            false if pending.post.stage_beside.is_empty() => Ok(()),
             false => match model::stage_exposure_refusal(
                 staged,
                 &self.mounts_state,
@@ -16315,6 +16316,44 @@ mod tests {
         app.start_job(confirm.job);
         assert!(app.modal.is_none(), "a failed copy starts nothing");
         assert!(app.status.is_some());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A job that writes no copy (Stop, Delete, ...) starts even when the staging path cannot be
+    /// resolved; one that creates a sandbox with host folders is still refused.
+    #[cfg(unix)]
+    #[test]
+    fn a_job_that_writes_no_copy_starts_when_the_staging_path_cannot_be_resolved() {
+        let root =
+            std::env::temp_dir().join(format!("aisbx-tests-stop-props-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let looped = root.join("loop");
+        std::os::unix::fs::symlink(&looped, &looped).unwrap();
+        let sb = model::sample("claude-litellm-stop-props", Some("claude-litellm"), &[]);
+        let mut app = App::for_test(Catalog::load().unwrap(), vec![sb]);
+        app.mounts_state = looped.join("state");
+        let job = |beside: Vec<PathBuf>| PendingJob {
+            title: "Stop".into(),
+            steps: Vec::new(),
+            post: PostJob {
+                stage_beside: beside,
+                ..Default::default()
+            },
+            fallback: None,
+            fallback_hint: None,
+        };
+        app.start_job(job(Vec::new()));
+        assert!(
+            matches!(app.modal, Some(Modal::Running(..))),
+            "Stop and Delete write no copy"
+        );
+        app.modal = None;
+        app.start_job(job(vec![root.join("proj")]));
+        assert!(
+            app.modal.is_none(),
+            "a create beside host folders is refused"
+        );
         std::fs::remove_dir_all(&root).unwrap();
     }
 

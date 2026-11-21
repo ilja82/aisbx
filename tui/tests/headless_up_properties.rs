@@ -89,6 +89,9 @@ impl Rig {
     }
 
     fn existing(&self, kits: &[&str]) {
+        if kits.contains(&"host-gradle-properties") {
+            std::fs::create_dir_all(self.stage()).unwrap();
+        }
         let kit_paths: Vec<String> = kits.iter().map(|k| format!("\"/repo/kits/{k}\"")).collect();
         let ls = format!(
             r#"[{{"name":"demo","agent":"claude-anthropic","status":"stopped","workspaces":["{}","{}:ro"]}}]"#,
@@ -402,4 +405,19 @@ fn staging_stops_on_a_source_that_loops_or_does_not_resolve() {
         assert!(!rig.stage().exists(), "{tag}");
         assert!(!rig.log().contains("create"), "{tag}: {}", rig.log());
     }
+}
+
+#[test]
+fn up_stages_nothing_when_the_addons_own_mount_folder_is_gone() {
+    let rig = Rig::new("up-props-nostage");
+    std::fs::write(rig.host_file(), "a=1\n").unwrap();
+    rig.existing(&WITH);
+    std::fs::remove_dir_all(rig.stage()).unwrap();
+    let out = rig.up(&[]);
+    assert!(
+        text(&out.stderr).contains("demo") && text(&out.stderr).contains("rebuild"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(!rig.stage().exists(), "nothing was staged");
 }

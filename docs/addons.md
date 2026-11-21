@@ -190,12 +190,14 @@ mounts that folder read-only. At every start, the sandbox copies the file to `~/
   the host later reaches the sandbox the same way.
 - The copy folder is shared by every sandbox that has the addon: refreshing it for one sandbox changes what the others
   copy at their next start.
-- aisbx refuses to copy, and starts no create or rebuild, when the state folder is not an absolute path, has a `:` or
-  `,` in it (a Windows drive letter aside), or the copy's folder lies inside (or is) a folder a sandbox without the addon mounts, such as
-  its workspace, an extra folder or one added with `sbx mount`, also one a rebuild adds back: that sandbox would see
-  the copy. It reads the current list from
-  `sbx` first, and copies nothing when it cannot. Set `XDG_STATE_HOME` to a folder outside them. For an existing
-  sandbox, `aisbx up` only warns.
+- aisbx refuses to copy, and starts no create or rebuild that would copy, when the state folder is not an absolute
+  path or has a `:` or `,` in it (a Windows drive letter aside). It also refuses when a mount of any sandbox,
+  its workspace, an extra folder or one added with `sbx mount` (also one a rebuild adds back), overlaps the copy's
+  folder in either direction (it holds the folder, or lies inside it): a sandbox without the addon would see the copy.
+  The one exception is the addon's own read-only mount of the folder on a sandbox that has the addon. A mount that
+  cannot be resolved is refused too, naming the sandbox; if it is the addon's own folder that is gone, rebuild that
+  sandbox. aisbx reads the current mounts from `sbx` first, and copies nothing when it cannot. Set `XDG_STATE_HOME`
+  to a folder outside them. For an existing sandbox, `aisbx up` only warns.
 - A new sandbox without the addon is refused when its workspace or an extra folder holds a copy an earlier sandbox
   left in the state folder.
 - A rebuild adds the copy's mount when you confirm, together with the copy. A sandbox without a host folder

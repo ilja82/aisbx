@@ -1828,8 +1828,6 @@ pub fn mount_inventory(state: &Path) -> Result<Vec<PathBuf>, String> {
             .filter_map(|k| Path::new(k).file_name()?.to_str().map(String::from))
             .collect();
         let copies = copies_host_files(&installed);
-        let own_stage =
-            |host: &Path, read_only: bool| copies && read_only && same_folder(host, &stage);
         let listed = (entry.workspaces.iter())
             .map(|s| crate::folders::spec_host(s))
             .map(|(p, ro)| (PathBuf::from(p), ro));
@@ -1844,16 +1842,17 @@ pub fn mount_inventory(state: &Path) -> Result<Vec<PathBuf>, String> {
                     host.display()
                 ));
             }
-            if own_stage(&host, ro) {
-                continue;
-            }
             let real = std::fs::canonicalize(&host).map_err(|e| {
                 format!(
-                    "could not resolve a mount of {} ({}: {e}); nothing is copied",
+                    "could not resolve a mount of {} ({}: {e}); nothing is copied, and a sandbox \
+                     whose staging folder is gone needs a rebuild",
                     entry.name,
                     host.display()
                 )
             })?;
+            if copies && ro && real == stage_real {
+                continue;
+            }
             if stage_real.starts_with(&real) || real.starts_with(&stage_real) {
                 return Err(format!(
                     "a mount of {}, {}, overlaps the staging folder {}; nothing is copied",
@@ -1886,14 +1885,6 @@ fn strict_mounts(
                 .ok_or_else(|| format!("could not read a mount of {name}; nothing is copied"))
         })
         .collect()
-}
-
-fn same_folder(a: &Path, b: &Path) -> bool {
-    a == b
-        || match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
-            (Ok(a), Ok(b)) => a == b,
-            _ => false,
-        }
 }
 
 /// The host folders of mounts as sbx lists them (`PATH[:TARGET][:ro]`).
@@ -3033,7 +3024,8 @@ mod tests {
         let drive = Path::new("C:\\Users\\u\\AppData\\Local\\aisbx\\state");
         assert_eq!(staging_refusal(drive, &[]).is_none(), cfg!(windows));
 
-        let workspaces = mount_hosts(&strings(&["/proj", &format!("{}:ro", base.display())]));
+        let proj = base.join("proj").display().to_string();
+        let workspaces = mount_hosts(&strings(&[&proj, &format!("{}:ro", base.display())]));
         let refused = stage(&state, &workspaces).unwrap_err();
         assert!(refused.contains("inside"), "{refused}");
         assert!(refused.contains(&base.display().to_string()), "{refused}");
@@ -3049,10 +3041,10 @@ mod tests {
         .any(|n| n.contains("inside")));
         assert!(!state.join(GRADLE_PROPERTIES_STAGE_DIR).exists());
 
-        let relative = mount_hosts(&strings(&["/proj", "rel/dir"]));
+        let relative = mount_hosts(&strings(&[&proj, "rel/dir"]));
         let refused = staging_refusal(&state, &relative).unwrap();
         assert!(refused.contains("not an absolute path"), "{refused}");
-        let others = mount_hosts(&strings(&["/proj", &format!("{}:ro", home.display())]));
+        let others = mount_hosts(&strings(&[&proj, &format!("{}:ro", home.display())]));
         assert_eq!(staging_refusal(&state, &others), None);
         stage(&state, &others).unwrap();
         assert_eq!(std::fs::read_to_string(staged_in(&state)).unwrap(), "a=1\n");
