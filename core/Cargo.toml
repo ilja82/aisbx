@@ -25,4 +25,4 @@ time = { version = "0.3.54", default-features = false, features = ["std", "local
 yaml-rust2 = { version = "0.13.0", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.31.3", default-features = false, features = ["user"] }
+nix = { version = "0.32.0", default-features = false, features = ["user"] }
