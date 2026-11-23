@@ -1,0 +1,26 @@
+# syntax=docker/sandbox-kit:3
+# Opt-in addon: the host's Gradle properties file. See docs/addons.md, *Host Gradle properties file*.
+schemaVersion: "3"
+kind: mixin
+displayName: Gradle properties file (may contain secrets!)
+description: >-
+  include ~/.gradle/gradle.properties (Beware: This file may contain secrets!). Copies the
+  host's Gradle properties file into the sandbox's ~/.gradle, so Gradle finds the host's
+  repository settings.
+
+capabilities:
+  - type: com.docker.sandbox/lifecycle@1
+    config:
+      startup:
+        - command: ["sh", "/usr/local/lib/aisbx/host-gradle-properties/startup.sh"]
+          user: agent
+          description: "Copy the staged host gradle.properties to ~/.gradle (idempotent; keeps a file the agent changed; never fails the boot)"
+
+  - type: com.docker.sandbox/agent-context@1
+    config:
+      content: |
+        At each start, when a staged copy of the host's ~/.gradle/gradle.properties is
+        available, it goes to ~/.gradle/gradle.properties, unless that file was changed in the
+        sandbox. It may
+        contain secrets: never print, log or commit its content. The source is mounted
+        read-only under a folder named aisbx-gradle-properties: never write there.

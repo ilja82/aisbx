@@ -218,6 +218,12 @@ pub fn host_home() -> std::path::PathBuf {
             };
             for dir in &found.looked_for {
                 let dir = home.join(dir.trim_start_matches("~/"));
+                if crate::model::HOST_FILE_KITS.contains(&addon.kit.name.as_str()) {
+                    std::fs::create_dir_all(dir.parent().expect("a folder"))
+                        .expect("a host folder");
+                    std::fs::write(&dir, "").expect("a host file");
+                    continue;
+                }
                 std::fs::create_dir_all(&dir).expect("a host cache folder");
                 std::fs::write(dir.join("entry"), "").expect("a host cache entry");
             }

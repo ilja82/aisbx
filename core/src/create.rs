@@ -596,7 +596,9 @@ impl CreateForm {
             .map(|b| b.kit.name.clone())
             .unwrap_or_default();
         let mut addons = BTreeMap::new();
-        addons.insert(backend.clone(), self.selected_addons(catalog));
+        let mut kept = self.selected_addons(catalog);
+        kept.retain(|a| !crate::model::HOST_FILE_KITS.contains(&a.as_str()));
+        addons.insert(backend.clone(), kept);
         let ws = &self.workspace;
         crate::state::CreateDefaults {
             backend,
@@ -638,7 +640,11 @@ impl CreateForm {
         let status_line = status_line_kit(catalog);
         for (i, addon) in catalog.addons.iter().enumerate() {
             let on = match wanted {
-                Some(wanted) => wanted.contains(&addon.kit.name) && !self.addon_unavailable(i),
+                Some(wanted) => {
+                    wanted.contains(&addon.kit.name)
+                        && !crate::model::HOST_FILE_KITS.contains(&addon.kit.name.as_str())
+                        && !self.addon_unavailable(i)
+                }
                 None => Some(i) == status_line,
             };
             self.kits.addons[i] = on;
@@ -2561,6 +2567,11 @@ impl CreateForm {
                 let mut text = Vec::new();
                 if let Some(found) = self.kits.host.get(i).and_then(Option::as_ref) {
                     text.push(match found.detected() {
+                        true if addon.kit.name == "host-gradle-properties" => "When ticked, \
+                             the sandbox gets a copy of your ~/.gradle/gradle.properties. The \
+                             agent can read and edit the copy. Beware: this file may contain \
+                             secrets!"
+                            .to_string(),
                         true => "When ticked, the sandbox can read these folders of your \
                                  computer, but not change them."
                             .to_string(),
@@ -3689,6 +3700,40 @@ mod tests {
         );
         let off = prefilled(Some(&[]));
         assert!(!off.fold_open(CreateRow::AdvancedFold));
+    }
+
+    /// The properties addon is an opt-in for each new sandbox: it is neither saved with the
+    /// create's answers nor restored from them, while the form itself keeps its tick.
+    #[test]
+    fn the_properties_addon_is_never_a_remembered_default() {
+        let (catalog, mut f) = status_line_form("claude-anthropic");
+        let at = catalog
+            .addons
+            .iter()
+            .position(|a| a.kit.name == "host-gradle-properties")
+            .expect("the checkout ships the addon");
+        assert!(!f.kits.addons[at], "off by default");
+        f.kits.addons[at] = true;
+        assert!(f
+            .selected_addons(&catalog)
+            .iter()
+            .any(|a| a == "host-gradle-properties"));
+        let saved = f.defaults(&catalog);
+        assert!(!saved.addons["claude-anthropic"]
+            .iter()
+            .any(|a| a == "host-gradle-properties"));
+        let mut next = f.clone();
+        next.kits.addons[at] = false;
+        let mut old = saved.clone();
+        old.addons
+            .get_mut("claude-anthropic")
+            .unwrap()
+            .push("host-gradle-properties".into());
+        assert!(next.apply_defaults(&catalog, &old, crate::sbx::SkillsMode::default()));
+        assert!(!next.kits.addons[at]);
+        let mut again = f.clone();
+        assert!(again.apply_defaults(&catalog, &saved, crate::sbx::SkillsMode::default()));
+        assert!(!again.kits.addons[at], "a second create starts unticked");
     }
 
     /// An app for `help` to read: the one the form was opened in is borrowed by the form.

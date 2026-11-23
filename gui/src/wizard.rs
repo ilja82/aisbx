@@ -1181,13 +1181,7 @@ fn kits_step(ui: &mut egui::Ui, at: &mut Draw<'_, '_>) {
                     let addon = &catalog.addons[i];
                     let row = WizardRow::Field(CreateRow::Addon(i));
                     let found = form.kits.host.get(i).and_then(Option::as_ref);
-                    let detail = match found {
-                        Some(found) if found.detected() => {
-                            format!("Found {}", found.found().join(", "))
-                        }
-                        Some(found) => format!("Not found: {}", found.reason(&addon.kit.name)),
-                        None => addon.kit.first_sentence().to_string(),
-                    };
+                    let detail = addon.detail(found);
                     let mut badges = Vec::new();
                     // Mark the exceptions: the step's gloss says that most kits go in only now.
                     if addon.create_time_reason().is_none() {
