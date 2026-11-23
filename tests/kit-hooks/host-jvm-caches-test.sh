@@ -3,7 +3,7 @@
 # kits/host-gradle and kits/host-maven.
 #
 #   sh tests/kit-hooks/host-jvm-caches-test.sh --static   both kits (descriptor, Dockerfile) and the script
-#   sh tests/kit-hooks/host-jvm-caches-test.sh            the hook's cases, for real
+#   sh tests/kit-hooks/host-jvm-caches-test.sh            the static checks, then the hook's cases, for real
 #
 # Needs no root, no sudo and no sbx. The cases run in scratch folders, with HOME there too, so they
 # touch nothing outside.
@@ -15,6 +15,8 @@ maven_spec=$root/kits/host-maven/host-maven.yaml
 gradle_recipe=$root/kits/host-gradle/host-gradle.dockerfile
 maven_recipe=$root/kits/host-maven/host-maven.dockerfile
 hook=$root/kits/host-gradle/$rel
+stub=$root/kits/host-gradle/files/bin/gcloud
+stub_hook=$root/kits/host-gradle/files/host-gradle/stub-path.sh
 
 failures=0
 check() {   # check <what> <command>...: one line per check, counted
@@ -29,19 +31,59 @@ check() {   # check <what> <command>...: one line per check, counted
 }
 not() { ! "$@"; }
 same() { [ "$1" = "$2" ]; }
+quiet() { "$@" 2>/dev/null; }
+
+# --- the text check ------------------------------------------------------------------------------
+
+tool_name=$(basename "$stub")
+
+allowed_tokens() {   # allowed_tokens <path under the root>: the stub path forms that one file may hold
+  case $1 in
+    tests/*.sh)
+      printf '%s' "kits/host-gradle/files/bin/$tool_name|\\\$root/kits/host-gradle/files/bin/$tool_name|/usr/local/lib/aisbx/bin/$tool_name" ;;
+    kits/host-gradle/files/host-gradle/stub-path.sh)
+      printf '%s' "/usr/local/lib/aisbx/bin/$tool_name" ;;
+    kits/host-gradle/host-gradle.dockerfile)
+      printf '%s' "files/bin/$tool_name|/usr/local/lib/aisbx/bin/$tool_name" ;;
+  esac
+}
+
+text_clean() {   # text_clean <root>: no file under it names what the helper is for, bar its own path in its own files
+  scan_root=$1
+  forbidden="(^|[^a-z])$(printf 'ga%s' r)([^a-z]|$)|$tool_name|$(printf 'artifact%sregistry' ' ?')"
+  listing=$(mktemp) || return 1
+  find "$scan_root" \( -name target -o -name .git -o -name node_modules \) -prune -o -type f -print > "$listing"
+  hits=0
+  while IFS= read -r file; do
+    tokens=$(allowed_tokens "${file#"$scan_root"/}")
+    if [ -n "$tokens" ]; then
+      lead="[[:space:]\"']|^[[:space:]]*[A-Za-z_][A-Za-z_0-9]*=|\\\$\\{[A-Za-z_][A-Za-z_0-9]*:-"
+      strip="s#(^|$lead)($tokens)(\$|[[:space:]\"')}])#\\1\\3#g"
+      case $file in *.dockerfile) strip="/^COPY /{$strip}" ;; esac
+    else
+      strip="s#^\$##"
+    fi
+    if LC_ALL=C sed -E -e "$strip" -e "$strip" "$file" | LC_ALL=C grep -aiqE "$forbidden"; then
+      printf 'named in %s\n' "$file" >&2
+      hits=$((hits + 1))
+    fi
+  done < "$listing"
+  rm -f "$listing"
+  [ "$hits" -eq 0 ]
+}
 
 # --- static --------------------------------------------------------------------------------------
 
-one_user_startup() {   # one_user_startup <descriptor>: exactly one startup entry, as the agent
+startup_entries() {   # startup_entries <descriptor> <n>: exactly n startup entries, all as the agent
   block=$(sed -n '/^      startup:$/,/^  - /p' "$1")
-  [ "$(printf '%s\n' "$block" | grep -c '^        - command:')" -eq 1 ] \
-    && printf '%s\n' "$block" | grep -qx '          user: agent'
+  [ "$(printf '%s\n' "$block" | grep -c '^        - command:')" -eq "$2" ] \
+    && [ "$(printf '%s\n' "$block" | grep -c '^          user: agent$')" -eq "$2" ]
 }
 says() { sed -n '/type: com.docker.sandbox\/agent-context@1/,$p' "$1" | grep -q "$2"; }
 code() { grep -vE '^ *#' "$1"; }   # a file without its comment lines
 
-static_kit() {   # static_kit <kit> <tool> <descriptor> <dockerfile>
-  kit=$1 tool=$2 spec=$3 recipe=$4
+static_kit() {   # static_kit <kit> <tool> <descriptor> <dockerfile> <startup entries>
+  kit=$1 tool=$2 spec=$3 recipe=$4 entries=$5
   check "$kit: kit-spec v3" grep -qx 'schemaVersion: "3"' "$spec"
   check "$kit: a mixin" grep -qx 'kind: mixin' "$spec"
   check "$kit: has a displayName" grep -q '^displayName: .' "$spec"
@@ -54,7 +96,7 @@ static_kit() {   # static_kit <kit> <tool> <descriptor> <dockerfile>
   check "$kit: no network rules" not sh -c 'grep -vE "^ *#" "$1" | grep -q network-policy' sh "$spec"
   check "$kit: no volumes" not sh -c 'grep -vE "^ *#" "$1" | grep -q volume@1' sh "$spec"
   check "$kit: no install hooks" not grep -q '^      install:' "$spec"
-  check "$kit: exactly one startup entry, as the agent" one_user_startup "$spec"
+  check "$kit: exactly the $entries expected startup entries, as the agent" startup_entries "$spec" "$entries"
   check "$kit: the startup entry runs the hook for $tool" grep -qxF \
     "        - command: [\"sh\", \"/usr/local/lib/aisbx/host-jvm-caches/startup.sh\", \"$tool\"]" "$spec"
   check "$kit: has agent instructions" grep -q 'type: com.docker.sandbox/agent-context@1' "$spec"
@@ -64,8 +106,8 @@ static_kit() {   # static_kit <kit> <tool> <descriptor> <dockerfile>
 }
 
 static() {
-  static_kit host-gradle gradle "$gradle_spec" "$gradle_recipe"
-  static_kit host-maven maven "$maven_spec" "$maven_recipe"
+  static_kit host-gradle gradle "$gradle_spec" "$gradle_recipe" 2
+  static_kit host-maven maven "$maven_spec" "$maven_recipe" 1
   check "host-gradle: marker SBX_KIT_HOST_GRADLE" grep -qx 'ENV SBX_KIT_HOST_GRADLE=1' "$gradle_recipe"
   check "host-gradle: GRADLE_RO_DEP_CACHE" grep -qx \
     'ENV GRADLE_RO_DEP_CACHE=/home/agent/.host-caches/gradle-caches' "$gradle_recipe"
@@ -78,6 +120,69 @@ static() {
   check "host-maven: no GRADLE_RO_DEP_CACHE" not sh -c 'grep -vE "^ *#" "$1" | grep -q GRADLE_RO_DEP_CACHE' sh "$maven_recipe"
   check "host-maven: no old marker" not grep -q 'SBX_KIT_HOST_CACHES' "$maven_recipe"
   check "the two hooks are byte-identical" cmp -s "$root/kits/host-gradle/$rel" "$root/kits/host-maven/$rel"
+  check "the stub parses (sh -n)" sh -n "$stub"
+  expected_stub=$(mktemp) || { echo "BLOCKED: no scratch file"; exit 127; }
+  printf '#!/bin/sh\necho "dummy-token"\nexit 0\n' > "$expected_stub"
+  check "the stub is exactly three lines, with its final newline" cmp -s "$stub" "$expected_stub"
+  rm -f "$expected_stub"
+  check "the stub is executable (0755)" same "$(stat -c %a "$stub" 2>/dev/null || stat -f %Lp "$stub")" 755
+  check "the second startup entry runs the stub hook" grep -qxF \
+    '        - command: ["sh", "/usr/local/lib/aisbx/host-gradle/stub-path.sh"]' "$gradle_spec"
+  check "the stub hook parses (sh -n)" sh -n "$stub_hook"
+  check "the stub hook has no set -e" not grep -Eq '^[[:space:]]*set -[a-z]*e' "$stub_hook"
+  check "the stub hook ends in exit 0" same "$(tail -n 1 "$stub_hook")" "exit 0"
+  check "host-gradle ships changes.txt of one short line" sh -c \
+    '[ "$(wc -l < "$1")" -eq 1 ] && [ "$(wc -c < "$1")" -le 121 ]' sh "$root/kits/host-gradle/changes.txt"
+  check "no public file names the helper's purpose (its own path is the one exception)" text_clean "$root"
+  fixtures=$(mktemp -d) || { echo "BLOCKED: no scratch folder"; exit 127; }
+  mkdir -p "$fixtures/core/src" "$fixtures/tests" "$fixtures/kits/host-gradle/files/host-gradle" "$fixtures/kits/x"
+  printf 'stub=$root/kits/host-gradle/files/bin/%s\nstub=${S:-/usr/local/lib/aisbx/bin/%s}\n' "$tool_name" "$tool_name" \
+    > "$fixtures/tests/ok.sh"
+  check "the text check passes a test with only the stub's two paths" text_clean "$fixtures"
+  printf 'COPY --chmod=0755 files/bin/%s /usr/local/lib/aisbx/bin/%s\n' "$tool_name" "$tool_name" \
+    > "$fixtures/kits/host-gradle/host-gradle.dockerfile"
+  check "…and the Dockerfile's COPY of the stub" text_clean "$fixtures"
+  printf 'stub=${HOST_GRADLE_STUB:-/usr/local/lib/aisbx/bin/%s}\n' "$tool_name" \
+    > "$fixtures/kits/host-gradle/files/host-gradle/stub-path.sh"
+  check "…and the hook's default stub path" text_clean "$fixtures"
+  printf 'let p = "/x/y=/usr/local/lib/aisbx/bin/%s";\n' "$tool_name" > "$fixtures/core/src/a.rs"
+  check "…and fails on the stub path after an equals sign inside another path" not quiet text_clean "$fixtures"
+  rm "$fixtures/core/src/a.rs"
+  printf '# copies /usr/local/lib/aisbx/bin/%s\n' "$tool_name" > "$fixtures/kits/host-gradle/host-gradle.dockerfile"
+  check "…and fails on the stub path in a Dockerfile comment" not quiet text_clean "$fixtures"
+  printf 'COPY --chmod=0755 files/bin/%s /usr/local/lib/aisbx/bin/%s\n' "$tool_name" "$tool_name" \
+    > "$fixtures/kits/host-gradle/host-gradle.dockerfile"
+  for bad in "let s = \"$tool_name auth\";" "let p = \"/opt/sdk/bin/$tool_name\";" \
+    "let p = \"/usr/local/lib/aisbx/bin/$tool_name\";"; do
+    printf '%s\n' "$bad" > "$fixtures/core/src/a.rs"
+    check "…and fails on a Rust line: $(printf '%s' "$bad" | sed "s/$tool_name/<stub>/")" not quiet text_clean "$fixtures"
+  done
+  rm "$fixtures/core/src/a.rs"
+  for bad in 'cp "$stub" "$S/%s"' 'ln -s x "$H/.local/bin/%s"' 'see kits/x/files/bin/%s' \
+    'see kits/host-gradle/files/bin/%s.sh' 'run /usr/local/lib/aisbx/bin/%sx' \
+    'see other/kits/host-gradle/files/bin/%s' 'see kits/host-gradle/files/bin/%s/more' \
+    'run /usr/local/lib/aisbx/bin/%s/more' 'run -/usr/local/lib/aisbx/bin/%s' \
+    'run x-kits/host-gradle/files/bin/%s' 'run /opt/usr/local/lib/aisbx/bin/%s' \
+    'run files/bin/%s'; do
+    printf "$bad\n" "$tool_name" > "$fixtures/tests/bad.sh"
+    check "…and fails on a test line: $bad" not quiet text_clean "$fixtures"
+  done
+  rm "$fixtures/tests/bad.sh"
+  for prose in 'run /usr/local/lib/aisbx/bin/%s' 'see kits/host-gradle/files/bin/%s'; do
+    printf "$prose\n" "$tool_name" > "$fixtures/README.md"
+    check "…and fails on the stub path in prose: $prose" not quiet text_clean "$fixtures"
+  done
+  rm "$fixtures/README.md"
+  printf 'COPY --chmod=0755 files/bin/%s /x\n' "$tool_name" > "$fixtures/kits/x/x.dockerfile"
+  check "…and fails on the same COPY in another kit's Dockerfile" not quiet text_clean "$fixtures"
+  rm "$fixtures/kits/x/x.dockerfile"
+  printf 'COPY --chmod=0755 files/bin/%s-x /x\n' "$tool_name" > "$fixtures/kits/host-gradle/host-gradle.dockerfile"
+  check "…and fails on a longer name in the Dockerfile" not quiet text_clean "$fixtures"
+  printf 'see kits/host-gradle/files/bin/%s and the %s %s\n' "$tool_name" "Artifact" "Registry" > "$fixtures/tests/ok.sh"
+  check "…and fails on a forbidden word beside the allowed path" not quiet text_clean "$fixtures"
+  printf 'the %s plugin\n' "$(printf 'GA%s' R)" > "$fixtures/tests/ok.sh"
+  check "…and fails on the other short form" not quiet text_clean "$fixtures"
+  rm -rf "$fixtures"
   check "the hook parses (sh -n)" sh -n "$hook"
   check "the hook names no network tool" not grep -Eqw 'curl|wget|nc|ssh' "$hook"
   check "the hook has no set -e" not grep -Eq '^[[:space:]]*set -[a-z]*e' "$hook"
@@ -196,6 +301,103 @@ behaviour() {
   hook maven
   check "with the repository gone, m2-repository becomes a real dir" real_dir "$B/m2-repository"
 
+  echo "# 5a. the helper command"
+  check "the stub prints dummy-token with any arguments" same "$("$stub" auth print-access-token --x)" "dummy-token"
+  "$stub" a b >/dev/null
+  check "the stub exits 0" same "$?" 0
+  fresh stubs
+  S=$H/stub-src
+  mkdir -p "$S" "$H/sys bin"
+  cp "$stub" "$S/$tool_name"
+  stub_run() {   # stub_run <system bin dir> <PATH of a non-interactive bash>
+    env HOME="$H" HOST_GRADLE_STUB="$S/$tool_name" HOST_GRADLE_SYSTEM_BIN="$1" HOST_GRADLE_BASH_PATH="${2:-/usr/bin}" \
+      HOST_GRADLE_ENV_FILE="$H/persistent.sh" sh "$stub_hook" >> "$scratch/hook.log" 2>&1
+    rc=$?
+  }
+  stub_run "$H/sys bin" "$H/sys bin"
+  check "exit 0" same "$rc" 0
+  check "linked into the system folder, a path with a space" links_to "$H/sys bin/$tool_name" "$S/$tool_name"
+  check "…and not the home folder" absent "$H/.local/bin"
+  check "…and the link runs" same "$("$H/sys bin/$tool_name" x)" "dummy-token"
+  check "a folder on the PATH needs no export" absent "$H/persistent.sh"
+  stub_run "$H/sys bin" "$H/sys bin"
+  check "a second run exits 0 and keeps the link" links_to "$H/sys bin/$tool_name" "$S/$tool_name"
+  fresh stubs2
+  mkdir -p "$H/sys"
+  printf 'mine\n' > "$H/sys/$tool_name"
+  stub_run "$H/sys" "$H/sys"
+  check "a foreign command stays" same "$(cat "$H/sys/$tool_name")" mine
+  check "…and the home folder gets the link instead" links_to "$H/.local/bin/$tool_name" "$S/$tool_name"
+  rm -rf "$H/.local" "$H/persistent.sh" "$H/sys/$tool_name"
+  ln -s /elsewhere "$H/sys/$tool_name"
+  stub_run "$H/sys" "$H/sys"
+  check "a foreign link stays" same "$(readlink "$H/sys/$tool_name")" /elsewhere
+  fresh stubs3
+  stub_run "/nonexistent/dir" "/usr/bin"
+  check "no writable system folder: the home folder is made" links_to "$H/.local/bin/$tool_name" "$S/$tool_name"
+  check "…and one export line goes to the persistent file" same "$(grep -c 'export PATH=' "$H/persistent.sh")" 1
+  stub_run "/nonexistent/dir" "/usr/bin"
+  check "a second run exits 0" same "$rc" 0
+  check "…keeps the link" links_to "$H/.local/bin/$tool_name" "$S/$tool_name"
+  check "…and adds no second export line" same "$(grep -c 'export PATH=' "$H/persistent.sh")" 1
+  if command -v bash >/dev/null 2>&1; then
+    mkdir -p "$scratch/empty1" "$scratch/empty2"
+    found=$(env -i HOME="$H" PATH="$scratch/empty1:$scratch/empty2" BASH_ENV="$H/persistent.sh" "$(command -v bash)" -c "$tool_name x" 2>/dev/null)
+    check "a fresh non-interactive bash runs the helper by name" same "$found" "dummy-token"
+    found=$(env -i HOME="$H" PATH="$scratch/empty1:$scratch/empty2:$H/.local/bin" BASH_ENV="$H/persistent.sh" "$(command -v bash)" -c 'echo "$PATH"')
+    check "…and the export does not repeat a folder already on the PATH" same "$found" "$scratch/empty1:$scratch/empty2:$H/.local/bin"
+  fi
+  fresh stubs5
+  mkdir -p "$H/foreign" "$H/.local/bin"
+  printf '#!/bin/sh\necho foreign\n' > "$H/foreign/$tool_name"
+  chmod 755 "$H/foreign/$tool_name"
+  stub_run "/nonexistent/dir" "$H/foreign:$H/.local/bin"
+  check "a foreign command earlier on the PATH: exit 0" same "$rc" 0
+  check "…it stays" grep -q foreign "$H/foreign/$tool_name"
+  check "…the link is made" links_to "$H/.local/bin/$tool_name" "$S/$tool_name"
+  check "…and one line puts the folder first" same "$(grep -c 'export PATH=' "$H/persistent.sh")" 1
+  if command -v bash >/dev/null 2>&1; then
+    found=$(env -i HOME="$H" PATH="$H/foreign:$H/.local/bin:/usr/bin:/bin" BASH_ENV="$H/persistent.sh" bash -c "$tool_name x" 2>/dev/null)
+    check "…so a name-based call runs the helper" same "$found" "dummy-token"
+    found=$(env -i HOME="$H" PATH="$H/.local/bin:$H/foreign:/usr/bin" BASH_ENV="$H/persistent.sh" bash -c 'echo "$PATH"')
+    check "…and does not repeat once the folder is first" same "$found" "$H/.local/bin:$H/foreign:/usr/bin"
+  fi
+  fresh stubs7
+  mkdir -p "$H/.local/bin"
+  stub_run "/nonexistent/dir" "$H/.local/bin"
+  check "the home folder first on the startup PATH: exit 0" same "$rc" 0
+  check "…still writes the guarded export for later shells" same "$(grep -c 'export PATH=' "$H/persistent.sh")" 1
+  if command -v bash >/dev/null 2>&1; then
+    found=$(env -i HOME="$H" PATH=/usr/bin:/bin BASH_ENV="$H/persistent.sh" bash -c "$tool_name x" 2>/dev/null)
+    check "…so a later shell without that folder runs the helper" same "$found" "dummy-token"
+  fi
+  fresh stubs6
+  printf 'export KEEP=1' > "$H/persistent.sh"
+  stub_run "/nonexistent/dir" "/usr/bin"
+  check "a persistent file without a final newline: exit 0" same "$rc" 0
+  check "…keeps its own line whole" same "$(head -n 1 "$H/persistent.sh")" "export KEEP=1"
+  check "…and puts the export on a line of its own" same "$(grep -c '^case ' "$H/persistent.sh")" 1
+  if command -v bash >/dev/null 2>&1; then
+    found=$(env -i HOME="$H" PATH=/usr/bin:/bin BASH_ENV="$H/persistent.sh" bash -c "echo \$KEEP; $tool_name x" 2>&1)
+    check "…so the next non-interactive bash reads it and runs the helper" same "$found" "1
+dummy-token"
+  fi
+  fresh stubs7
+  mkdir -p "$H/other"
+  printf '#!/bin/sh\necho other\n' > "$H/other/$tool_name"
+  chmod 755 "$H/other/$tool_name"
+  stub_run "/nonexistent/dir" "/usr/bin"
+  if command -v bash >/dev/null 2>&1; then
+    found=$(env -i HOME="$H" PATH="$H/other:/usr/bin:/bin" BASH_ENV="$H/persistent.sh" bash -c "$tool_name x" 2>/dev/null)
+    check "a PATH that changed after startup, with a foreign command first: the helper still wins" same "$found" "dummy-token"
+  fi
+  fresh stubs4
+  mkdir -p "$H/.local"
+  : > "$H/.local/bin"
+  stub_run "/nonexistent/dir"
+  check "nothing writable: exit 0" same "$rc" 0
+  check "…and no export line" absent "$H/persistent.sh"
+
   echo "# 5. an own download is never clobbered, an unknown tool does nothing"
   fresh own
   host_gradle
@@ -238,7 +440,7 @@ behaviour() {
 
 case ${1:-} in
   --static) static ;;
-  "") behaviour ;;
+  "") static; behaviour ;;
   *) echo "usage: sh tests/kit-hooks/host-jvm-caches-test.sh [--static]" >&2; exit 2 ;;
 esac
 if [ "$failures" -gt 0 ]; then

@@ -280,6 +280,7 @@ Pick addons in the create wizard or with `e`. [Stackable kits](docs/addons.md) d
 | `rust`                       | [Rust](docs/addons.md#rust-projects): rustc, cargo, clippy, rustfmt        |
 | `swiftlint`                  | [SwiftLint](docs/addons.md#swiftlint-swift-projects) for Linux, no Xcode   |
 | `host-gradle`, `host-maven`  | [the host's Gradle and Maven caches](docs/addons.md#host-mavengradle-caches-read-only), read-only |
+| `host-gradle-properties`     | [the host's `~/.gradle/gradle.properties`](docs/addons.md#host-gradle-properties-file), copied; opt-in, may hold secrets |
 | `host-npm`, `host-pip`       | [the host's npm, pip and uv caches](docs/addons.md#host-npmpipuv-caches-read-only), read-only |
 | `host-skills`                | [the host's own skills](docs/addons.md#host-skills-read-only), read-only and live |
 | `web`                        | [access to every host](docs/addons.md#web-access-websearch--webfetch), for WebFetch and web search |

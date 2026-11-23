@@ -12,8 +12,8 @@ Add an addon in one of these ways:
 - All other addons join only at creation or with a rebuild, because they have network rules or host folders. See
   [Names, kits and rebuilds](sandboxes.md#names-kits-and-rebuilds).
 
-The wizard lists the host-folder kits first, under *Host caches*: `host-gradle`, `host-maven`, `host-npm`, `host-pip`
-and `host-skills`. A kit that finds no folder on this host is greyed out and shows what it looked for.
+The wizard lists the host-folder kits first, under *Host caches*: `host-gradle`, `host-gradle-properties`, `host-maven`, `host-npm`,
+`host-pip` and `host-skills`. A kit that finds no folder on this host is greyed out and shows what it looked for.
 
 ## JDK / Java projects
 
@@ -147,13 +147,65 @@ there too. New artifacts go into the sandbox's own caches.
 ### Why read-only, and only the caches
 
 Read-only, so the agent cannot change artifacts that your later host builds use. Only the cache folders, because
-`gradle.properties` and `settings.xml` often hold credentials.
+`gradle.properties` and `settings.xml` often hold credentials. The one exception is the opt-in
+[`host-gradle-properties`](#host-gradle-properties-file) addon.
+
+### The helper command of `host-gradle`
+
+With `host-gradle`, a small helper command is on the sandbox's `PATH`. It prints `dummy-token` and exits 0 for any
+arguments, so Gradle plugins that ask for a token do not fail offline. It is a link, made at every start, into
+`/usr/local/bin` or else `~/.local/bin`. A command of the same name that is not ours stays. When the folder is not on
+the `PATH` that non-interactive commands get, one line in `/etc/sandbox-persistent.sh` adds it, so the agent's shell
+commands find the helper too.
 
 ### Limits of the Maven and Gradle caches
 
 - A hit needs the same repository URL on host and sandbox, and the same wrapper `distributionUrl`.
 - Run `./gradlew` once on the host: wrapper folders that IntelliJ made do not match.
 - The mounts are fixed at creation. To add a kit later, rebuild.
+
+## Host Gradle properties file
+
+`host-gradle-properties` is off by default and has its own row among the host kits: *Gradle properties file (may
+contain secrets!)*. Ticked, it puts the host's `~/.gradle/gradle.properties` into the sandbox's `~/.gradle`, so
+Gradle finds the repository settings you use on the host.
+
+> **Beware: this file may contain secrets!** Everything in the sandbox can read the copy, so tick the addon only
+> for a sandbox you trust with them. The hook never prints the content. On Windows, aisbx sets no access rights of
+> its own on the copy: it gets those the state folder passes on, so keep that folder private to your account.
+>
+> Two risks are accepted and not guarded: two aisbx processes that run at the same moment (one create without the
+> addon, one with it) can race, as there is no lock between processes; and an interruption between the two renames
+> in the sandbox's start hook leaves the copy in place, no longer refreshed, which keeps the file and fails safe.
+
+How it works: `sbx` mounts folders only. When a create, a rebuild or `aisbx up` really runs, aisbx copies the host file
+to `<state folder>/aisbx-gradle-properties/gradle.properties` (folder 0700, file 0600; a symlink is read through) and
+mounts that folder read-only. At every start, the sandbox copies the file to `~/.gradle/gradle.properties` (0600).
+
+- The file on the host is the authority at the moment of copying. A later edit on the host reaches an existing sandbox
+  when you rebuild it or run `aisbx up` for it again, and the sandbox copies it at its next start. A confirmation that
+  you cancel copies nothing. If the host file is gone, `aisbx up` and the next create or rebuild remove the copy.
+- `aisbx up` for an existing sandbox copies again when the sandbox has the addon, with or without `--kit`.
+- The copy folder is mounted whenever the addon is on, also while the host file is missing, so a file that appears on
+  the host later reaches the sandbox the same way.
+- The copy folder is shared by every sandbox that has the addon: refreshing it for one sandbox changes what the others
+  copy at their next start.
+- aisbx refuses to copy, and starts no create or rebuild that would copy, when the state folder is not an absolute
+  path or has a `:` or `,` in it (a Windows drive letter aside). It also refuses when a mount of any sandbox,
+  its workspace, an extra folder or one added with `sbx mount` (also one a rebuild adds back), overlaps the copy's
+  folder in either direction (it holds the folder, or lies inside it): a sandbox without the addon would see the copy.
+  The one exception is the addon's own read-only mount of the folder on a sandbox that has the addon. A mount that
+  cannot be resolved is refused too, naming the sandbox; if it is the addon's own folder that is gone, rebuild that
+  sandbox. aisbx reads the current mounts from `sbx` first, and copies nothing when it cannot. Set `XDG_STATE_HOME`
+  to a folder outside them. For an existing sandbox, `aisbx up` only warns.
+- A new sandbox without the addon is refused when its workspace or an extra folder holds a copy an earlier sandbox
+  left in the state folder.
+- A rebuild adds the copy's mount when you confirm, together with the copy. A sandbox without a host folder
+  (mountless) cannot take the addon: its read-only mount needs a workspace, so the kits editor refuses.
+- Each new sandbox needs a fresh tick: the create form never remembers this addon from the last create.
+- A file the agent edited in the sandbox stays: it is replaced only while it is still the copy the hook made.
+- Without the file on the host, the row is greyed out, and the sandbox starts as usual.
+- Nothing else in `~/.gradle` is copied.
 
 ## Host npm/pip/uv caches (read-only)
 
