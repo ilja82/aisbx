@@ -341,10 +341,11 @@ behaviour() {
   check "…keeps the link" links_to "$H/.local/bin/$tool_name" "$S/$tool_name"
   check "…and adds no second export line" same "$(grep -c 'export PATH=' "$H/persistent.sh")" 1
   if command -v bash >/dev/null 2>&1; then
-    found=$(env -i HOME="$H" PATH=/usr/bin:/bin BASH_ENV="$H/persistent.sh" bash -c "$tool_name x" 2>/dev/null)
+    mkdir -p "$scratch/empty1" "$scratch/empty2"
+    found=$(env -i HOME="$H" PATH="$scratch/empty1:$scratch/empty2" BASH_ENV="$H/persistent.sh" "$(command -v bash)" -c "$tool_name x" 2>/dev/null)
     check "a fresh non-interactive bash runs the helper by name" same "$found" "dummy-token"
-    found=$(env -i HOME="$H" PATH="/usr/bin:/bin:$H/.local/bin" BASH_ENV="$H/persistent.sh" bash -c 'echo "$PATH"')
-    check "…and the export does not repeat a folder already on the PATH" same "$found" "/usr/bin:/bin:$H/.local/bin"
+    found=$(env -i HOME="$H" PATH="$scratch/empty1:$scratch/empty2:$H/.local/bin" BASH_ENV="$H/persistent.sh" "$(command -v bash)" -c 'echo "$PATH"')
+    check "…and the export does not repeat a folder already on the PATH" same "$found" "$scratch/empty1:$scratch/empty2:$H/.local/bin"
   fi
   fresh stubs5
   mkdir -p "$H/foreign" "$H/.local/bin"
