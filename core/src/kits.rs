@@ -465,6 +465,22 @@ pub struct HeadlessRun<'a> {
     pub print_timeout: &'a str,
     /// Appended after aisbx's own flags, before the prompt.
     pub extra: &'a [String],
+    pub system_prompt: Option<&'a str>,
+    pub tools: Tools<'a>,
+    pub strict_mcp: bool,
+    pub no_slash_commands: bool,
+    pub no_session: bool,
+}
+
+/// The tools a headless run may use, `aisbx run --tools` / `--no-tools`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Tools<'a> {
+    /// The agent's own default set: no flag.
+    #[default]
+    Default,
+    None,
+    /// The agent's own comma-separated tool list, passed as given.
+    Only(&'a str),
 }
 
 /// The non-interactive command line for one prompt, for an sbx agent name, with
@@ -487,6 +503,23 @@ pub fn headless_argv(agent: &str, run: &HeadlessRun<'_>) -> Option<Vec<String>> 
             }
             if let Some(effort) = run.effort {
                 argv.extend(["--effort".into(), effort.into()]);
+            }
+            if let Some(text) = run.system_prompt {
+                argv.extend(["--system-prompt".into(), text.into()]);
+            }
+            match run.tools {
+                Tools::Default => {}
+                Tools::None => argv.extend(["--tools".into(), String::new()]),
+                Tools::Only(list) => argv.extend(["--tools".into(), list.into()]),
+            }
+            if run.strict_mcp {
+                argv.push("--strict-mcp-config".into());
+            }
+            if run.no_slash_commands {
+                argv.push("--disable-slash-commands".into());
+            }
+            if run.no_session {
+                argv.push("--no-session-persistence".into());
             }
             flags(&mut argv, "claude");
             argv.extend(run.extra.iter().cloned());
@@ -531,6 +564,17 @@ pub fn headless_argv(agent: &str, run: &HeadlessRun<'_>) -> Option<Vec<String>> 
             if let Some(effort) = run.effort {
                 argv.extend(["--thinking".into(), effort.into()]);
             }
+            if let Some(text) = run.system_prompt {
+                argv.extend(["--system-prompt".into(), text.into()]);
+            }
+            match run.tools {
+                Tools::Default => {}
+                Tools::None => argv.push("--no-tools".into()),
+                Tools::Only(list) => argv.extend(["--tools".into(), list.into()]),
+            }
+            if run.no_session {
+                argv.push("--no-session".into());
+            }
             flags(&mut argv, "pi");
             argv.extend(run.extra.iter().cloned());
             argv.extend(["--".into(), slot]);
@@ -555,6 +599,44 @@ pub fn headless_argv(agent: &str, run: &HeadlessRun<'_>) -> Option<Vec<String>> 
 /// Whether [`headless_argv`] has a flag for [`HeadlessRun::effort`], for an sbx agent name.
 pub fn accepts_effort(agent: &str) -> bool {
     !matches!(cli(agent), Some(Cli::OpenCode))
+}
+
+/// The first `aisbx run` option of `run` that [`headless_argv`] has no flag for on this sbx agent,
+/// by its option name. `None` for an agent without headless facts.
+pub fn unsupported_run_option(agent: &str, run: &HeadlessRun<'_>) -> Option<&'static str> {
+    let cli = cli(agent)?;
+    let given = [
+        (
+            run.system_prompt.is_some(),
+            "--system-prompt or --system-prompt-file",
+            matches!(cli, Cli::Claude | Cli::Pi),
+        ),
+        (
+            run.tools == Tools::None,
+            "--no-tools",
+            matches!(cli, Cli::Claude | Cli::Pi),
+        ),
+        (
+            matches!(run.tools, Tools::Only(_)),
+            "--tools",
+            matches!(cli, Cli::Claude | Cli::Pi),
+        ),
+        (run.strict_mcp, "--strict-mcp", cli == Cli::Claude),
+        (
+            run.no_slash_commands,
+            "--no-slash-commands",
+            cli == Cli::Claude,
+        ),
+        (
+            run.no_session,
+            "--no-session",
+            matches!(cli, Cli::Claude | Cli::Pi),
+        ),
+    ];
+    given
+        .into_iter()
+        .find(|&(set, _, supported)| set && !supported)
+        .map(|(_, option, _)| option)
 }
 
 /// The secret service an agent signs in with although its kit marks the credential optional,
@@ -1848,6 +1930,11 @@ mod tests {
                     format: OutputFormat::Text,
                     print_timeout: "0",
                     extra: &[],
+                    system_prompt: None,
+                    tools: Tools::Default,
+                    strict_mcp: false,
+                    no_slash_commands: false,
+                    no_session: false,
                 },
             )
         };
@@ -2906,6 +2993,210 @@ mod tests {
             assert_eq!(report["valid"], serde_json::json!(true), "{text}");
             // A warning — a deprecation above all — means a kit has aged out of the grammar.
             assert_eq!(report["warnings"], serde_json::json!([]), "{text}");
+        }
+    }
+
+    fn plain_run() -> HeadlessRun<'static> {
+        HeadlessRun {
+            model: None,
+            effort: None,
+            format: OutputFormat::Json,
+            print_timeout: "0",
+            extra: &[],
+            system_prompt: None,
+            tools: Tools::Default,
+            strict_mcp: false,
+            no_slash_commands: false,
+            no_session: false,
+        }
+    }
+
+    #[test]
+    fn claude_gets_every_lean_run_flag_after_the_effort() {
+        let extra = vec!["--own".to_string()];
+        let run = HeadlessRun {
+            model: Some("opus"),
+            effort: Some("xhigh"),
+            extra: &extra,
+            system_prompt: Some("You are an engine.\nAnswer in JSON."),
+            tools: Tools::None,
+            strict_mcp: true,
+            no_slash_commands: true,
+            no_session: true,
+            ..plain_run()
+        };
+        assert_eq!(unsupported_run_option("claude-anthropic", &run), None);
+        assert_eq!(
+            headless_argv("claude-anthropic", &run).unwrap(),
+            [
+                "claude",
+                "-p",
+                "--output-format",
+                "json",
+                "--model",
+                "opus",
+                "--effort",
+                "xhigh",
+                "--system-prompt",
+                "You are an engine.\nAnswer in JSON.",
+                "--tools",
+                "",
+                "--strict-mcp-config",
+                "--disable-slash-commands",
+                "--no-session-persistence",
+                "--dangerously-skip-permissions",
+                "--own",
+                "--",
+                crate::sbx::PROMPT_SLOT
+            ]
+        );
+        let only = HeadlessRun {
+            tools: Tools::Only("Read,Grep"),
+            ..plain_run()
+        };
+        let argv = headless_argv("claude-token", &only).unwrap();
+        let at = argv.iter().position(|a| a == "--tools").unwrap();
+        assert_eq!(argv[at + 1], "Read,Grep");
+    }
+
+    #[test]
+    fn pi_maps_the_lean_run_flags_it_has_and_refuses_the_others() {
+        let run = HeadlessRun {
+            system_prompt: Some("be brief"),
+            tools: Tools::None,
+            no_session: true,
+            ..plain_run()
+        };
+        for agent in ["pi-litellm", "pi-local"] {
+            assert_eq!(unsupported_run_option(agent, &run), None, "{agent}");
+            assert_eq!(
+                headless_argv(agent, &run).unwrap(),
+                [
+                    "pi",
+                    "-p",
+                    "--mode",
+                    "json",
+                    "--system-prompt",
+                    "be brief",
+                    "--no-tools",
+                    "--no-session",
+                    "--",
+                    crate::sbx::PROMPT_SLOT
+                ],
+                "{agent}"
+            );
+        }
+        let only = HeadlessRun {
+            tools: Tools::Only("read,bash"),
+            ..plain_run()
+        };
+        assert_eq!(
+            headless_argv("pi-litellm", &only).unwrap(),
+            [
+                "pi",
+                "-p",
+                "--mode",
+                "json",
+                "--tools",
+                "read,bash",
+                "--",
+                crate::sbx::PROMPT_SLOT
+            ]
+        );
+        let strict = HeadlessRun {
+            strict_mcp: true,
+            ..plain_run()
+        };
+        assert_eq!(
+            unsupported_run_option("pi-litellm", &strict),
+            Some("--strict-mcp")
+        );
+        let slash = HeadlessRun {
+            no_slash_commands: true,
+            ..plain_run()
+        };
+        assert_eq!(
+            unsupported_run_option("pi-local", &slash),
+            Some("--no-slash-commands")
+        );
+    }
+
+    #[test]
+    fn agents_without_lean_run_flags_refuse_each_one() {
+        let options: [(&str, HeadlessRun<'static>); 6] = [
+            (
+                "--system-prompt or --system-prompt-file",
+                HeadlessRun {
+                    system_prompt: Some("s"),
+                    ..plain_run()
+                },
+            ),
+            (
+                "--tools",
+                HeadlessRun {
+                    tools: Tools::Only("Read"),
+                    ..plain_run()
+                },
+            ),
+            (
+                "--no-tools",
+                HeadlessRun {
+                    tools: Tools::None,
+                    ..plain_run()
+                },
+            ),
+            (
+                "--strict-mcp",
+                HeadlessRun {
+                    strict_mcp: true,
+                    ..plain_run()
+                },
+            ),
+            (
+                "--no-slash-commands",
+                HeadlessRun {
+                    no_slash_commands: true,
+                    ..plain_run()
+                },
+            ),
+            (
+                "--no-session",
+                HeadlessRun {
+                    no_session: true,
+                    ..plain_run()
+                },
+            ),
+        ];
+        for agent in [
+            "codex",
+            "codex-openai",
+            "agy",
+            "opencode",
+            "opencode-litellm",
+            "opencode-local",
+        ] {
+            for (option, run) in &options {
+                assert_eq!(unsupported_run_option(agent, run), Some(*option), "{agent}");
+            }
+        }
+        for agent in [
+            "claude",
+            "claude-litellm",
+            "claude-anthropic",
+            "claude-token",
+            "claude-local",
+            "claude-bare-local",
+            "codex",
+            "codex-openai",
+            "agy",
+            "pi-litellm",
+            "pi-local",
+            "opencode",
+            "opencode-litellm",
+            "opencode-local",
+            "unknown",
+        ] {
+            assert_eq!(unsupported_run_option(agent, &plain_run()), None, "{agent}");
         }
     }
 }

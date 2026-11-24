@@ -2450,6 +2450,11 @@ impl Step {
                 format: OutputFormat::StreamJson,
                 print_timeout: &timeout_text,
                 extra: &extra,
+                system_prompt: None,
+                tools: kits::Tools::Default,
+                strict_mcp: false,
+                no_slash_commands: false,
+                no_session: false,
             },
         )
         .map_err(|f| Stop::new("work", f.code, f.message))?;
