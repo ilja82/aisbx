@@ -220,7 +220,14 @@ With the flag:
 | `--approvals MODE` | `dismiss` (default) or `keep`: what happens to requests held for approval ([Unattended defaults](#unattended-defaults)) |
 | `--no-update` | skips the agent update |
 | `--ssh-agent` | forwards the host's SSH agent (off by default) |
-| `-- ARGS` | agent arguments |
+| `--system-prompt TEXT` | replaces the agent's system prompt (at most 64 KiB, not empty) |
+| `--system-prompt-file FILE` | the same, from a file on the host; `-` is refused (stdin may hold the prompt) |
+| `--tools LIST` | lets the agent use only these tools, in the agent's own names (Claude Code `Read,Grep`) |
+| `--no-tools` | no tools at all |
+| `--strict-mcp` | Claude Code only uses the MCP servers that `-- --mcp-config …` names |
+| `--no-slash-commands` | turns Claude Code's slash commands and skills off |
+| `--no-session` | the agent saves no session to resume |
+| `-- ARGS` | agent arguments, after the flags `aisbx` adds |
 
 The agent's output comes through untouched:
 
@@ -229,6 +236,26 @@ The agent's output comes through untouched:
 - On OpenCode, `run` is `opencode run`. Both JSON formats are its `--format json` JSONL event stream, and `text` is
   its default output. `--model` takes OpenCode's `provider/model` form, e.g. `litellm-<connection>/<model>`
   (`local-<engine>/<model>` on a local engine).
+
+The context and tool options become the agent's own flags. An agent without such a flag refuses the option
+with exit 2 and names the option to drop:
+
+| Option | Claude Code | Pi | Codex, agy, OpenCode |
+| --- | --- | --- | --- |
+| `--system-prompt`, `--system-prompt-file` | `--system-prompt TEXT` | `--system-prompt TEXT` | refused |
+| `--tools LIST` | `--tools LIST` | `--tools LIST` | refused |
+| `--no-tools` | `--tools ""` | `--no-tools` | refused |
+| `--strict-mcp` | `--strict-mcp-config` | refused | refused |
+| `--no-slash-commands` | `--disable-slash-commands` | refused | refused |
+| `--no-session` | `--no-session-persistence` | `--no-session` | refused |
+
+The system prompt is part of the agent's command line, so the sandbox's process list shows it. Keep secrets out of
+it. A lean run on Claude Code, with the plain `sbx` equivalent being `sbx exec NAME claude -p … --tools "" …`:
+
+```console
+$ aisbx run nightly --prompt-file task.md --model opus --effort xhigh \
+      --system-prompt-file system.md --no-tools --strict-mcp --no-slash-commands --no-session > result.json
+```
 
 ### `aisbx step`
 

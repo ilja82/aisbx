@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::kits::{self, Catalog, HeadlessRun, OutputFormat};
+use crate::kits::{self, Catalog, HeadlessRun, OutputFormat, Tools};
 use crate::store_skills::{self, Scope, Switches};
 use crate::{
     bindings, compat, folders, litellm, model, models, sbx, skill_repos, skill_select,
@@ -76,6 +76,13 @@ HEADLESS USE — the same kits and names as the dashboard, for scripts:
         --approvals MODE       dismiss (default) | keep — requests held for approval
         --report FILE          write a JSON summary of the run to FILE (on the host)
         --ssh-agent            forward the host SSH agent (off by default)
+        --system-prompt TEXT   replace the agent's system prompt (Claude Code, Pi)
+        --system-prompt-file FILE  the same, from a host file
+        --tools LIST           only these tools (Claude Code, Pi; the agent's own names)
+        --no-tools             no tools at all (Claude Code, Pi)
+        --strict-mcp           only the MCP servers in AGENT_ARGS' --mcp-config (Claude Code)
+        --no-slash-commands    no slash commands or skills (Claude Code)
+        --no-session           save no session (Claude Code, Pi)
         Agents: Claude Code, Codex, Antigravity (agy), Pi and OpenCode.
 
     aisbx step --spec FILE --dir DIR [--prewarm]
@@ -599,6 +606,11 @@ pub(crate) fn agent_argv(
     if run.effort.is_some() && !kits::accepts_effort(agent) {
         return Err(Fail::usage(format!(
             "{name} runs {agent:?}; OpenCode has no effort flag: drop --effort"
+        )));
+    }
+    if let Some(option) = kits::unsupported_run_option(agent, run) {
+        return Err(Fail::usage(format!(
+            "{name} runs {agent:?}, whose headless command has no flag for {option}: drop {option}"
         )));
     }
     kits::headless_argv(agent, run).ok_or_else(|| {
@@ -1541,6 +1553,78 @@ pub(crate) fn valid_sandbox_name(name: &str) -> bool {
 
 // --- run -------------------------------------------------------------------------------------------
 
+/// The longest system prompt `run` passes, in bytes: it is one argument of the agent's argv.
+const SYSTEM_PROMPT_MAX: usize = 64 * 1024;
+
+/// `run`'s options that narrow the agent's context and tools.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct LeanRun {
+    system_prompt: Option<String>,
+    no_tools: bool,
+    tools: Option<String>,
+    strict_mcp: bool,
+    no_slash_commands: bool,
+    no_session: bool,
+}
+
+impl LeanRun {
+    fn parse(args: &Args) -> Result<Self, Fail> {
+        let system_prompt = match (args.one("system-prompt")?, args.one("system-prompt-file")?) {
+            (Some(_), Some(_)) => {
+                return Err(Fail::usage(
+                    "--system-prompt or --system-prompt-file, not both",
+                ))
+            }
+            (Some(text), None) => Some(text),
+            (None, Some(f)) if f == "-" => {
+                return Err(Fail::usage(
+                    "--system-prompt-file takes a file, not - (stdin may hold the prompt)",
+                ))
+            }
+            (None, Some(f)) => Some(
+                std::fs::read_to_string(&f)
+                    .map_err(|e| Fail::usage(format!("reading the system prompt from {f}: {e}")))?,
+            ),
+            (None, None) => None,
+        };
+        if let Some(text) = &system_prompt {
+            if text.trim().is_empty() {
+                return Err(Fail::usage("the system prompt is empty"));
+            }
+            if text.len() > SYSTEM_PROMPT_MAX {
+                return Err(Fail::usage(format!(
+                    "the system prompt has {} bytes, more than {SYSTEM_PROMPT_MAX}",
+                    text.len()
+                )));
+            }
+        }
+        let no_tools = args.has("no-tools");
+        let tools = args.one("tools")?;
+        if no_tools && tools.is_some() {
+            return Err(Fail::usage("--tools or --no-tools, not both"));
+        }
+        if tools.as_deref().is_some_and(|t| t.trim().is_empty()) {
+            return Err(Fail::usage("--tools is empty: pass --no-tools for none"));
+        }
+        Ok(Self {
+            system_prompt,
+            no_tools,
+            tools,
+            strict_mcp: args.has("strict-mcp"),
+            no_slash_commands: args.has("no-slash-commands"),
+            no_session: args.has("no-session"),
+        })
+    }
+
+    fn tools(&self) -> Tools<'_> {
+        match (&self.tools, self.no_tools) {
+            (Some(list), _) => Tools::Only(list),
+            (None, true) => Tools::None,
+            (None, false) => Tools::Default,
+        }
+    }
+}
+
 /// What a headless run reports with `--report`, besides its exit code.
 #[derive(Debug, Default)]
 struct Report {
@@ -1554,7 +1638,14 @@ struct Report {
 fn run(raw: &[String]) -> Outcome {
     let args = Args::parse(
         raw,
-        &["no-update", "ssh-agent"],
+        &[
+            "no-update",
+            "ssh-agent",
+            "no-tools",
+            "strict-mcp",
+            "no-slash-commands",
+            "no-session",
+        ],
         &[
             "prompt",
             "prompt-file",
@@ -1565,6 +1656,9 @@ fn run(raw: &[String]) -> Outcome {
             "workdir",
             "approvals",
             "report",
+            "system-prompt",
+            "system-prompt-file",
+            "tools",
         ],
     )?;
     let name = args.name()?;
@@ -1610,6 +1704,7 @@ fn run(raw: &[String]) -> Outcome {
             )))
         }
     };
+    let lean = LeanRun::parse(&args)?;
     let ssh_agent = args.has("ssh-agent");
     let workdir = args.one("workdir")?.map(PathBuf::from);
     let report_path = args.one("report")?.map(PathBuf::from);
@@ -1627,6 +1722,11 @@ fn run(raw: &[String]) -> Outcome {
             format,
             print_timeout: &print_timeout,
             extra: &args.trailing,
+            system_prompt: lean.system_prompt.as_deref(),
+            tools: lean.tools(),
+            strict_mcp: lean.strict_mcp,
+            no_slash_commands: lean.no_slash_commands,
+            no_session: lean.no_session,
         },
     )?;
 
@@ -6185,6 +6285,11 @@ mod tests {
             format: OutputFormat::Json,
             print_timeout: "4h",
             extra: &[],
+            system_prompt: None,
+            tools: Tools::Default,
+            strict_mcp: false,
+            no_slash_commands: false,
+            no_session: false,
         };
         let claude = kits::headless_argv("claude", &run).unwrap();
         assert_eq!(&claude[..4], ["claude", "-p", "--output-format", "json"]);
@@ -6260,6 +6365,11 @@ mod tests {
             format,
             print_timeout: "0",
             extra: &extra,
+            system_prompt: None,
+            tools: Tools::Default,
+            strict_mcp: false,
+            no_slash_commands: false,
+            no_session: false,
         };
         let text = kits::headless_argv("pi-litellm", &run(OutputFormat::Text)).unwrap();
         assert_eq!(text, ["pi", "-p", "--no-session", "--", sbx::PROMPT_SLOT]);
@@ -6305,6 +6415,11 @@ mod tests {
             format,
             print_timeout: "0",
             extra: &extra,
+            system_prompt: None,
+            tools: Tools::Default,
+            strict_mcp: false,
+            no_slash_commands: false,
+            no_session: false,
         };
         let text = kits::headless_argv("opencode-litellm", &run(OutputFormat::Text)).unwrap();
         assert_eq!(
@@ -6356,6 +6471,11 @@ mod tests {
             format: OutputFormat::Json,
             print_timeout: "0",
             extra: &[],
+            system_prompt: None,
+            tools: Tools::Default,
+            strict_mcp: false,
+            no_slash_commands: false,
+            no_session: false,
         };
         for agent in ["opencode-litellm", "opencode-local", "opencode"] {
             assert!(!kits::accepts_effort(agent), "{agent}");
@@ -6380,6 +6500,122 @@ mod tests {
             assert!(fail.message.contains(name), "{name}: {}", fail.message);
         }
         assert!(HELP.contains("Pi and OpenCode"));
+    }
+
+    fn lean(raw: &[&str]) -> Result<LeanRun, Fail> {
+        let args = Args::parse(
+            &strings(raw),
+            &["no-tools", "strict-mcp", "no-slash-commands", "no-session"],
+            &["system-prompt", "system-prompt-file", "tools"],
+        )?;
+        LeanRun::parse(&args)
+    }
+
+    #[test]
+    fn run_reads_the_lean_options_and_refuses_bad_ones() {
+        assert_eq!(lean(&[]).unwrap(), LeanRun::default());
+        assert_eq!(lean(&[]).unwrap().tools(), Tools::Default);
+        let all = lean(&[
+            "--system-prompt",
+            "be brief",
+            "--no-tools",
+            "--strict-mcp",
+            "--no-slash-commands",
+            "--no-session",
+        ])
+        .unwrap();
+        assert_eq!(all.system_prompt.as_deref(), Some("be brief"));
+        assert_eq!(all.tools(), Tools::None);
+        assert!(all.strict_mcp && all.no_slash_commands && all.no_session);
+        assert_eq!(
+            lean(&["--tools", "Read,Grep"]).unwrap().tools(),
+            Tools::Only("Read,Grep")
+        );
+
+        let dir = std::env::temp_dir().join(format!("aisbx-lean-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("system.md");
+        std::fs::write(&file, "from a file\n").unwrap();
+        let path = file.to_str().unwrap();
+        assert_eq!(
+            lean(&["--system-prompt-file", path])
+                .unwrap()
+                .system_prompt
+                .as_deref(),
+            Some("from a file\n")
+        );
+        let blank = dir.join("blank.md");
+        std::fs::write(&blank, " \n\t\n").unwrap();
+        let big = dir.join("big.md");
+        std::fs::write(&big, "x".repeat(SYSTEM_PROMPT_MAX + 1)).unwrap();
+        std::fs::write(dir.join("max.md"), "x".repeat(SYSTEM_PROMPT_MAX)).unwrap();
+        assert!(lean(&["--system-prompt-file", dir.join("max.md").to_str().unwrap()]).is_ok());
+        let missing = dir.join("missing.md");
+
+        let too_long = "x".repeat(SYSTEM_PROMPT_MAX + 1);
+        for (raw, says) in [
+            (
+                vec!["--system-prompt", "a", "--system-prompt-file", path],
+                "not both",
+            ),
+            (vec!["--tools", "Read", "--no-tools"], "not both"),
+            (vec!["--system-prompt", "  \n "], "empty"),
+            (
+                vec!["--system-prompt-file", blank.to_str().unwrap()],
+                "empty",
+            ),
+            (vec!["--system-prompt", too_long.as_str()], "bytes"),
+            (vec!["--system-prompt-file", big.to_str().unwrap()], "bytes"),
+            (
+                vec!["--system-prompt-file", missing.to_str().unwrap()],
+                "reading the system prompt",
+            ),
+            (vec!["--system-prompt-file", "-"], "not -"),
+            (vec!["--tools", ""], "--no-tools"),
+        ] {
+            let fail = lean(&raw).unwrap_err();
+            assert_eq!(fail.code, EXIT_USAGE, "{raw:?}");
+            assert!(fail.message.contains(says), "{raw:?}: {}", fail.message);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_refuses_a_lean_option_the_agent_has_no_flag_for() {
+        let run = HeadlessRun {
+            model: None,
+            effort: None,
+            format: OutputFormat::Json,
+            print_timeout: "0",
+            extra: &[],
+            system_prompt: None,
+            tools: Tools::Default,
+            strict_mcp: true,
+            no_slash_commands: false,
+            no_session: false,
+        };
+        for agent in ["pi-litellm", "codex-openai", "agy", "opencode-litellm"] {
+            let fail = agent_argv("box", agent, &run).unwrap_err();
+            assert_eq!(fail.code, EXIT_USAGE, "{agent}");
+            assert!(fail.message.contains(agent), "{}", fail.message);
+            assert!(
+                fail.message.contains("drop --strict-mcp"),
+                "{}",
+                fail.message
+            );
+        }
+        assert!(agent_argv("box", "claude-anthropic", &run).is_ok());
+        for option in [
+            "--system-prompt TEXT",
+            "--system-prompt-file FILE",
+            "--tools LIST",
+            "--no-tools",
+            "--strict-mcp",
+            "--no-slash-commands",
+            "--no-session",
+        ] {
+            assert!(HELP.contains(option), "{option}");
+        }
     }
 
     #[test]
