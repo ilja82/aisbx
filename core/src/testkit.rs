@@ -1,6 +1,84 @@
 //! Fixtures shared by the tests of this crate and of the frontends, which build it with the
 //! `test-support` feature. Never compiled into a normal build.
 
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+/// The name of a test process's scratch root, before `<pid>-<nanos>`.
+const SCRATCH_PREFIX: &str = "aisbx-tests-run-";
+
+/// The file in a scratch root that its process holds locked until it ends.
+const SCRATCH_LOCK: &str = "owner.lock";
+
+/// How old a scratch root must be before another process may remove it.
+const SCRATCH_GRACE: Duration = Duration::from_secs(10);
+
+/// A fresh, empty folder for one test: `$TMPDIR/aisbx-tests-run-<pid>-<nanos>/<name>`. The first
+/// call in a test process removes the scratch roots of the test processes that have ended.
+pub fn scratch(name: &str) -> PathBuf {
+    let dir = scratch_root().join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch folder");
+    dir
+}
+
+/// This test process's scratch root, made on first use. The process holds its lock file locked
+/// until it ends, also when it crashes.
+pub fn scratch_root() -> &'static Path {
+    static ROOT: std::sync::OnceLock<(PathBuf, std::fs::File)> = std::sync::OnceLock::new();
+    &ROOT
+        .get_or_init(|| {
+            let tmp = std::env::temp_dir();
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos());
+            let name = format!("{SCRATCH_PREFIX}{}-{nanos}", std::process::id());
+            sweep_scratch_roots(&tmp, &name, SCRATCH_GRACE);
+            let root = tmp.join(name);
+            std::fs::create_dir_all(&root).expect("a scratch root");
+            let lock = std::fs::File::create(root.join(SCRATCH_LOCK)).expect("a scratch lock file");
+            lock.lock()
+                .expect("the lock of this test process's scratch root");
+            (root, lock)
+        })
+        .0
+}
+
+/// Removes the scratch roots in `tmp` of the test processes that have ended: those older than
+/// `grace` whose lock file nobody holds. `own` is the caller's root, which stays.
+pub fn sweep_scratch_roots(tmp: &Path, own: &str, grace: Duration) {
+    let Ok(entries) = std::fs::read_dir(tmp) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(id) = (name.to_str()).and_then(|n| n.strip_prefix(SCRATCH_PREFIX)) else {
+            continue;
+        };
+        let parts: Vec<&str> = id.split('-').collect();
+        let numbered = parts.len() == 2
+            && (parts.iter()).all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+        if !numbered || name.to_str() == Some(own) {
+            continue;
+        }
+        let settled = (entry.metadata().and_then(|m| m.modified()).ok())
+            .and_then(|at| at.elapsed().ok())
+            .is_some_and(|age| age >= grace);
+        if settled && !scratch_held(&entry.path().join(SCRATCH_LOCK)) {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+/// Whether a running process may hold `lock`: it is locked, or cannot be opened for another
+/// reason than not being there.
+fn scratch_held(lock: &Path) -> bool {
+    match std::fs::File::open(lock) {
+        Ok(file) => file.try_lock().is_err(),
+        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+    }
+}
+
 /// The auth editor as it looks for a sandbox currently on the shared `/login`.
 pub fn auth_form(account: crate::app::AccountChoice) -> crate::app::AuthForm {
     crate::app::AuthForm {
@@ -149,13 +227,7 @@ pub fn litellm_key(name: &str, host: &str) -> crate::sbx::CustomSecret {
 pub fn litellm_root_with(conns: &[crate::litellm::Connection]) -> std::path::PathBuf {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static NEXT: AtomicUsize = AtomicUsize::new(0);
-    let root = std::env::temp_dir().join(format!(
-        "aisbx-tests-litellm-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::SeqCst)
-    ));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).expect("a scratch folder for connections");
+    let root = scratch(&format!("litellm-{}", NEXT.fetch_add(1, Ordering::SeqCst)));
     for c in conns {
         crate::litellm::save_in(&root, c).expect("a valid test connection");
         harvest_in(&root, &c.name, &harvested(&c.name));
@@ -209,8 +281,7 @@ pub fn litellm_root() -> std::path::PathBuf {
 pub fn host_home() -> std::path::PathBuf {
     static HOME: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
     HOME.get_or_init(|| {
-        let home =
-            std::env::temp_dir().join(format!("aisbx-tests-host-home-{}", std::process::id()));
+        let home = scratch("host-home");
         let catalog = crate::kits::Catalog::load().expect("kits/ must be discoverable");
         for addon in &catalog.addons {
             let Some(found) = crate::model::host_cache_detection_in(&addon.kit.name, None) else {
@@ -231,4 +302,63 @@ pub fn host_home() -> std::path::PathBuf {
         home
     })
     .clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_scratch_folder_is_empty_and_inside_this_processs_root() {
+        let dir = scratch("testkit-fresh");
+        assert!(dir.starts_with(scratch_root()), "{}", dir.display());
+        std::fs::write(dir.join("left"), "x").unwrap();
+        assert_eq!(scratch("testkit-fresh"), dir);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        let name = scratch_root().file_name().unwrap().to_str().unwrap();
+        let own = format!("{SCRATCH_PREFIX}{}-", std::process::id());
+        assert!(name.starts_with(&own), "{name}");
+        assert!(scratch_held(&scratch_root().join(SCRATCH_LOCK)));
+    }
+
+    #[test]
+    fn the_sweep_removes_only_the_settled_roots_that_no_process_holds() {
+        let tmp = scratch("testkit-sweep");
+        let root = |id: &str| {
+            let dir = tmp.join(format!("{SCRATCH_PREFIX}{id}"));
+            std::fs::create_dir_all(dir.join("leftover")).unwrap();
+            dir
+        };
+        let ended = root("11-1");
+        std::fs::write(ended.join(SCRATCH_LOCK), "").unwrap();
+        let unlocked = root("12-2");
+        let live = root("13-3");
+        let lock = std::fs::File::create(live.join(SCRATCH_LOCK)).unwrap();
+        lock.lock().unwrap();
+        let own = root("14-4");
+        let own_name = format!("{SCRATCH_PREFIX}14-4");
+        let others = [
+            "aisbx-tests-tokens",
+            "aisbx-tests-run-x",
+            "aisbx-tests-run-15",
+            "aisbx-tests-run-16-6-6",
+            "aisbx-tests-litellm-17-7",
+        ];
+        for name in others {
+            std::fs::create_dir_all(tmp.join(name)).unwrap();
+        }
+
+        sweep_scratch_roots(&tmp, &own_name, Duration::from_secs(3600));
+        assert!(ended.exists() && unlocked.exists(), "too young to judge");
+
+        sweep_scratch_roots(&tmp, &own_name, Duration::ZERO);
+        assert!(!ended.exists(), "its process ended");
+        assert!(!unlocked.exists(), "it has no lock file");
+        assert!(live.join("leftover").exists(), "its process still runs");
+        assert!(own.join("leftover").exists(), "the caller's own");
+        for name in others {
+            assert!(tmp.join(name).exists(), "{name} is no scratch root");
+        }
+        drop(lock);
+    }
 }

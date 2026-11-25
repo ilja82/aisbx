@@ -1360,9 +1360,7 @@ mod tests {
 
     /// A kit folder in a scratch directory, holding one descriptor.
     fn scratch_kit(name: &str, descriptor: &str) -> PathBuf {
-        let dir = std::env::temp_dir()
-            .join(format!("aisbx-kit-{}-{name}", std::process::id()))
-            .join(name);
+        let dir = crate::testkit::scratch(&format!("kit-{name}")).join(name);
         fs::create_dir_all(&dir).unwrap();
         fs::write(descriptor_path(&dir), descriptor).unwrap();
         dir

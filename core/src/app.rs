@@ -14182,8 +14182,7 @@ mod tests {
 
     /// A workspace with a few subfolders: the picker reads the real filesystem.
     fn workspace_tree(tag: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("aisbx-ws-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = crate::testkit::scratch(&format!("ws-{tag}"));
         for rel in ["notes/drafts", "notes/published", "aisbx", ".git"] {
             std::fs::create_dir_all(root.join(rel)).unwrap();
         }
