@@ -101,7 +101,9 @@ aisbx skips these folders and gives the reason in `aisbx kits`. They never stop 
 
 - A folder without `<name>/<name>.yaml`. Folders whose names start with `.`, such as `.git`, are skipped silently.
 - A `kind: workload`. Your kits are addons, and the backends stay the ones aisbx knows how to start.
-- A kit with the name of a shipped kit, or of an earlier user kit. The first one found wins.
+- A kit with the name of a shipped kit, or of an earlier user kit. The first one found wins. A new aisbx release can
+  ship a kit with the name of one of yours: `aisbx kits` then skips yours, and `aisbx doctor` lists it as a problem.
+  Rename your kit's folder (and its `<name>.yaml`) to keep it, or delete it when the shipped kit does the same.
 - A name that aisbx uses for the kits it generates, for connections, setup tokens, model pins and host folders.
 
 ### List the kits

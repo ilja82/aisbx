@@ -1252,6 +1252,20 @@ pub fn auto_label(
     account: Option<&str>,
     addons: &[String],
 ) -> String {
+    label_naming(catalog, backend, account, addons, |kit| {
+        kit != crate::create::STATUS_LINE_KIT
+    })
+}
+
+/// [`auto_label`] with the addons `named` keeps: the status line, every new Claude Code
+/// sandbox's default, goes unnamed.
+fn label_naming(
+    catalog: &Catalog,
+    backend: &str,
+    account: Option<&str>,
+    addons: &[String],
+    named: impl Fn(&str) -> bool,
+) -> String {
     let mut base = catalog
         .backend(backend)
         .map(|b| b.base_label())
@@ -1259,16 +1273,16 @@ pub fn auto_label(
     if let Some(account) = account.map(str::trim).filter(|a| !a.is_empty()) {
         base = format!("{base} {account}");
     }
-    if addons.is_empty() {
-        return base;
-    }
     let list: Vec<String> = catalog
         .addons
         .iter()
-        .filter(|a| addons.iter().any(|s| s == &a.kit.name))
+        .filter(|a| addons.iter().any(|s| s == &a.kit.name) && named(&a.kit.name))
         .map(|a| a.short())
         .collect();
-    format!("{base} ({})", list.join(", "))
+    match list.is_empty() {
+        true => base,
+        false => format!("{base} ({})", list.join(", ")),
+    }
 }
 
 /// What a generated label is made of: the backend kit, how it signs in ([`label_account`]) and
@@ -1290,11 +1304,18 @@ pub fn regenerated_label(
 ) -> Option<String> {
     let generate = |p: LabelParts| auto_label(catalog, p.backend, p.account, p.addons);
     let was = generate(before);
-    if current != Some(was.as_str()) {
+    let was_naming_all = label_naming(
+        catalog,
+        before.backend,
+        before.account,
+        before.addons,
+        |_| true,
+    );
+    if current != Some(was.as_str()) && current != Some(was_naming_all.as_str()) {
         return None;
     }
     let next = generate(after);
-    (next != was).then_some(next)
+    (current != Some(next.as_str())).then_some(next)
 }
 
 /// How a sandbox on `backend` signs in, as its generated label names it after the provider: the
@@ -1792,38 +1813,68 @@ pub fn stage_exposure_refusal(addons: &[String], state: &Path, own: &[PathBuf]) 
     ))
 }
 
+/// Why the host files were not staged: a refusal, which a second try does not change, or a
+/// failure to read sbx or to copy. Both texts are sentences for the user.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StageError {
+    Refused(String),
+    Failed(String),
+}
+
+impl std::fmt::Display for StageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StageError::Refused(text) | StageError::Failed(text) => f.write_str(text),
+        }
+    }
+}
+
 /// Stages the host files the chosen addons copy ([`stage_gradle_properties`]); nothing when no
 /// such addon is chosen. This is the only writer: a create, a rebuild and `up` call it at the
 /// moment they run, never while only planning. A [`staging_refusal`] for `exposed` stages
-/// nothing. The error is a sentence for the user.
+/// nothing.
 pub fn stage_host_files_in(
     addons: &[String],
     home: Option<&Path>,
     state: &Path,
     exposed: &[PathBuf],
-) -> Result<(), String> {
+) -> Result<(), StageError> {
     let Some(home) = home.filter(|_| copies_host_files(addons)) else {
         return Ok(());
     };
     if let Some(refusal) = staging_refusal(state, exposed) {
-        return Err(refusal);
+        return Err(StageError::Refused(refusal));
     }
-    stage_gradle_properties(home, state)
-        .map_err(|e| format!("could not copy ~/.gradle/{GRADLE_PROPERTIES_FILE} ({e})"))
+    stage_gradle_properties(home, state).map_err(|e| {
+        StageError::Failed(format!(
+            "could not copy ~/.gradle/{GRADLE_PROPERTIES_FILE} ({e})"
+        ))
+    })
 }
 
 /// Every host folder any sandbox mounts now, read from sbx: its workspaces and, from `inspect`,
-/// every bind mount, those added with `sbx mount` too. An error when sbx cannot say, so that no
-/// copy is staged unchecked.
-pub fn mount_inventory(state: &Path) -> Result<Vec<PathBuf>, String> {
-    let list = sbx::list().map_err(|e| format!("could not read the sandboxes' folders ({e:#})"))?;
+/// every bind mount, those added with `sbx mount` too. A failure when sbx cannot say, so that no
+/// copy is staged unchecked; a refusal for a mount that overlaps the staging folder or cannot be
+/// resolved.
+pub fn mount_inventory(state: &Path) -> Result<Vec<PathBuf>, StageError> {
+    let failed = StageError::Failed;
+    let list = sbx::list()
+        .map_err(|e| failed(format!("could not read the sandboxes' folders ({e:#})")))?;
     let stage = gradle_properties_stage(state);
-    let stage_real = resolve_future(&stage)
-        .ok_or_else(|| format!("could not resolve {}; nothing is copied", stage.display()))?;
+    let stage_real = resolve_future(&stage).ok_or_else(|| {
+        StageError::Refused(format!(
+            "could not resolve {}; nothing is copied",
+            stage.display()
+        ))
+    })?;
     let mut out = Vec::new();
     for entry in &list {
-        let inspected = sbx::inspect(&entry.name)
-            .map_err(|e| format!("could not read the mounts of {} ({e:#})", entry.name))?;
+        let inspected = sbx::inspect(&entry.name).map_err(|e| {
+            failed(format!(
+                "could not read the mounts of {} ({e:#})",
+                entry.name
+            ))
+        })?;
         let installed: Vec<String> = (inspected.kits.iter())
             .filter_map(|k| Path::new(k).file_name()?.to_str().map(String::from))
             .collect();
@@ -1831,35 +1882,36 @@ pub fn mount_inventory(state: &Path) -> Result<Vec<PathBuf>, String> {
         let listed = (entry.workspaces.iter())
             .map(|s| crate::folders::spec_host(s))
             .map(|(p, ro)| (PathBuf::from(p), ro));
-        let bound = strict_mounts(&entry.name, &inspected)?
+        let bound = strict_mounts(&entry.name, &inspected)
+            .map_err(failed)?
             .into_iter()
             .map(|m| (PathBuf::from(m.host_path), m.read_only));
         for (host, ro) in listed.chain(bound) {
             if !host.is_absolute() {
-                return Err(format!(
+                return Err(failed(format!(
                     "could not place a mount of {} ({}); nothing is copied",
                     entry.name,
                     host.display()
-                ));
+                )));
             }
             let real = std::fs::canonicalize(&host).map_err(|e| {
-                format!(
+                StageError::Refused(format!(
                     "could not resolve a mount of {} ({}: {e}); nothing is copied, and a sandbox \
                      whose staging folder is gone needs a rebuild",
                     entry.name,
                     host.display()
-                )
+                ))
             })?;
             if copies && ro && real == stage_real {
                 continue;
             }
             if stage_real.starts_with(&real) || real.starts_with(&stage_real) {
-                return Err(format!(
+                return Err(StageError::Refused(format!(
                     "a mount of {}, {}, overlaps the staging folder {}; nothing is copied",
                     entry.name,
                     host.display(),
                     stage.display()
-                ));
+                )));
             }
             out.push(real);
         }
@@ -1904,7 +1956,7 @@ pub fn refresh_host_files_in(
     home: Option<&Path>,
     state: &Path,
     workspaces: &[String],
-    exposed: Result<Vec<PathBuf>, String>,
+    exposed: Result<Vec<PathBuf>, StageError>,
 ) -> Vec<String> {
     if !copies_host_files(installed) {
         return Vec::new();
@@ -2208,6 +2260,63 @@ mod tests {
             regen(Some(&was), other, a),
             None,
             "a label of another sign-in stays"
+        );
+    }
+
+    /// The status line, on in every new Claude Code sandbox, goes unnamed; a label an older aisbx
+    /// generated with it still counts as generated, and a kit change rewrites it without it.
+    #[test]
+    fn a_generated_label_leaves_out_the_status_line_and_reads_the_older_form() {
+        let catalog = Catalog::load().unwrap();
+        let addons = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        let label = |names: &[&str]| {
+            auto_label(&catalog, "claude-anthropic", Some("/login"), &addons(names))
+        };
+        assert_eq!(label(&["statusline"]), "Claude Code · Anthropic /login");
+        assert_eq!(
+            label(&["rtk", "statusline"]),
+            "Claude Code · Anthropic /login (RTK)"
+        );
+
+        let (with, more) = (
+            addons(&["rtk", "statusline"]),
+            addons(&["jdk25", "rtk", "statusline"]),
+        );
+        let only_rtk = addons(&["rtk"]);
+        let parts = |addons| LabelParts {
+            backend: "claude-anthropic",
+            account: Some("/login"),
+            addons,
+        };
+        let older = "Claude Code · Anthropic /login (RTK, Statusline)";
+        assert_eq!(
+            regenerated_label(&catalog, Some(older), parts(&with), parts(&more)).as_deref(),
+            Some("Claude Code · Anthropic /login (JDK25, RTK)")
+        );
+        assert_eq!(
+            regenerated_label(&catalog, Some(older), parts(&with), parts(&only_rtk)).as_deref(),
+            Some("Claude Code · Anthropic /login (RTK)"),
+            "removing the status line drops it from an older label"
+        );
+        assert_eq!(
+            regenerated_label(
+                &catalog,
+                Some("Claude Code · Anthropic /login (RTK)"),
+                parts(&with),
+                parts(&with)
+            ),
+            None,
+            "no change, no new label"
+        );
+        assert_eq!(
+            regenerated_label(
+                &catalog,
+                Some("My box (Statusline)"),
+                parts(&with),
+                parts(&more)
+            ),
+            None,
+            "a typed label stays"
         );
     }
 
@@ -2813,6 +2922,13 @@ mod tests {
         (base, home, state)
     }
 
+    fn refused_text(e: StageError) -> String {
+        match e {
+            StageError::Refused(text) => text,
+            other => panic!("not a refusal: {other:?}"),
+        }
+    }
+
     fn staged_in(state: &Path) -> PathBuf {
         state
             .join(GRADLE_PROPERTIES_STAGE_DIR)
@@ -3013,7 +3129,7 @@ mod tests {
         };
 
         let colon = base.join("cache:/state");
-        let refused = stage(&colon, &[]).unwrap_err();
+        let refused = refused_text(stage(&colon, &[]).unwrap_err());
         assert!(refused.contains("':'"), "{refused}");
         assert!(!base.join("cache:").exists(), "nothing was created");
         for bad in ["x:state", "a:/state", ":state", "relative/state"] {
@@ -3026,7 +3142,7 @@ mod tests {
 
         let proj = base.join("proj").display().to_string();
         let workspaces = mount_hosts(&strings(&[&proj, &format!("{}:ro", base.display())]));
-        let refused = stage(&state, &workspaces).unwrap_err();
+        let refused = refused_text(stage(&state, &workspaces).unwrap_err());
         assert!(refused.contains("inside"), "{refused}");
         assert!(refused.contains(&base.display().to_string()), "{refused}");
         assert!(!state.join(GRADLE_PROPERTIES_STAGE_DIR).exists());
@@ -3064,7 +3180,7 @@ mod tests {
         let state = base.join("via/new/state");
         let exposed = vec![workspace.clone()];
         let refused = stage_host_files_in(&on, Some(home.as_path()), &state, &exposed);
-        assert!(refused.unwrap_err().contains("inside"));
+        assert!(refused_text(refused.unwrap_err()).contains("inside"));
         assert_eq!(std::fs::read_dir(&workspace).unwrap().count(), 0);
         let outside = base.join("outside");
         std::fs::create_dir_all(&outside).unwrap();
@@ -3086,7 +3202,7 @@ mod tests {
         std::fs::create_dir_all(&stage).unwrap();
         let direct = vec![stage.clone()];
         let refused = stage_host_files_in(&on, Some(home.as_path()), &state, &direct);
-        assert!(refused.unwrap_err().contains("inside"));
+        assert!(refused_text(refused.unwrap_err()).contains("inside"));
         assert!(!stage.join(GRADLE_PROPERTIES_MARKER).exists());
         stage_host_files_in(&on, Some(home.as_path()), &state, &[]).unwrap();
         assert!(stage.join(GRADLE_PROPERTIES_MARKER).exists());

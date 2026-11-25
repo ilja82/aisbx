@@ -297,10 +297,7 @@ fn w1_defaults() {
 
     let expected = answered(&mut new_app(), WizardRow::CreateOnly, |_, _| {});
     assert_same_job(&wizard, &expected);
-    assert_eq!(
-        wizard.title,
-        "Creating Claude Code · LiteLLM acme (Statusline)"
-    );
+    assert_eq!(wizard.title, "Creating Claude Code · LiteLLM acme");
 }
 
 #[test]
@@ -368,7 +365,7 @@ fn w3_login() {
     assert_same_job(&wizard, &expected);
     assert_eq!(
         wizard.title,
-        "Creating Claude Code · Anthropic /login (JDK25, Statusline)"
+        "Creating Claude Code · Anthropic /login (JDK25)"
     );
 }
 
@@ -609,15 +606,12 @@ fn the_generated_label_follows_the_provider_and_the_account() {
     let label = |app: &App| form(app).workspace.name.value.clone();
     let mut app = new_app();
     open(&mut app);
-    assert_eq!(label(&app), "Claude Code · LiteLLM acme (Statusline)");
+    assert_eq!(label(&app), "Claude Code · LiteLLM acme");
     choose(&mut app, Provider::Anthropic);
-    assert_eq!(label(&app), "Claude Code · Anthropic /login (Statusline)");
+    assert_eq!(label(&app), "Claude Code · Anthropic /login");
     enter(&mut app, WizardRow::Connection(ConnChoice::Token));
     type_into(&mut app, CreateRow::TokenName, "work");
-    assert_eq!(
-        label(&app),
-        "Claude Code · Anthropic token work (Statusline)"
-    );
+    assert_eq!(label(&app), "Claude Code · Anthropic token work");
 }
 
 /// Next on the step owning the field: refused with the create's own message, and the wizard

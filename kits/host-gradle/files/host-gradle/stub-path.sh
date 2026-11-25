@@ -3,12 +3,13 @@
 # command of that name is on it.
 # Idempotent. Never fails the boot, since the startup dispatcher stops on the first error.
 # Test seams (tests/kit-hooks/host-jvm-caches-test.sh), never set in a sandbox: HOST_GRADLE_STUB,
-# HOST_GRADLE_SYSTEM_BIN, HOST_GRADLE_ENV_FILE, HOST_GRADLE_BASH_PATH.
+# HOST_GRADLE_SYSTEM_BIN, HOST_GRADLE_ENV_FILE, HOST_GRADLE_BASH_PATH, HOST_GRADLE_BASH.
 
 stub=${HOST_GRADLE_STUB:-/usr/local/lib/aisbx/bin/gcloud}
 system_bin=${HOST_GRADLE_SYSTEM_BIN:-/usr/local/bin}
 user_bin=$HOME/.local/bin
 envfile=${HOST_GRADLE_ENV_FILE:-/etc/sandbox-persistent.sh}
+bash=${HOST_GRADLE_BASH:-bash}
 name=${stub##*/}
 
 [ -x "$stub" ] || exit 0
@@ -36,11 +37,29 @@ link_in() {
   ours "$link"
 }
 
-bash_path=${HOST_GRADLE_BASH_PATH:-$(BASH_ENV="$envfile" bash -c 'printf %s "$PATH"' 2>/dev/null)}
+path_of() {
+  command -v "$bash" >/dev/null 2>&1 || return 0
+  rc_env=$1
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    set -- timeout -s KILL 10 "$bash" "$@"
+  else
+    set -- "$bash" "$@"
+  fi
+  env BASH_ENV="$rc_env" "$@" 'printf "\n@aisbx-path@%s\n" "$PATH"' 2>/dev/null </dev/null \
+    | sed -n 's/^@aisbx-path@//p' | tail -n 1
+}
+
+bash_path=${HOST_GRADLE_BASH_PATH:-$(path_of "$envfile" -c)}
+if [ -n "${HOST_GRADLE_BASH_PATH:-}" ]; then
+  seen=$bash_path
+else
+  seen=$bash_path:$(path_of "" -lic):$(path_of "" -ic):$PATH
+fi
 other=
 oldifs=$IFS
 IFS=:
-for d in $bash_path; do
+for d in $seen; do
   if [ -n "$d" ] && [ -x "$d/$name" ] && [ ! -d "$d/$name" ] && ! ours "$d/$name" && [ "$d/$name" != "$stub" ]; then
     other=$d
     break

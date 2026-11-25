@@ -19,6 +19,9 @@ esac
 exit 0
 "#;
 
+/// Each `up` writes the one test folder kit of `demo` (`folders::kit_dir`): tests take turns.
+static ONE_UP: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 struct Rig {
     base: PathBuf,
     home: PathBuf,
@@ -68,6 +71,7 @@ impl Rig {
     }
 
     fn up(&self, extra: &[&str]) -> Output {
+        let _turn = ONE_UP.lock().unwrap_or_else(|e| e.into_inner());
         let path = format!(
             "{}:{}",
             self.base.join("bin").display(),
@@ -225,6 +229,49 @@ fn a_new_up_with_invalid_mounts_json_stages_nothing_and_creates_nothing() {
     let out = rig.up(&["--kit", "host-gradle-properties"]);
     assert!(!out.status.success(), "{}", text(&out.stderr));
     assert!(!rig.stage().exists(), "nothing staged");
+    assert!(!rig.log().contains("create"), "{}", rig.log());
+}
+
+/// A refusal, which a second try cannot change, exits 2; sbx's mounts that cannot be read, or a
+/// copy that cannot be written, exit 125. Nothing is created in any case.
+#[test]
+fn a_new_up_exits_2_when_the_copy_is_refused_and_125_when_it_fails() {
+    let rig = Rig::new("up-props-codes");
+    std::fs::write(rig.host_file(), "a=1\n").unwrap();
+    let other = |workspace: &std::path::Path, inspect: &str| {
+        let ls = format!(
+            r#"[{{"name":"other","agent":"claude-anthropic","status":"stopped","workspaces":["{}"]}}]"#,
+            workspace.display()
+        );
+        std::fs::write(rig.base.join("ls.json"), ls).unwrap();
+        std::fs::write(rig.base.join("inspect.json.other"), inspect).unwrap();
+    };
+    other(
+        &rig.base.join("root"),
+        r#"{"name":"other","agent":"claude-anthropic","kits":["/repo/kits/host-gradle"]}"#,
+    );
+    let out = rig.up(&["--kit", "host-gradle-properties"]);
+    let err = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("overlaps the staging folder"), "{err}");
+
+    std::fs::create_dir_all(rig.base.join("elsewhere")).unwrap();
+    other(
+        &rig.base.join("elsewhere"),
+        r#"{"name":"other","agent":"claude-anthropic","kits":[],"host_mounts":[{"nope":1}]}"#,
+    );
+    let out = rig.up(&["--kit", "host-gradle-properties"]);
+    let err = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(125), "{err}");
+    assert!(err.contains("could not read a mount of other"), "{err}");
+
+    rig.sbx_state("[]", "{}");
+    std::fs::create_dir_all(rig.state.join("aisbx")).unwrap();
+    std::fs::write(rig.stage(), "a file where the folder goes").unwrap();
+    let out = rig.up(&["--kit", "host-gradle-properties"]);
+    let err = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(125), "{err}");
+    assert!(err.contains("could not copy"), "{err}");
     assert!(!rig.log().contains("create"), "{}", rig.log());
 }
 

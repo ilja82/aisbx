@@ -266,15 +266,12 @@ fn g1_defaults() {
             false,
         )]
     );
-    assert_eq!(
-        job.title,
-        "Creating Claude Code · LiteLLM acme (Statusline)"
-    );
+    assert_eq!(job.title, "Creating Claude Code · LiteLLM acme");
     // The connection the form opened on, remembered only once the create succeeded.
     assert_eq!(job.post.last_litellm.as_deref(), Some("acme"));
     let reg = job.post.register.expect("the sandbox is registered");
     assert_eq!(reg.name, "claude-litellm-proj");
-    assert_eq!(reg.label, "Claude Code · LiteLLM acme (Statusline)");
+    assert_eq!(reg.label, "Claude Code · LiteLLM acme");
     assert!(!reg.clone);
     assert_eq!(reg.skills, Some(sbx::SkillsMode::Readonly));
     assert_eq!(reg.start_dir, None);
@@ -405,16 +402,10 @@ fn g3_login() {
             false,
         )]
     );
-    assert_eq!(
-        job.title,
-        "Creating Claude Code · Anthropic /login (JDK25, Statusline)"
-    );
+    assert_eq!(job.title, "Creating Claude Code · Anthropic /login (JDK25)");
     let reg = job.post.register.expect("the sandbox is registered");
     assert_eq!(reg.name, "claude-anthropic-proj");
-    assert_eq!(
-        reg.label,
-        "Claude Code · Anthropic /login (JDK25, Statusline)"
-    );
+    assert_eq!(reg.label, "Claude Code · Anthropic /login (JDK25)");
     assert!(!reg.clone);
     assert_eq!(reg.skills, Some(sbx::SkillsMode::Readonly));
     assert_eq!(reg.start_dir, None);
@@ -458,16 +449,10 @@ fn g4_named_token() {
             false,
         )]
     );
-    assert_eq!(
-        job.title,
-        "Creating Claude Code · Anthropic token private (Statusline)"
-    );
+    assert_eq!(job.title, "Creating Claude Code · Anthropic token private");
     let reg = job.post.register.expect("the sandbox is registered");
     assert_eq!(reg.name, "claude-token-proj");
-    assert_eq!(
-        reg.label,
-        "Claude Code · Anthropic token private (Statusline)"
-    );
+    assert_eq!(reg.label, "Claude Code · Anthropic token private");
     assert!(!reg.clone);
     assert_eq!(
         reg.skills,
@@ -539,16 +524,10 @@ fn g5_new_token() {
             .all(|s| s.argv.iter().all(|a| !a.contains(TOKEN_VALUE))),
         "the token goes in on stdin, never in an argv"
     );
-    assert_eq!(
-        job.title,
-        "Creating Claude Code · Anthropic token personal (Statusline)"
-    );
+    assert_eq!(job.title, "Creating Claude Code · Anthropic token personal");
     let reg = job.post.register.expect("the sandbox is registered");
     assert_eq!(reg.name, "claude-token-proj");
-    assert_eq!(
-        reg.label,
-        "Claude Code · Anthropic token personal (Statusline)"
-    );
+    assert_eq!(reg.label, "Claude Code · Anthropic token personal");
     assert!(!reg.clone);
     assert_eq!(reg.skills, Some(sbx::SkillsMode::Readonly));
     assert_eq!(reg.start_dir, None);
@@ -597,15 +576,12 @@ fn g6_mcp() {
             false,
         )]
     );
-    assert_eq!(
-        job.title,
-        "Creating Claude Code · LiteLLM acme (Statusline)"
-    );
+    assert_eq!(job.title, "Creating Claude Code · LiteLLM acme");
     // The connection the form opened on, remembered only once the create succeeded.
     assert_eq!(job.post.last_litellm.as_deref(), Some("acme"));
     let reg = job.post.register.expect("the sandbox is registered");
     assert_eq!(reg.name, "claude-litellm-proj");
-    assert_eq!(reg.label, "Claude Code · LiteLLM acme (Statusline)");
+    assert_eq!(reg.label, "Claude Code · LiteLLM acme");
     assert!(!reg.clone);
     assert_eq!(reg.skills, Some(sbx::SkillsMode::Readonly));
     assert_eq!(reg.start_dir, None);
@@ -699,15 +675,12 @@ fn g7_start_dir() {
             false,
         )]
     );
-    assert_eq!(
-        job.title,
-        "Creating Claude Code · LiteLLM acme (Statusline)"
-    );
+    assert_eq!(job.title, "Creating Claude Code · LiteLLM acme");
     // The connection the form opened on, remembered only once the create succeeded.
     assert_eq!(job.post.last_litellm.as_deref(), Some("acme"));
     let reg = job.post.register.expect("the sandbox is registered");
     assert_eq!(reg.name, "claude-litellm-proj");
-    assert_eq!(reg.label, "Claude Code · LiteLLM acme (Statusline)");
+    assert_eq!(reg.label, "Claude Code · LiteLLM acme");
     assert!(!reg.clone);
     assert_eq!(reg.skills, Some(sbx::SkillsMode::Readonly));
     assert_eq!(reg.start_dir, Some(PathBuf::from("sub")));

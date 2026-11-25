@@ -61,8 +61,8 @@ HEADLESS USE — the same kits and names as the dashboard, for scripts:
                                reads the history but cannot commit or change hooks
         --no-host-folders      mount neither the folders of `aisbx folders` nor those the
                                workspace's companion.json names (mounted by default)
-        --no-mcp               no MCP servers and no tools to find the host's (the default
-                               at creation, so the flag changes nothing)
+        --no-mcp               no MCP servers and no tools to find the host's: the default at
+                               creation; the flag only silences the note about it
         --mcp                  let the agent find and add the host's MCP servers; applied at
                                creation only (an existing sandbox keeps what it has)
 
@@ -79,7 +79,8 @@ HEADLESS USE — the same kits and names as the dashboard, for scripts:
         --system-prompt TEXT   replace the agent's system prompt (Claude Code, Pi)
         --system-prompt-file FILE  the same, from a host file
         --tools LIST           only these tools (Claude Code, Pi; the agent's own names)
-        --no-tools             no tools at all (Claude Code, Pi)
+        --no-tools             no tools and no MCP server, bar those that AGENT_ARGS'
+                               --mcp-config names (Claude Code, Pi)
         --strict-mcp           only the MCP servers in AGENT_ARGS' --mcp-config (Claude Code)
         --no-slash-commands    no slash commands or skills (Claude Code)
         --no-session           save no session (Claude Code, Pi)
@@ -917,8 +918,7 @@ pub(crate) fn up_inner(raw: &[String]) -> Result<String, Fail> {
         }
     };
     let mut beside = match model::copies_host_files(&addons) {
-        true => model::mount_inventory(&state::state_dir())
-            .map_err(|e| Fail::sandbox(format!("{e}; nothing was created")))?,
+        true => model::mount_inventory(&state::state_dir()).map_err(stage_fail)?,
         false => Vec::new(),
     };
     let stage_dir = state::state_dir().join(model::GRADLE_PROPERTIES_STAGE_DIR);
@@ -938,7 +938,7 @@ pub(crate) fn up_inner(raw: &[String]) -> Result<String, Fail> {
     }
     beside.extend(own);
     model::stage_host_files_in(&addons, home.as_deref(), &state::state_dir(), &beside)
-        .map_err(|e| Fail::usage(format!("{e}; nothing was created")))?;
+        .map_err(stage_fail)?;
     approve_credentials(&kit_dirs);
     let kit_refs: Vec<&Path> = kit_dirs.iter().map(PathBuf::as_path).collect();
     let static_mcp = static_mcp_for(&args);
@@ -1014,6 +1014,14 @@ pub(crate) fn up_inner(raw: &[String]) -> Result<String, Fail> {
         }
     }
     Ok(name)
+}
+
+/// `up`'s exit for host files it did not stage: 2 for a refusal, 125 when sbx or the copy failed.
+fn stage_fail(e: model::StageError) -> Fail {
+    match e {
+        model::StageError::Refused(text) => Fail::usage(format!("{text}; nothing was created")),
+        model::StageError::Failed(text) => Fail::sandbox(format!("{text}; nothing was created")),
+    }
 }
 
 /// The deprecation line `up --skill` prints on stderr, once however many `--skill` it has.
@@ -1474,6 +1482,16 @@ pub(crate) fn valid_sandbox_name(name: &str) -> bool {
 /// The longest system prompt `run` passes, in bytes: it is one argument of the agent's argv.
 const SYSTEM_PROMPT_MAX: usize = 64 * 1024;
 
+/// [`SYSTEM_PROMPT_MAX`] on Windows, where one command line holds at most 32,767 characters.
+const SYSTEM_PROMPT_MAX_WINDOWS: usize = 24 * 1024;
+
+fn system_prompt_max(windows: bool) -> usize {
+    match windows {
+        true => SYSTEM_PROMPT_MAX_WINDOWS,
+        false => SYSTEM_PROMPT_MAX,
+    }
+}
+
 /// `run`'s options that narrow the agent's context and tools.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct LeanRun {
@@ -1509,9 +1527,21 @@ impl LeanRun {
             if text.trim().is_empty() {
                 return Err(Fail::usage("the system prompt is empty"));
             }
-            if text.len() > SYSTEM_PROMPT_MAX {
+            if text.contains('\0') {
+                return Err(Fail::usage(
+                    "the system prompt has a NUL byte, which no command line can carry",
+                ));
+            }
+            if text == sbx::PROMPT_SLOT {
                 return Err(Fail::usage(format!(
-                    "the system prompt has {} bytes, more than {SYSTEM_PROMPT_MAX}",
+                    "the system prompt is aisbx's prompt placeholder {}",
+                    sbx::PROMPT_SLOT
+                )));
+            }
+            let max = system_prompt_max(cfg!(windows));
+            if text.len() > max {
+                return Err(Fail::usage(format!(
+                    "the system prompt has {} bytes, more than {max}",
                     text.len()
                 )));
             }
@@ -1523,6 +1553,12 @@ impl LeanRun {
         }
         if tools.as_deref().is_some_and(|t| t.trim().is_empty()) {
             return Err(Fail::usage("--tools is empty: pass --no-tools for none"));
+        }
+        if tools.as_deref() == Some(sbx::PROMPT_SLOT) {
+            return Err(Fail::usage(format!(
+                "--tools is aisbx's prompt placeholder {}",
+                sbx::PROMPT_SLOT
+            )));
         }
         Ok(Self {
             system_prompt,
@@ -6361,13 +6397,16 @@ mod tests {
         );
         let blank = dir.join("blank.md");
         std::fs::write(&blank, " \n\t\n").unwrap();
+        let max = system_prompt_max(cfg!(windows));
         let big = dir.join("big.md");
-        std::fs::write(&big, "x".repeat(SYSTEM_PROMPT_MAX + 1)).unwrap();
-        std::fs::write(dir.join("max.md"), "x".repeat(SYSTEM_PROMPT_MAX)).unwrap();
+        std::fs::write(&big, "x".repeat(max + 1)).unwrap();
+        std::fs::write(dir.join("max.md"), "x".repeat(max)).unwrap();
         assert!(lean(&["--system-prompt-file", dir.join("max.md").to_str().unwrap()]).is_ok());
         let missing = dir.join("missing.md");
+        let nul = dir.join("nul.md");
+        std::fs::write(&nul, "be brief\0and lean\n").unwrap();
 
-        let too_long = "x".repeat(SYSTEM_PROMPT_MAX + 1);
+        let too_long = "x".repeat(max + 1);
         for (raw, says) in [
             (
                 vec!["--system-prompt", "a", "--system-prompt-file", path],
@@ -6387,12 +6426,28 @@ mod tests {
             ),
             (vec!["--system-prompt-file", "-"], "not -"),
             (vec!["--tools", ""], "--no-tools"),
+            (
+                vec!["--system-prompt-file", nul.to_str().unwrap()],
+                "NUL byte",
+            ),
+            (vec!["--system-prompt", "@@AISBX_PROMPT@@"], "placeholder"),
+            (vec!["--tools", "@@AISBX_PROMPT@@"], "placeholder"),
         ] {
             let fail = lean(&raw).unwrap_err();
             assert_eq!(fail.code, EXIT_USAGE, "{raw:?}");
             assert!(fail.message.contains(says), "{raw:?}: {}", fail.message);
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_system_prompt_fits_a_windows_command_line_with_room_to_spare() {
+        assert_eq!(system_prompt_max(false), 64 * 1024);
+        assert_eq!(system_prompt_max(true), 24 * 1024);
+        assert!(
+            32_767 - system_prompt_max(true) >= 8_000,
+            "room for the rest of the line"
+        );
     }
 
     #[test]

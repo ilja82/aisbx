@@ -512,7 +512,7 @@ pub fn headless_argv(agent: &str, run: &HeadlessRun<'_>) -> Option<Vec<String>> 
                 Tools::None => argv.extend(["--tools".into(), String::new()]),
                 Tools::Only(list) => argv.extend(["--tools".into(), list.into()]),
             }
-            if run.strict_mcp {
+            if run.strict_mcp || run.tools == Tools::None {
                 argv.push("--strict-mcp-config".into());
             }
             if run.no_slash_commands {
@@ -3057,6 +3057,31 @@ mod tests {
         let argv = headless_argv("claude-token", &only).unwrap();
         let at = argv.iter().position(|a| a == "--tools").unwrap();
         assert_eq!(argv[at + 1], "Read,Grep");
+        assert!(!argv.iter().any(|a| a == "--strict-mcp-config"), "{argv:?}");
+    }
+
+    #[test]
+    fn no_tools_on_claude_also_drops_every_mcp_server() {
+        let strict = |run: &HeadlessRun<'_>| {
+            let argv = headless_argv("claude-anthropic", run).unwrap();
+            let at = argv
+                .iter()
+                .position(|a| a == "--tools")
+                .map(|i| argv[i + 1].clone());
+            let count = argv.iter().filter(|a| *a == "--strict-mcp-config").count();
+            (at, count)
+        };
+        let none = HeadlessRun {
+            tools: Tools::None,
+            ..plain_run()
+        };
+        assert_eq!(strict(&none), (Some(String::new()), 1));
+        let both = HeadlessRun {
+            strict_mcp: true,
+            ..none
+        };
+        assert_eq!(strict(&both), (Some(String::new()), 1));
+        assert_eq!(strict(&plain_run()), (None, 0));
     }
 
     #[test]
