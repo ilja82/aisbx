@@ -1,1 +1,1 @@
-Adds a small helper command so token-asking Gradle plugins work offline.
+Adds a small helper command so token-asking Gradle plugins work offline, and finds a Windows host's Gradle caches.
