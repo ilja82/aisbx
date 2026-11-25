@@ -185,7 +185,7 @@ impl Job {
                 records.lock().unwrap()[i].started = Some(Instant::now());
                 let failure = match run_step(&step, &records, i) {
                     Ok(exit) if exit.success() => None,
-                    Ok(exit) => Some(failure_text(&step, &records, i, exit)),
+                    Ok(exit) => Some(format!("{} failed ({})", step.label, exit_reason(exit))),
                     Err(e) => {
                         push(&records, i, format!("error: {e}"));
                         Some(e)
@@ -433,21 +433,6 @@ fn pump<R: Read>(reader: R, records: &Records, index: usize) {
     }
 }
 
-fn is_secret_rm(argv: &[String]) -> bool {
-    matches!(argv, [sbx, secret, rm, ..] if sbx == "sbx" && secret == "secret" && rm == "rm")
-}
-
-fn failure_text(step: &Step, records: &Records, index: usize, exit: ExitStatus) -> String {
-    if is_secret_rm(&step.argv) {
-        let mut guard = records.lock().unwrap();
-        let output = &mut guard[index].output;
-        if let Some(hint) = crate::sbx::secret_rm_keychain_owner_hint(&output.join("\n")) {
-            output.extend(hint.lines().map(String::from));
-        }
-    }
-    format!("{} failed ({})", step.label, exit_reason(exit))
-}
-
 fn push(records: &Records, index: usize, line: String) {
     let mut guard = records.lock().unwrap();
     let output = &mut guard[index].output;
@@ -523,83 +508,6 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         panic!("the job did not finish");
-    }
-
-    const KEYCHAIN_LINE: &str =
-        "error: delete custom secret: An invalid attempt to change the owner of an item. (-25244)";
-
-    #[cfg(unix)]
-    fn failed_exit() -> ExitStatus {
-        Command::new("sh").args(["-c", "exit 1"]).status().unwrap()
-    }
-
-    #[cfg(unix)]
-    fn failure_of(argv: Vec<String>, output: &[&str], exit: ExitStatus) -> (String, Vec<String>) {
-        let step = Step::new("rm", argv);
-        let records: Records = Arc::new(Mutex::new(vec![Record::of(&step)]));
-        records.lock().unwrap()[0].output = output.iter().map(|l| l.to_string()).collect();
-        let text = failure_text(&step, &records, 0, exit);
-        let out = records.lock().unwrap()[0].output.clone();
-        (text, out)
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn a_failed_secret_rm_gets_the_hint_after_the_raw_lines_and_keeps_its_status() {
-        let placeholder = "sbx-cs-aisbx-llm-x";
-        let table = format!("(global)   host   -   {placeholder}   key");
-        let argv = crate::sbx::secret_rm_litellm_key_argv(placeholder);
-        let (text, out) = failure_of(argv, &[&table, KEYCHAIN_LINE], failed_exit());
-        assert_eq!(text, "rm failed (exit code 1)");
-        assert_eq!(out[0], table);
-        assert_eq!(out[1], KEYCHAIN_LINE);
-        assert!(out[2].starts_with("Cause:"), "{out:?}");
-        assert!(out.iter().any(|l| l.contains("Keychain Access")), "{out:?}");
-
-        let argv = crate::sbx::secret_rm_service_argv(Some("box"), "github");
-        let (text, out) = failure_of(argv, &[KEYCHAIN_LINE], failed_exit());
-        assert_eq!(text, "rm failed (exit code 1)");
-        assert_eq!(out[0], KEYCHAIN_LINE);
-        assert!(out[1].starts_with("Cause:"), "{out:?}");
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn no_hint_without_the_command_the_marker_or_a_failure() {
-        let argv = crate::sbx::secret_rm_litellm_key_argv("sbx-cs-aisbx-llm-x");
-        let (text, out) = failure_of(argv.clone(), &["error: other"], failed_exit());
-        assert_eq!((text.as_str(), out.len()), ("rm failed (exit code 1)", 1));
-        let table = "(global)   host   -   sbx-cs-aisbx-llm-x-25244   key";
-        let (_, out) = failure_of(argv, &[table, "error: other"], failed_exit());
-        assert_eq!(out.len(), 2);
-        let other: Vec<String> = ["sbx", "rm", "x"].map(String::from).to_vec();
-        let (text, out) = failure_of(other, &[KEYCHAIN_LINE], failed_exit());
-        assert_eq!((text.as_str(), out.len()), ("rm failed (exit code 1)", 1));
-        let (_, out) = failure_of(Vec::new(), &[KEYCHAIN_LINE], failed_exit());
-        assert_eq!(out.len(), 1);
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn the_hint_leaves_a_full_log_alone() {
-        let argv = crate::sbx::secret_rm_litellm_key_argv("sbx-cs-aisbx-llm-x");
-        let lines: Vec<String> = (0..4999).map(|i| format!("l{i}")).collect();
-        let mut raw: Vec<&str> = lines.iter().map(String::as_str).collect();
-        raw.push(KEYCHAIN_LINE);
-        let (_, out) = failure_of(argv, &raw, failed_exit());
-        assert_eq!(out[0], "l0");
-        assert_eq!(out[4999], KEYCHAIN_LINE);
-        assert!(out[5000].starts_with("Cause:"));
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn a_failed_step_keeps_its_status_text() {
-        let job = Job::spawn("t", vec![sh("rm", "echo '(-25244)' >&2; exit 1")]);
-        finish(&job);
-        let failed = Status::Failed("rm failed (exit code 1)".into());
-        assert_eq!(job.status(), failed);
-        assert!(!job.lines().iter().any(|l| l.contains("Keychain")));
     }
 
     #[test]

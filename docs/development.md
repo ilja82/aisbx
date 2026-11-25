@@ -60,10 +60,12 @@ $ sh tests/step-test.sh                           # one live checks step; skips 
 
 ## sbx version
 
-The dashboard needs **sbx 0.54.0** or later and refuses an older sbx. The JSON it reads and every kit build are
-measured on sbx 0.54.0. The checks by hand in [On an upgrade](#on-an-upgrade) were last run on sbx 0.50. aisbx uses
+The dashboard needs **sbx 0.54.1** or later and refuses an older sbx. The JSON it reads and every kit build are
+measured on sbx 0.54.1. The checks by hand in [On an upgrade](#on-an-upgrade) were last run on sbx 0.50. aisbx uses
 these sbx features, which older releases lack:
 
+- On macOS, `sbx secret rm` removes a secret that an older sbx saved, with its Keychain item. Deleting a stored
+  secret, a connection or a named token relies on it.
 - `sbx port ls`, `sbx port publish` and `sbx port unpublish` read and change the published ports. The Ports tab, `p`
   and `u` use them. sbx deprecates the older `sbx ports`.
 - `sbx inspect` reports the mode of a sandbox's MCP gateway and the servers it has loaded. The details pane shows
@@ -99,11 +101,11 @@ check that the daemon socket belongs to the same user.
 
 ### aisbx version
 
-The aisbx version is the sbx version it needs plus a counter: aisbx **0.54.0.0** needs sbx 0.54.0. Count the last
+The aisbx version is the sbx version it needs plus a counter: aisbx **0.54.1.0** needs sbx 0.54.1. Count the last
 number up for each aisbx release on the same sbx version. Set it back to 0 when aisbx moves to a newer sbx.
 
-Cargo accepts only three numbers, so the root `Cargo.toml` writes 0.54.0.0 as `version = "0.54.0+0"`.
-`aisbx --version` and `aisbx-ui --version` print 0.54.0.0. A test in `core/src/lib.rs` fails when the first three
+Cargo accepts only three numbers, so the root `Cargo.toml` writes 0.54.1.0 as `version = "0.54.1+0"`.
+`aisbx --version` and `aisbx-ui --version` print 0.54.1.0. A test in `core/src/lib.rs` fails when the first three
 numbers differ from `sbx::REQUIRED_VERSION`.
 
 ### Rules for sbx calls
@@ -159,9 +161,9 @@ platform on the GitHub release page.
 
    ```console
    $ python3 scripts/package.py version
-   0.54.0.0
-   $ git tag v0.54.0.0
-   $ git push origin v0.54.0.0
+   0.54.1.0
+   $ git tag v0.54.1.0
+   $ git push origin v0.54.1.0
    ```
 
 3. The workflow stops when the tag is not `v` plus the `Cargo.toml` version. Otherwise it makes a draft
