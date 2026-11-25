@@ -101,7 +101,7 @@ This text version shows more row states: a setup token, a LiteLLM connection, an
 foreign kit.
 
 ```text
- aisbx  ~/my-project   ● 2 of 4 running                    ⚑ 1 approval waiting    sbx v0.54.0
+ aisbx  ~/my-project   ● 2 of 4 running                    ⚑ 1 approval waiting    sbx v0.54.1
  Sandboxes ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   This folder  ~/my-project   2 sandboxes ───────────────────────────────────────────────────
   ▌● My private Claude Code              Claude Code · token private  running · 1 session

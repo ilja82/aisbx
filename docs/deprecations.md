@@ -36,10 +36,12 @@ dynamic mode. A create with neither flag prints one note on stderr; stdout does 
 ## Breaking changes
 
 A break comes from an sbx release that removed what aisbx needs, where no aisbx change can keep the old behavior, or
-from a decision of aisbx, named as such.
+from a decision of aisbx, named as such. aisbx also moves to each new sbx release: the first aisbx release on it
+refuses an older sbx, and a row names that sbx release.
 
 | Break | sbx version | Your step |
 | --- | --- | --- |
+| aisbx 0.54.1.0 needs sbx 0.54.1 or later and refuses an older sbx. | 0.54.1 | Upgrade sbx to 0.54.1 or later, then check it with `sbx version`. |
 | aisbx 0.54.0.0 switches every skill of the sbx skills store off, also the skills already in it: a sandbox gets a store skill only when you switch it on. Before, every sharing sandbox got every store skill. This is a decision of aisbx, not of sbx. | none (aisbx) | Press `K` and switch on the skills every sandbox should get, or press `i` on a sandbox to switch skills on for it alone ([Switches](skills.md#switches)). `aisbx skills on --global SKILL` does the same in a script. |
 | aisbx 0.54.0.0 needs sbx 0.54.0 or later and refuses an older sbx. | 0.54.0 | Upgrade sbx to 0.54.0 or later, then check it with `sbx version`. |
 | aisbx 0.53.0.0 needs sbx 0.53.0 or later and refuses an older sbx. | 0.53.0 | Upgrade sbx to 0.53.0 or later, then check it with `sbx version`. |

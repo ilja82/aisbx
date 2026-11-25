@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::state::Registry;
 
 /// The oldest sbx release the dashboard accepts. docs/development.md, *sbx version*, says why.
-pub const REQUIRED_VERSION: &str = "0.54.0";
+pub const REQUIRED_VERSION: &str = "0.54.1";
 
 /// How a sandbox mounts the host's shared agent-skills store (`--skills`). sbx reports the mode
 /// nowhere, so a rebuild repeats it from the registry; see [`crate::state::Entry`].
@@ -748,7 +748,7 @@ struct VersionClient {
     version: String,
 }
 
-/// The CLI's own version, `v0.53.0`, from `sbx version --json`.
+/// The CLI's own version, `v0.54.1`, from `sbx version --json`.
 pub fn version() -> Result<String> {
     let out = Command::new("sbx")
         .args(["version", "--json"])
@@ -3046,29 +3046,6 @@ pub fn secret_rm_litellm_key_argv(placeholder: &str) -> Vec<String> {
     ]
 }
 
-fn contains_standalone_25244(output: &str) -> bool {
-    const CODE: &str = "-25244";
-    output.match_indices(CODE).any(|(at, _)| {
-        let before = output[..at].chars().next_back();
-        let after = output[at + CODE.len()..].chars().next();
-        !before.is_some_and(|c| c.is_alphanumeric() || c == '-' || c == '_')
-            && !after.is_some_and(|c| c.is_ascii_digit())
-    })
-}
-
-pub fn secret_rm_keychain_owner_hint(output: &str) -> Option<&'static str> {
-    if contains_standalone_25244(output)
-        || output.contains("An invalid attempt to change the owner of an item")
-    {
-        Some(
-            "Cause: the macOS keychain item belongs to another owner or has another access setting, so sbx cannot delete it.\n\
-             Workaround: open Keychain Access and search for the item this command removes: the placeholder shown above for a token or a key, or the service name (and sandbox) in the command for a service secret. Delete that item, then close this log, or press F5 or Ctrl+R in Stored secrets, to refresh the list.",
-        )
-    } else {
-        None
-    }
-}
-
 /// Drop a named token from the host, and with it the account every sandbox pointed at that name
 /// was using. Only ever reached from the secrets screen: deleting a *sandbox* never touches a
 /// shared token.
@@ -3664,30 +3641,6 @@ mod tests {
     }
 
     #[test]
-    fn the_keychain_owner_error_gets_a_hint() {
-        let line =
-            "error: delete custom secret: An invalid attempt to change the owner of an item. (-25244)";
-        assert!(secret_rm_keychain_owner_hint(line).is_some());
-        assert!(secret_rm_keychain_owner_hint("failed (-25244)").is_some());
-        assert!(secret_rm_keychain_owner_hint("OSStatus: -25244").is_some());
-        assert!(secret_rm_keychain_owner_hint("-25244").is_some());
-        assert_eq!(
-            secret_rm_keychain_owner_hint("sbx-cs-aisbx-llm-conn-25244"),
-            None
-        );
-        assert_eq!(secret_rm_keychain_owner_hint("-252440"), None);
-        let message = "An invalid attempt to change the owner of an item";
-        assert!(secret_rm_keychain_owner_hint(message).is_some());
-        let hint = secret_rm_keychain_owner_hint(line).unwrap();
-        assert!(hint.contains("Keychain Access"), "{hint}");
-        assert!(hint.contains("service name"), "{hint}");
-        assert_eq!(secret_rm_keychain_owner_hint("error: no such secret"), None);
-        let table = "(global)   host   -   sbx-cs-aisbx-llm-conn-25244   key";
-        assert_eq!(secret_rm_keychain_owner_hint(table), None);
-        assert_eq!(secret_rm_keychain_owner_hint(""), None);
-    }
-
-    #[test]
     fn every_sbx_call_gets_no_telemetry_unless_a_value_is_set() {
         assert_eq!(NO_TELEMETRY_ENV, "SBX_NO_TELEMETRY");
         assert_eq!(no_telemetry_value(None), Some("1"));
@@ -4058,23 +4011,27 @@ mod tests {
 
     #[test]
     fn the_gate_names_the_version_it_refuses() {
-        assert_eq!(gate("v0.54.0".into()).unwrap(), "v0.54.0");
-        assert!(gate("v0.53.0".into()).is_err());
-        let err = gate("v0.53.0".into()).unwrap_err().to_string();
+        assert_eq!(gate("v0.54.1".into()).unwrap(), "v0.54.1");
+        assert!(gate("v0.54.0".into()).is_err());
+        let err = gate("v0.54.0".into()).unwrap_err().to_string();
         assert!(
-            err.starts_with("this sbx is v0.53.0, but this dashboard needs 0.54.0+ — "),
+            err.starts_with("this sbx is v0.54.0, but this dashboard needs 0.54.1+ — "),
             "{err}"
         );
     }
 
     #[test]
-    fn version_gate_accepts_0540_and_newer() {
-        assert!(meets_required_version("v0.54.0"));
-        assert!(meets_required_version("0.54.0"));
-        assert!(meets_required_version("v0.54.0-rc1"));
+    fn version_gate_accepts_0541_and_newer() {
         assert!(meets_required_version("v0.54.1"));
+        assert!(meets_required_version("0.54.1"));
+        assert!(meets_required_version("v0.54.1-rc1"));
+        assert!(meets_required_version("v0.54.2"));
         assert!(meets_required_version("v0.55.0"));
         assert!(meets_required_version("v1.0.0"));
+        assert!(!meets_required_version("v0.54.0"));
+        assert!(!meets_required_version("0.54.0"));
+        assert!(!meets_required_version("v0.54.0-rc1"));
+        assert!(!meets_required_version("v0.54"));
         assert!(!meets_required_version("v0.53.9"));
         assert!(!meets_required_version("v0.53.1"));
         assert!(!meets_required_version("v0.53.0"));

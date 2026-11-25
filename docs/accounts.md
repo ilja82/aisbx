@@ -125,12 +125,6 @@ Press `↵` to store or replace a value. Press `d` to delete one; aisbx first sa
   [Antigravity](agents.md#antigravity-agy)).
 - **`mcp:` secrets** belong to the [MCP gateway](sandboxes.md#mcp-servers) and never enter a sandbox. Restart the
   sandbox after you change one. aisbx flags a row in an old spelling with the command that fixes it.
-- **Delete fails with `-25244`:** on macOS, sbx can fail with `An invalid attempt to change the owner of an item.
-  (-25244)`: the keychain item belongs to another owner or has another access setting. The job log then adds the
-  cause and a workaround below sbx's own lines: open Keychain Access, search for the placeholder the log shows (for a
-  service secret, the service name and sandbox of the command), delete the item, then close the log, or press `F5` or
-  `Ctrl+R` in Stored secrets, to refresh the list. aisbx does not touch the keychain itself. Headless
-  `aisbx litellm rm` passes sbx's raw error through on stderr and reports its own failure, without this hint.
 - A token of a deleted sandbox is flagged for `d`. aisbx lists custom secrets of other tools and leaves them alone.
 
 ### LiteLLM connection rows
