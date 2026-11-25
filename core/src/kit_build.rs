@@ -468,11 +468,7 @@ mod tests {
 
     /// A fresh scratch folder per test.
     fn scratch(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("aisbx-kit-build-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+        crate::testkit::scratch(&format!("kit-build-{name}"))
     }
 
     fn set(backend: &str, kits: &[&str], dirs: &[PathBuf]) -> KitSet {

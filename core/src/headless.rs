@@ -4549,10 +4549,7 @@ mod tests {
     }
 
     fn scratch_state(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("aisbx-headless-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        crate::testkit::scratch(&format!("headless-{tag}"))
     }
 
     #[test]

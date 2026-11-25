@@ -1197,11 +1197,7 @@ mod tests {
     use super::*;
 
     fn scratch(tag: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("aisbx-skill-repos-{tag}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+        crate::testkit::scratch(&format!("skill-repos-{tag}"))
     }
 
     /// A fake token, built at run time so no credential-shaped literal sits in the source.

@@ -5258,9 +5258,7 @@ mod connect_render {
     fn launchers_on_path() {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
-            let dir =
-                std::env::temp_dir().join(format!("aisbx-tui-launchers-{}", std::process::id()));
-            std::fs::create_dir_all(&dir).unwrap();
+            let dir = aisbx_core::testkit::scratch("tui-launchers");
             for name in ["ssh", "code", "cursor", "ssh.exe", "code.cmd", "cursor.cmd"] {
                 std::fs::write(dir.join(name), "").unwrap();
             }

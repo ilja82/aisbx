@@ -3343,14 +3343,21 @@ mod live {
                 "{} is a prune candidate but not a stopped sandbox",
                 c.name
             );
-            assert!(
-                c.stopped_at
-                    .as_deref()
-                    .and_then(crate::state::parse_rfc3339)
-                    .is_some(),
-                "{c:?}: stopped_at no longer parses"
-            );
+            if let Some(at) = c.stopped_at.as_deref() {
+                assert!(
+                    crate::state::parse_rfc3339(at).is_some(),
+                    "{c:?}: stopped_at no longer parses"
+                );
+            }
         }
+        // A sandbox sbx is still creating is a candidate without a stop time.
+        let settled: Vec<&PruneCandidate> = (prune.would_remove.iter())
+            .filter(|c| stopped(&sandboxes, &c.name) && stopped(&after, &c.name))
+            .collect();
+        assert!(
+            settled.is_empty() || settled.iter().any(|c| c.stopped_at.is_some()),
+            "no prune candidate stopped before and after the dry run has a stopped_at: {settled:?}"
+        );
         // The disk sbx's resources take, and a container for every sandbox.
         let disk = disk_usage().expect("sbx df --json");
         for kind in [DISK_IMAGES, DISK_CONTAINERS, DISK_VOLUMES] {
