@@ -65,6 +65,7 @@ text_clean() {   # text_clean <root>: no file under it names what the helper is 
   hits=0
   while IFS= read -r file; do
     [ -f "$file" ] || continue
+    LC_ALL=C grep -Iq '' "$file" 2>/dev/null || continue
     tokens=$(allowed_tokens "${file#"$scan_root"/}")
     if [ -n "$tokens" ]; then
       lead="[[:space:]\"']|^[[:space:]]*[A-Za-z_][A-Za-z_0-9]*=|\\\$\\{[A-Za-z_][A-Za-z_0-9]*:-"
@@ -155,6 +156,10 @@ static() {
   printf 'stub=${HOST_GRADLE_STUB:-/usr/local/lib/aisbx/bin/%s}\n' "$tool_name" \
     > "$fixtures/kits/host-gradle/files/host-gradle/stub-path.sh"
   check "…and the hook's default stub path" text_clean "$fixtures"
+  mkdir -p "$fixtures/docs/images"
+  printf '\211PNG\r\n\032\n\000\000\000\015IHDR %s auth\000\000' "$tool_name" > "$fixtures/docs/images/shot.png"
+  check "…and skips a binary file, whose random bytes can spell any word" text_clean "$fixtures"
+  rm "$fixtures/docs/images/shot.png"
   printf 'let p = "/x/y=/usr/local/lib/aisbx/bin/%s";\n' "$tool_name" > "$fixtures/core/src/a.rs"
   check "…and fails on the stub path after an equals sign inside another path" not quiet text_clean "$fixtures"
   rm "$fixtures/core/src/a.rs"
@@ -422,6 +427,50 @@ dummy-token"
   stub_run "/nonexistent/dir"
   check "nothing writable: exit 0" same "$rc" 0
   check "…and no export line" absent "$H/persistent.sh"
+
+  echo "# 5b. the shells the agent starts, probed for real"
+  probe=aisbxprobetool
+  probe_run() {   # probe_run [VAR=value...]: the hook with real bash probes, a stub named $probe
+    env HOME="$H" HOST_GRADLE_STUB="$S/$probe" HOST_GRADLE_SYSTEM_BIN=/nonexistent/dir \
+      HOST_GRADLE_ENV_FILE="$H/persistent.sh" "$@" sh "$stub_hook" >> "$scratch/hook.log" 2>&1
+    rc=$?
+  }
+  probe_command() {   # probe_command <dir>: a command of the probe's name there
+    mkdir -p "$1"
+    printf '#!/bin/sh\necho other\n' > "$1/$probe"
+    chmod 755 "$1/$probe"
+  }
+  fresh probes
+  S=$H/stub-src
+  mkdir -p "$S"
+  cp "$stub" "$S/$probe"
+  if [ -n "$bash_bin" ]; then
+    probe_run
+    check "no other command anywhere: the link is made" links_to "$H/.local/bin/$probe" "$S/$probe"
+    printf "printf '%%s:' '%s'\n" "$H/noise" > "$H/.bashrc"
+    probe_command "$H/noise"
+    probe_run
+    check "…and a folder that ~/.bashrc only prints is no PATH" links_to "$H/.local/bin/$probe" "$S/$probe"
+    probe_command "$H/rc-bin"
+    printf 'PATH="$PATH:%s"\n' "$H/rc-bin" > "$H/.bashrc"
+    probe_run
+    check "a command that ~/.bashrc appends to the PATH: exit 0" same "$rc" 0
+    check "…the helper's link goes" absent "$H/.local/bin/$probe"
+    check "…and its export line goes" same "$(grep -c 'export PATH=' "$H/persistent.sh")" 0
+    rm "$H/.bashrc"
+    probe_run
+    check "…and comes back when ~/.bashrc no longer adds it" links_to "$H/.local/bin/$probe" "$S/$probe"
+    probe_command "$H/profile-bin"
+    printf 'PATH="$PATH:%s"\n' "$H/profile-bin" > "$H/.bash_profile"
+    probe_run
+    check "a command that a login shell's profile appends: the link goes" absent "$H/.local/bin/$probe"
+    rm "$H/.bash_profile"
+  fi
+  probe_command "$H/own-bin"
+  probe_run HOST_GRADLE_BASH=/nonexistent/bash PATH="$PATH:$H/own-bin"
+  check "no bash at all: a command on the hook's own PATH still counts" absent "$H/.local/bin/$probe"
+  probe_run HOST_GRADLE_BASH=/nonexistent/bash
+  check "…and without one the link is made" links_to "$H/.local/bin/$probe" "$S/$probe"
 
   echo "# 5. an own download is never clobbered, an unknown tool does nothing"
   fresh own

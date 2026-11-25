@@ -25,4 +25,5 @@ capabilities:
       install:
         - command: ["sh", "/usr/local/lib/aisbx/statusline/install.sh"]
           user: agent
+          env: [CLAUDE_CODE_PLUGIN_DIRS]
           description: Point ~/.claude/settings.json at statusline.sh and the subagent-row mod (merged)

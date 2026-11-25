@@ -11,12 +11,14 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 [ -s "$f" ] || printf '{}\n' > "$f"
 tmp=$(mktemp) || exit 0
-if jq --arg b "$lib/statusline.sh" --arg s "$lib/subagent-statusline.sh" --arg m "$lib/mod" '
+if jq --arg b "$lib/statusline.sh" --arg s "$lib/subagent-statusline.sh" --arg m "$lib/mod" \
+  --arg i "${CLAUDE_CODE_PLUGIN_DIRS:-}" '
   .statusLine = {type: "command", command: $b}
   | if (.subagentStatusLine | type) == "object" and .subagentStatusLine.command == $s
     then del(.subagentStatusLine) else . end
-  | .env = ((.env // {}) | .CLAUDE_CODE_PLUGIN_DIRS = ((.CLAUDE_CODE_PLUGIN_DIRS // "") as $p
-      | if ($p | split(":") | index($m)) then $p elif $p == "" then $m else $p + ":" + $m end))
+  | .env = ((.env // {}) | .CLAUDE_CODE_PLUGIN_DIRS = reduce (($i | split(":"))[], $m) as $d
+      (.CLAUDE_CODE_PLUGIN_DIRS // "";
+        if $d == "" or (split(":") | index([$d])) then . elif . == "" then $d else . + ":" + $d end))
 ' "$f" > "$tmp" 2>/dev/null; then
   cat "$tmp" > "$f"
 else

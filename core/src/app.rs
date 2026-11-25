@@ -3096,6 +3096,19 @@ pub enum Screen {
 /// What a key that tries to leave a running job hears: why the job stays on screen.
 pub const JOB_STILL_RUNNING: &str = "still running — this closes when sbx is done";
 
+/// The status line while a job that copies a host file waits for every sandbox's mounts.
+pub const READING_MOUNTS: &str = "reading the folders every sandbox mounts before the copy…";
+
+/// What another job hears while one waits for [`READING_MOUNTS`].
+pub const STAGING_BUSY: &str =
+    "a job is waiting for the folders every sandbox mounts; try again in a moment";
+
+/// The host folders every sandbox mounts, or why they could not be read ([`model::mount_inventory`]).
+type Mounts = Result<Vec<PathBuf>, model::StageError>;
+
+/// The mounts of every sandbox, for [`App::start_job`] to read off the UI thread.
+type MountReader = Box<dyn FnOnce() -> Mounts + Send>;
+
 #[derive(Debug)]
 pub enum Modal {
     Help,
@@ -3128,6 +3141,9 @@ pub struct App {
     pub status: Option<(String, bool, Instant)>,
     clipboard_notice: Option<(String, bool)>,
     clipboard_shown: Option<Instant>,
+    /// A job that copies a host file, waiting for the mounts [`App::start_job`] reads off the UI
+    /// thread; [`App::tick`] starts it.
+    staging: Option<(PendingJob, Receiver<Mounts>)>,
     /// The header's refresh mark: a refresh someone waits for, or a poll slower than
     /// [`SLOW_REFRESH`].
     pub loading: bool,
@@ -3274,6 +3290,7 @@ impl App {
             status: None,
             clipboard_notice: None,
             clipboard_shown: None,
+            staging: None,
             loading: true,
             quit: false,
             handoff: None,
@@ -3620,6 +3637,7 @@ impl App {
                 self.set_info(message);
             }
         }
+        self.poll_staging();
         while let Ok(result) = self.rx.try_recv() {
             self.refreshing = false;
             let stale = self.refresh_pending;
@@ -11861,11 +11879,11 @@ impl App {
         })
     }
 
-    fn mount_inventory(&self) -> Result<Vec<PathBuf>, String> {
+    fn mount_reader(&self) -> MountReader {
         if cfg!(any(test, feature = "test-support")) {
-            return Ok((self.sandboxes.iter())
+            let stage = self.mounts_state.join(model::GRADLE_PROPERTIES_STAGE_DIR);
+            let mounts: Vec<PathBuf> = (self.sandboxes.iter())
                 .flat_map(|s| {
-                    let stage = self.mounts_state.join(model::GRADLE_PROPERTIES_STAGE_DIR);
                     let copies = model::copies_host_files(&s.addons);
                     let own = std::iter::once(&s.workspace);
                     let kept = own
@@ -11876,34 +11894,80 @@ impl App {
                     let runtime = s.runtime_mounts.iter().map(|m| PathBuf::from(&m.host_path));
                     kept.chain(runtime).collect::<Vec<_>>()
                 })
-                .collect());
+                .collect();
+            return Box::new(move || Ok(mounts));
         }
-        model::mount_inventory(&self.mounts_state)
+        let state = self.mounts_state.clone();
+        Box::new(move || model::mount_inventory(&state))
     }
 
-    fn start_job(&mut self, mut pending: PendingJob) {
-        let staged = &pending.post.stage_host_files;
-        let checked = match model::copies_host_files(staged) {
-            true => self.mount_inventory().and_then(|mut exposed| {
-                exposed.extend(pending.post.stage_beside.iter().cloned());
-                model::stage_host_files_in(
-                    staged,
-                    self.host_home.as_deref(),
-                    &self.mounts_state,
-                    &exposed,
-                )
-            }),
-            false if pending.post.stage_beside.is_empty() => Ok(()),
-            false => match model::stage_exposure_refusal(
-                staged,
+    fn start_job(&mut self, pending: PendingJob) {
+        if self.staging.is_some() {
+            self.set_error(STAGING_BUSY);
+            if let Some(restore) = pending.post.restore {
+                self.restore_screen(restore);
+            }
+            return;
+        }
+        if model::copies_host_files(&pending.post.stage_host_files) {
+            let read = self.mount_reader();
+            let (tx, rx) = channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(read());
+            });
+            self.staging = Some((pending, rx));
+            self.set_info(READING_MOUNTS);
+            return;
+        }
+        let checked = match pending.post.stage_beside.is_empty() {
+            true => None,
+            false => model::stage_exposure_refusal(
+                &pending.post.stage_host_files,
                 &self.mounts_state,
                 &pending.post.stage_beside,
-            ) {
-                Some(refusal) => Err(refusal),
-                None => Ok(()),
-            },
+            ),
         };
-        if let Err(e) = checked {
+        self.start_checked(pending, checked.map(model::StageError::Refused));
+    }
+
+    /// [`App::tick`]: the mounts a waiting job asked for are in, so stage its host files and start it.
+    fn poll_staging(&mut self) {
+        let answer = match self.staging.as_ref().map(|(_, rx)| rx.try_recv()) {
+            Some(Ok(answer)) => answer,
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                Err(model::StageError::Failed(
+                    "the folders every sandbox mounts could not be read".into(),
+                ))
+            }
+            Some(Err(std::sync::mpsc::TryRecvError::Empty)) | None => return,
+        };
+        if let Some((pending, _)) = self.staging.take() {
+            self.finish_staging(pending, answer);
+        }
+    }
+
+    fn finish_staging(&mut self, pending: PendingJob, exposed: Mounts) {
+        if self
+            .status
+            .as_ref()
+            .is_some_and(|(m, ..)| m == READING_MOUNTS)
+        {
+            self.status = None;
+        }
+        let checked = exposed.and_then(|mut exposed| {
+            exposed.extend(pending.post.stage_beside.iter().cloned());
+            model::stage_host_files_in(
+                &pending.post.stage_host_files,
+                self.host_home.as_deref(),
+                &self.mounts_state,
+                &exposed,
+            )
+        });
+        self.start_checked(pending, checked.err());
+    }
+
+    fn start_checked(&mut self, mut pending: PendingJob, refused: Option<model::StageError>) {
+        if let Some(e) = refused {
             self.set_error(format!("{e}; nothing was started"));
             if let Some(restore) = pending.post.restore.clone() {
                 self.restore_screen(restore);
@@ -11928,6 +11992,16 @@ impl App {
 impl App {
     /// An app wired up without touching sbx, for rendering and input tests — and without the
     /// registry of whoever runs them: it starts empty ([`Registry::empty`]).
+    /// Waits for the mounts a job of [`App::start_job`] reads off the UI thread, then goes on
+    /// as [`App::tick`] does.
+    pub fn settle_staging(&mut self) {
+        if let Some((pending, rx)) = self.staging.take() {
+            let answer = (rx.recv_timeout(Duration::from_secs(10)))
+                .unwrap_or_else(|_| Err(model::StageError::Failed("no answer".into())));
+            self.finish_staging(pending, answer);
+        }
+    }
+
     pub fn for_test(catalog: Catalog, sandboxes: Vec<Sandbox>) -> Self {
         let (tx, rx) = channel();
         let (insight_tx, insight_rx) = channel();
@@ -11949,6 +12023,7 @@ impl App {
             status: None,
             clipboard_notice: None,
             clipboard_shown: None,
+            staging: None,
             loading: false,
             quit: false,
             handoff: None,
@@ -16242,12 +16317,14 @@ mod tests {
             "a confirmation that is not answered starts nothing"
         );
         app.start_job(confirm.job.clone());
+        app.settle_staging();
         assert_eq!(std::fs::read_to_string(&staged).unwrap(), "a=1\n");
         assert!(started(&app), "the answer adds the mount with the copy");
         app.modal = None;
 
         std::fs::remove_file(&host).unwrap();
         app.start_job(confirm.job.clone());
+        app.settle_staging();
         assert!(stage.is_dir(), "the mount the job names exists");
         assert!(!staged.exists(), "a host file gone before the answer");
         assert!(started(&app));
@@ -16259,6 +16336,7 @@ mod tests {
             .expect("a managed sandbox");
         std::fs::write(&host, "b=2\n").unwrap();
         app.start_job(absent.job);
+        app.settle_staging();
         assert_eq!(std::fs::read_to_string(&staged).unwrap(), "b=2\n");
         assert!(started(&app), "a file that appeared before the answer");
         app.modal = None;
@@ -16270,12 +16348,14 @@ mod tests {
         assert!(off.job.post.stage_host_files.is_empty());
         assert!(off.job.post.stage_mount.is_none());
         app.start_job(off.job);
+        app.settle_staging();
         assert!(!stage.exists(), "no addon, no copy");
         assert!(!started(&app));
         app.modal = None;
 
         std::fs::write(&host, "a=1\n").unwrap();
         app.start_job(confirm.job.clone());
+        app.settle_staging();
         app.modal = None;
         assert!(staged.exists());
         app.sandboxes[0].runtime_mounts = vec![crate::sbx::RuntimeMount {
@@ -16286,6 +16366,7 @@ mod tests {
             .recreate_confirm(&name, &[], None, "Recreate", Vec::new())
             .expect("a managed sandbox");
         app.start_job(removed.job);
+        app.settle_staging();
         assert!(
             app.modal.is_none(),
             "a replayed run-time mount holds the copy"
@@ -16304,6 +16385,7 @@ mod tests {
         opted_out.workspace = root.clone();
         app.sandboxes.push(opted_out);
         app.start_job(confirm.job.clone());
+        app.settle_staging();
         assert!(app.modal.is_none(), "a refused copy starts nothing");
         assert!(
             app.status
@@ -16323,6 +16405,7 @@ mod tests {
         }];
         app.sandboxes.push(runtime);
         app.start_job(confirm.job.clone());
+        app.settle_staging();
         assert!(app.modal.is_none(), "a run-time mount holds the copy too");
         assert!(!stage.exists());
         app.sandboxes.pop();
@@ -16340,8 +16423,73 @@ mod tests {
         app.mounts_state = root.join("proj/not-a-folder");
         std::fs::write(&app.mounts_state, "").unwrap();
         app.start_job(confirm.job);
+        app.settle_staging();
         assert!(app.modal.is_none(), "a failed copy starts nothing");
         assert!(app.status.is_some());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A job that copies a host file reads every sandbox's mounts off the UI thread: it waits and
+    /// says so, another job is refused meanwhile, and a tick starts it once the mounts are in.
+    #[test]
+    fn a_job_with_a_host_file_reads_the_mounts_off_the_ui_thread() {
+        let root =
+            std::env::temp_dir().join(format!("aisbx-tests-props-wait-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for d in ["proj", "home/.gradle", "state"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        std::fs::write(root.join("home/.gradle/gradle.properties"), "a=1\n").unwrap();
+        let root = crate::sbx::plain_path(std::fs::canonicalize(&root).unwrap());
+        let mut sb = model::sample(
+            "claude-litellm-props-wait",
+            Some("claude-litellm"),
+            &["host-gradle-properties"],
+        );
+        sb.workspace = root.join("proj");
+        let name = sb.name.clone();
+        let mut app = App::for_test(Catalog::load().unwrap(), vec![sb]);
+        app.mounts_state = root.join("state");
+        app.host_home = Some(root.join("home"));
+        let staged =
+            (root.join("state").join(model::GRADLE_PROPERTIES_STAGE_DIR)).join("gradle.properties");
+        let on = vec!["host-gradle-properties".to_string()];
+        let confirm = app
+            .recreate_confirm(&name, &on, None, "Recreate", Vec::new())
+            .expect("a managed sandbox");
+
+        let title = confirm.job.title.clone();
+        app.start_job(confirm.job);
+        assert!(app.modal.is_none(), "the job waits for the mounts");
+        assert!(!staged.exists(), "nothing is copied before they are in");
+        assert_eq!(
+            app.status.as_ref().map(|(m, ..)| m.as_str()),
+            Some(READING_MOUNTS)
+        );
+        app.start_job(PendingJob {
+            title: "Stop".into(),
+            steps: Vec::new(),
+            post: PostJob::default(),
+            fallback: None,
+            fallback_hint: None,
+        });
+        assert!(app.modal.is_none(), "no second job meanwhile");
+        assert_eq!(
+            app.status.as_ref().map(|(m, e, _)| (m.as_str(), *e)),
+            Some((STAGING_BUSY, true))
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while app.staging.is_some() && Instant::now() < deadline {
+            app.tick();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(app.staging.is_none(), "a tick takes the mounts");
+        // A job without steps (under test) can end and close within the tick that starts it.
+        let started = matches!(app.modal, Some(Modal::Running(..)))
+            || (app.status.as_ref()).is_some_and(|(m, ..)| *m == format!("{title} — done"));
+        assert!(started, "a tick starts it: {:?}", app.status);
+        assert_eq!(std::fs::read_to_string(&staged).unwrap(), "a=1\n");
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -21187,10 +21335,7 @@ mod form_decision_tests {
         assert_eq!(review.answers[2].value, "Claude Code");
         assert_eq!(review.answers[3].value, crate::create::AGENT_PICKS);
         assert_eq!(review.answers[4].value, "none");
-        assert_eq!(
-            review.answers[5].value,
-            "Claude Code · LiteLLM acme (Statusline)"
-        );
+        assert_eq!(review.answers[5].value, "Claude Code · LiteLLM acme");
         assert_eq!(review.sbx_name, "claude-litellm-proj");
         assert_eq!(review.sbx_name, form.sbx_name(&app));
         assert_eq!(review.mounts, ["/proj"]);

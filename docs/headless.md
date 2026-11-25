@@ -112,7 +112,7 @@ Give the workspace folder as the last argument: `aisbx up --backend <kit> [optio
 | `--no-mcp` | no MCP servers and no tools to find the host's (`sbx create --static-mcp none`): the same mode as the default, and it silences the note below; applied at creation only: on an existing sandbox it warns on stderr and changes nothing |
 | `--mcp` | lets the agent find and add the host's MCP servers (sbx's dynamic mode, no `--static-mcp`); with `--no-mcp` it exits 2; applied at creation only: on an existing sandbox it warns on stderr and changes nothing |
 
-A create with neither flag prints one note on stderr that MCP is off now ([`mcp-default`](deprecations.md#mcp-default)).
+A create with neither flag prints one note on stderr that MCP is off now ([`mcp-default`](deprecations.md#mcp-default)); `--no-mcp` silences it.
 
 #### `up --kit` on an existing sandbox
 
@@ -220,10 +220,10 @@ With the flag:
 | `--approvals MODE` | `dismiss` (default) or `keep`: what happens to requests held for approval ([Unattended defaults](#unattended-defaults)) |
 | `--no-update` | skips the agent update |
 | `--ssh-agent` | forwards the host's SSH agent (off by default) |
-| `--system-prompt TEXT` | replaces the agent's system prompt (at most 64 KiB, not empty) |
+| `--system-prompt TEXT` | replaces the agent's system prompt (at most 64 KiB, 24 KiB on Windows, whose command line is shorter; not empty, no NUL byte) |
 | `--system-prompt-file FILE` | the same, from a file on the host; `-` is refused (stdin may hold the prompt) |
-| `--tools LIST` | lets the agent use only these tools, in the agent's own names (Claude Code `Read,Grep`) |
-| `--no-tools` | no tools at all |
+| `--tools LIST` | lets the agent use only these tools, in the agent's own names (Claude Code `Read,Grep`); MCP tools stay (on Claude Code, `--strict-mcp` drops them) |
+| `--no-tools` | no tools and no MCP server; on Claude Code only the servers that `-- --mcp-config …` names load |
 | `--strict-mcp` | Claude Code only uses the MCP servers that `-- --mcp-config …` names |
 | `--no-slash-commands` | turns Claude Code's slash commands and skills off |
 | `--no-session` | the agent saves no session to resume |
@@ -244,14 +244,14 @@ with exit 2 and names the option to drop:
 | --- | --- | --- | --- |
 | `--system-prompt`, `--system-prompt-file` | `--system-prompt TEXT` | `--system-prompt TEXT` | refused |
 | `--tools LIST` | `--tools LIST` | `--tools LIST` | refused |
-| `--no-tools` | `--tools ""` | `--no-tools` | refused |
+| `--no-tools` | `--tools "" --strict-mcp-config` | `--no-tools` | refused |
 | `--strict-mcp` | `--strict-mcp-config` | refused | refused |
 | `--no-slash-commands` | `--disable-slash-commands` | refused | refused |
 | `--no-session` | `--no-session-persistence` | `--no-session` | refused |
 
 The system prompt is part of the agent's command line, so the process lists of the sandbox and of the host show it.
-Keep secrets out of it. A lean run on Claude Code, with the plain `sbx` equivalent being
-`sbx exec NAME claude -p … --tools "" …`:
+Keep secrets out of it. Pi reads a system prompt that names an existing file in the sandbox from that file. A lean
+run on Claude Code, with the plain `sbx` equivalent being `sbx exec NAME claude -p … --tools "" --strict-mcp-config …`:
 
 ```console
 $ aisbx run nightly --prompt-file task.md --model opus --effort xhigh \

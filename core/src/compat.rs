@@ -33,7 +33,8 @@ pub fn skill_repos_quiet(args: &[String]) -> bool {
 
 pub fn mcp_default_warning() -> String {
     "aisbx: note: a new sandbox now starts without MCP servers; pass `--mcp` to let the agent find \
-     the host's servers as before; see docs/deprecations.md#mcp-default"
+     the host's servers as before, or `--no-mcp` to keep them off without this note; see \
+     docs/deprecations.md#mcp-default"
         .to_string()
 }
 
@@ -46,6 +47,11 @@ mod tests {
         let line = mcp_default_warning();
         assert!(line.starts_with("aisbx: "), "{line}");
         assert!(line.contains("`--mcp`"), "{line}");
+        assert!(
+            line.contains("`--no-mcp` to keep them off without this note"),
+            "{line}"
+        );
+        assert!(!line.contains("  "), "{line}");
         assert!(line.ends_with("docs/deprecations.md#mcp-default"), "{line}");
     }
 

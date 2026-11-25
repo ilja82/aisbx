@@ -4942,7 +4942,7 @@ mod tests {
         focus_row(&mut app, CreateRow::Name);
         let screen = super::tests_support::render_at(&mut app, 110, 40);
         assert!(
-            screen.contains("label         Claude Code · LiteLLM acme (Statusline)   generated"),
+            screen.contains("label         Claude Code · LiteLLM acme   generated"),
             "the agent, its provider and how it signs in: {screen}"
         );
         for c in "api".chars() {

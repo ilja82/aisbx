@@ -183,6 +183,23 @@ EOF
   cp "$H/.claude/settings.json" "$scratch/settings.once"
   sl
   check "statusline: a second run changes nothing" cmp -s "$scratch/settings.once" "$H/.claude/settings.json"
+  check "statusline: the install hook gets the plugin dirs a kit sets with ENV" grep -qx \
+    '          env: \[CLAUDE_CODE_PLUGIN_DIRS\]' "$root/kits/statusline/statusline.yaml"
+  sl_with_dirs() {   # sl_with_dirs <CLAUDE_CODE_PLUGIN_DIRS of the image>
+    env -i PATH="/usr/bin:/bin" AISBX_STATUSLINE_SETTINGS="$H/.claude/settings.json" CLAUDE_CODE_PLUGIN_DIRS="$1" \
+      sh "$root/kits/statusline/files/statusline/install.sh"
+  }
+  printf '{"model":"opus"}\n' > "$H/.claude/settings.json"
+  sl_with_dirs "/opt/mine:/opt/two"
+  check "statusline: a kit's own plugin dirs come first, then the mod" same \
+    "$(j .env.CLAUDE_CODE_PLUGIN_DIRS "$H/.claude/settings.json")" '"/opt/mine:/opt/two:/usr/local/lib/aisbx/statusline/mod"'
+  printf '{"env":{"CLAUDE_CODE_PLUGIN_DIRS":"/x"}}\n' > "$H/.claude/settings.json"
+  sl_with_dirs "/opt/mine:/x:"
+  check "statusline: the settings' own dirs stay first, and none twice" same \
+    "$(j .env.CLAUDE_CODE_PLUGIN_DIRS "$H/.claude/settings.json")" '"/x:/opt/mine:/usr/local/lib/aisbx/statusline/mod"'
+  cp "$H/.claude/settings.json" "$scratch/settings.twice"
+  sl_with_dirs "/opt/mine:/x:"
+  check "statusline: and a second run with them changes nothing" cmp -s "$scratch/settings.twice" "$H/.claude/settings.json"
   printf '{"subagentStatusLine":{"type":"command","command":"/home/agent/my.sh"}}\n' > "$H/.claude/settings.json"
   sl
   check "statusline: a subagentStatusLine of the user's own stays" same \
@@ -196,6 +213,68 @@ EOF
     "$mod/hooks/register.ts"
   check "statusline: and runs the image's row script" grep -qF "'$old_rows'" "$mod/hooks/register.ts"
   check "statusline: and falls back to the default row" grep -q "return next(e)" "$mod/hooks/register.ts"
+  cat > "$scratch/mod-harness.mjs" <<'JS'
+import { pathToFileURL } from 'node:url'
+const { register } = await import(pathToFileURL(process.argv[2]).href)
+const hooks = []
+register((ev, match, fn) => hooks.push({ ev, match, fn }))
+const props = { id: 'a1', label: 'Task', description: 'Task', taskStatus: 'running', status: 'other',
+  tokenCount: 7, contextWindowSize: 100, startTime: 1, tokenSamples: [1, 2], columns: 80 }
+const draw = async (answer) => {
+  const calls = []
+  const $ = { process: { run: async (argv, init) => {
+    calls.push({ argv, init })
+    if (answer instanceof Error) throw answer
+    return { stderr: '', ...answer }
+  } } }
+  const e = { props }
+  const out = await hooks[0].fn($, e, async (x) => x)
+  return { body: out === e ? null : out.props.body, calls }
+}
+const row = (id, content) => JSON.stringify({ id, content })
+const matched = await draw({ exitCode: 0, stdout: `noise\n${row('zz', 'OTHER')}\n${row('a1', 'ROW')}\n` })
+console.log(JSON.stringify({
+  hooks: hooks.map(({ ev, match }) => ({ ev, match })),
+  matched: matched.body,
+  argv: matched.calls[0].argv,
+  timeout: matched.calls[0].init.timeoutMs,
+  input: JSON.parse(matched.calls[0].init.stdin),
+  other_id: (await draw({ exitCode: 0, stdout: row('zz', 'ROW') })).body,
+  no_string: (await draw({ exitCode: 0, stdout: JSON.stringify({ id: 'a1', content: 5 }) })).body,
+  failed: (await draw({ exitCode: 1, stdout: row('a1', 'ROW') })).body,
+  rejected: (await draw(new Error('timed out'))).body,
+}))
+JS
+  printf 'export const x: number = 1\n' > "$scratch/probe.ts"
+  printf 'import { x } from "./probe.ts"\nif (x !== 1) process.exit(1)\n' > "$scratch/probe.mjs"
+  ts_flag=none
+  if command -v node >/dev/null 2>&1; then
+    for flag in "" --experimental-strip-types; do
+      if node $flag "$scratch/probe.mjs" >/dev/null 2>&1; then
+        ts_flag=$flag
+        break
+      fi
+    done
+  fi
+  if [ "$ts_flag" != none ]; then
+    node $ts_flag "$scratch/mod-harness.mjs" "$mod/hooks/register.ts" > "$scratch/mod.json" 2> "$scratch/mod.err"
+    ran=$?
+    check "statusline: node runs the mod ($(head -c 300 "$scratch/mod.err" | tr '\n' ' '))" same "$ran" 0
+    mj() { jq -c "$1" "$scratch/mod.json" 2>/dev/null; }
+    check "statusline: the mod registers one AgentRow render hook" same "$(mj .hooks)" \
+      '[{"ev":"ui.render","match":{"component":"AgentRow"}}]'
+    check "statusline: the mod draws the line with the row's id" same "$(mj .matched)" '"ROW"'
+    check "statusline: and runs the row script alone, with a 2 s limit" same "$(mj '[.argv, .timeout]')" \
+      "[[\"$old_rows\"],2000]"
+    check "statusline: and hands it the row as the script reads it" same "$(mj .input)" \
+      '{"columns":80,"tasks":[{"id":"a1","label":"Task","status":"running","tokenCount":7,"contextWindowSize":100,"startTime":1,"description":"Task","tokenSamples":[1,2]}]}'
+    check "statusline: another row's line, a non-string body, a failed or refused run: the default row" same \
+      "$(mj '[.other_id, .no_string, .failed, .rejected]')" '[null,null,null,null]'
+  elif [ -n "${CI:-}" ]; then
+    check "statusline: a node that runs TypeScript (22.6 or later, an official build) runs the mod" false
+  else
+    printf 'skip statusline: the mod needs a node that runs TypeScript (22.6 or later, an official build)\n'
+  fi
   printf 'not json\n' > "$H/.claude/settings.json"
   env -i PATH="/usr/bin:/bin" AISBX_STATUSLINE_SETTINGS="$H/.claude/settings.json" \
     sh "$root/kits/statusline/files/statusline/install.sh" 2>/dev/null

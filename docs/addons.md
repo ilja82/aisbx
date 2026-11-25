@@ -157,10 +157,11 @@ arguments, so Gradle plugins that ask for a token do not fail offline. It is a l
 `/usr/local/bin` or else `~/.local/bin`. When the folder is not on the `PATH` that non-interactive commands get, one
 line in `/etc/sandbox-persistent.sh` adds it, so the agent's shell commands find the helper too.
 
-The helper never hides a command of the same name that you or a kit installed. When the `PATH` already has such a
-command at a start, the start makes no link, and it removes the helper's link and line from an earlier start. A
-command that you install while the sandbox runs takes over at the next start. A shell that already finds such a
-command does not add the helper's folder.
+The helper never hides a command of the same name that you or a kit installed. At each start, the start looks for
+such a command on the `PATH` of a non-interactive shell, of a login shell and of an interactive shell, so a folder that
+`/etc/profile.d/`, `~/.profile` or `~/.bashrc` adds counts too. When it finds one, the start makes no link, and it
+removes the helper's link and line from an earlier start. A command that you install while the sandbox runs takes over
+at the next start. A shell that already finds such a command does not add the helper's folder.
 
 ### Limits of the Maven and Gradle caches
 
@@ -210,6 +211,8 @@ mounts that folder read-only. At every start, the sandbox copies the file to `~/
 - A file the agent edited in the sandbox stays: it is replaced only while it is still the copy the hook made.
 - Without the file on the host, the row is greyed out, and the sandbox starts as usual.
 - Nothing else in `~/.gradle` is copied.
+- The copy is the host's file as it is. A key that names a host path, such as `org.gradle.java.home`, or a proxy of
+  the host, such as `systemProp.https.proxyHost`, applies in the sandbox too and can make its Gradle builds fail there.
 
 ## Host npm/pip/uv caches (read-only)
 
@@ -328,13 +331,13 @@ Throwaway task · ctx 15k/1M (1%) · 0:35 · ≈26k/min · ▇▃▁▂▁▁▁
 A Claude Code mod draws these rows: the plugin `aisbx-statusline` in `/usr/local/lib/aisbx/statusline/mod`, which runs
 `subagent-statusline.sh` for each row. The install hook lists that folder in `env.CLAUDE_CODE_PLUGIN_DIRS` of
 `~/.claude/settings.json`, after any folders already there, and removes the kit's older `subagentStatusLine` entry,
-which Claude Code deprecated. An entry of your own stays. To get the default rows back, remove the folder from
-`CLAUDE_CODE_PLUGIN_DIRS`. A Claude Code without mods shows the default rows.
+which Claude Code deprecated. A `subagentStatusLine` of your own stays in the file, but the mod draws the rows while it
+is loaded. To get the default rows back, remove the folder from `CLAUDE_CODE_PLUGIN_DIRS`. A Claude Code without mods
+shows the default rows.
 
-Claude Code reads `env` in `settings.json` over the process environment. So with `statusline`, a
-`CLAUDE_CODE_PLUGIN_DIRS` that a kit of yours sets with `ENV` no longer applies, and its plugins do not load. Add
-those folders to `CLAUDE_CODE_PLUGIN_DIRS` in `~/.claude/settings.json` instead, for example from your kit's install
-hook. The `statusline` hook keeps the folders that are already there.
+Claude Code reads `env` in `settings.json` over the process environment, so the hook carries the folders of a
+`CLAUDE_CODE_PLUGIN_DIRS` that a kit of yours sets with `ENV` into that list: first the folders already in
+`settings.json`, then your kit's, then the mod's. Each folder is listed once, so their plugins still load.
 
 ### Where the label and the kits come from
 
