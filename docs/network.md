@@ -57,7 +57,7 @@ A kit's allow-list can only open hosts, never close one. Under `deny-all`, these
 | `claude-litellm` | `downloads.claude.ai` (updates; also at install), `code.claude.com` (docs), `api.anthropic.com` (WebFetch's domain check only); the gateway host |
 | `claude-anthropic` | `api.anthropic.com`, `claude.ai`, `platform.claude.com`, `claude.com`, `mcp-proxy.anthropic.com`, `bridge.claudeusercontent.com` (`/remote-control`, Claude in Chrome), `downloads.claude.ai` (also at install), `code.claude.com` |
 | `claude-token` | `api.anthropic.com`, `downloads.claude.ai` (also at install), `code.claude.com` |
-| `opencode-litellm` | the npm registry (updates; also at install), `models.dev`, `github.com`, `*.github.com`, `*.githubusercontent.com`; the gateway host |
+| `opencode-litellm` | the npm registry (updates; also at install), `models.dev`, `models.opencode.ai`, `github.com`, `*.github.com`, `*.githubusercontent.com`; the gateway host |
 | `codex-openai` | `api.openai.com`, `openai.com`, `auth.openai.com`, `chatgpt.com`, `files.openai.com`, the npm registry (also at install) ([Codex](agents.md#codex)) |
 | `agy` | Google's sign-in, model, picture, plugin and updater hosts, `storage.googleapis.com`; **denies** `play.googleapis.com`, agy's log sink ([Antigravity](agents.md#antigravity-agy)) |
 | `pi-litellm` | the npm registry (updates; also at install); the gateway host ([Pi](agents.md#pi)) |

@@ -2382,12 +2382,17 @@ impl Step {
         let mut timed_out = false;
         let mut stopped = false;
         let status = loop {
-            if let Ok(Some(s)) = child.try_wait() {
-                break Some(s);
+            let ended = child.try_wait().ok().flatten();
+            let interrupt = || self.interrupts() >= stop_at;
+            if interrupt() || (ended.is_some() && headless::interrupt_follows(interrupt)) {
+                stopped = true;
+                break headless::stop_agent(&mut child, &name, &run_dir);
             }
-            let interrupted = self.interrupts() >= stop_at;
-            if Instant::now() >= deadline || interrupted {
-                timed_out = !interrupted;
+            if ended.is_some() {
+                break ended;
+            }
+            if Instant::now() >= deadline {
+                timed_out = true;
                 stopped = true;
                 break headless::stop_agent(&mut child, &name, &run_dir);
             }
@@ -2498,11 +2503,13 @@ impl Step {
             while let Ok(line) = rx.try_recv() {
                 self.take_agent_line(&mut stream, &mut outcome, &line);
             }
-            if let Ok(Some(s)) = child.try_wait() {
-                break Some(s);
+            let ended = child.try_wait().ok().flatten();
+            let interrupted = self.interrupted()
+                || (ended.is_some() && headless::interrupt_follows(|| self.interrupted()));
+            if ended.is_some() && !interrupted {
+                break ended;
             }
             let timed_out = Instant::now() >= deadline;
-            let interrupted = self.interrupted();
             let usage = outcome.usage_crossed.is_some();
             if timed_out || interrupted || usage {
                 outcome.timed_out = timed_out && !interrupted;

@@ -5,7 +5,8 @@
 #
 #   1. protocol 1: two check commands, as a protocol 1 caller sends them;
 #   2. protocol 2: work.before, a check that runs into the timeout, and work.after;
-#   3. protocol 2: Ctrl-C once (work.after runs), and again during work.after (the rest is skipped);
+#   3. protocol 2: Ctrl-C once (the check stops, work.after runs), and again during work.after (the
+#      rest is skipped), each to the whole process group, as a terminal sends it;
 #   4. protocol 2: pre-warm (work.before does not run), then the continued step, whose
 #      work.before fails (the checks and work.after do not run);
 #   5. protocol 2: an agent step on a workspace with .claude/settings.local.json (a SessionStart
@@ -20,16 +21,18 @@
 #      the report's list of it; the spec errors; a pre-warm that runs the open proof;
 #   9. protocol 2: three open steps and one closed step at once (kits_prebuilt, so nothing builds
 #      while they run): own rules, own logs, one shared proof written at the same moment;
-#  10. protocol 2: the concurrency limit: exit 5 before create, also under --prewarm.
+#  10. protocol 2: the concurrency limit: exit 5 before create, also under --prewarm;
+#  11. protocol 2: Ctrl-C to the process group while the agent's tool runs: the agent is gone
+#      before work.after runs (a skip line when the agent never runs the command).
 #
 #   sh tests/step-test.sh                 static checks, then the live steps (skipped when sbx is not signed in)
 #   sh tests/step-test.sh --static        the static checks only
 #   sh tests/step-test.sh --only "8 9"    static checks, then only these live steps
 #   STEP_TEST_KEEP=1 sh tests/step-test.sh   keep the run directories (events, reports) afterwards
 #
-# Makes sixteen sandboxes, sf-step-test-<pid>-<n>…, and removes them, and builds two tiny kit
+# Makes seventeen sandboxes, sf-step-test-<pid>-<n>…, and removes them, and builds two tiny kit
 # images, which it removes too. Part 9 runs four sandboxes at once. Needs python3 for the JSON
-# checks. On a machine where kit builds must not overlap, run it under that machine's build lock.
+# checks and the process groups. On a machine where kit builds must not overlap, run it under that machine's build lock.
 
 root=$(cd "$(dirname "$0")/.." && pwd) || exit 2
 fixtures=$root/tests/step
@@ -222,6 +225,12 @@ wait_for() {
     sleep 0.1
   done
 }
+own_group() {   # own_group <command>... &: the command leads its own process group, as a terminal runs a job; $! is it
+  exec python3 -c 'import os, sys; os.setpgid(0, 0); os.execvp(sys.argv[1], sys.argv[1:])' "$@"
+}
+ctrl_c() {   # ctrl_c <pid>: SIGINT to the process group of <pid>, as Ctrl-C in a terminal sends it
+  python3 -c 'import os, signal, sys; os.killpg(int(sys.argv[1]), signal.SIGINT)' "$1"
+}
 if part 1; then
 # 1. protocol 1, two checks
 mkdir -p "$work/1/ws/app" "$work/1/run"
@@ -308,26 +317,28 @@ cat > "$work/3/spec.json" <<EOF
 {"protocol": 2, "name": "$name", "backend": "claude-anthropic", "workspace": "$work/3/ws", "network": false,
  "work": {"before": [{"workdir": "", "argv": ["true"]}],
           "checks": [{"workdir": "", "argv": ["sleep", "300"]}],
-          "after": [{"workdir": "", "argv": ["sh", "-c", "echo checkpoint > after.txt"]},
+          "after": [{"workdir": "", "argv": ["sh", "-c", "echo checkpoint > after.txt && ! pgrep -fx 'sleep 300'"]},
                     {"workdir": "", "argv": ["sleep", "300"]},
                     {"workdir": "", "argv": ["sh", "-c", "echo never > never.txt"]}]},
  "timeout_seconds": 600}
 EOF
 run=$work/3/run
 events=$work/3/events.ndjson
-"$bin" step --spec "$work/3/spec.json" --dir "$run" > "$events" 2> "$work/3/stderr.txt" &
+own_group "$bin" step --spec "$work/3/spec.json" --dir "$run" > "$events" 2> "$work/3/stderr.txt" &
 pid=$!
 if wait_for "$events" '"phase":"before","seq":[0-9]*,"status":"ok"' 180; then
   sleep 3
-  kill -INT "$pid"
+  ctrl_c "$pid"
   if wait_for "$events" '"index":0,"kind":"check","ms":[0-9]*,"phase":"after"' 60; then
     sleep 3
-    kill -INT "$pid"
+    ctrl_c "$pid"
   fi
 fi
 wait "$pid"
 code=$?
 check "3: the step exits 130 (interrupted)" [ "$code" -eq 130 ]
+check "3: the first Ctrl-C stopped the check before after ran" \
+  json_ok "$run/report.json" "d['work']['after'][0]['exit'] == 0"
 check "3: stdout carries only events" events_ok "$events"
 check "3: the report is a protocol 2 checks report" report_ok "$run/report.json" checks 2
 check "3: after ran after the first Ctrl-C; the second stopped it and skipped the rest" \
@@ -795,6 +806,47 @@ AISBX_STEP_MAX_CONCURRENT=1 "$bin" step --prewarm --spec "$work/10/spec.json" --
 check "10: once it has ended, the next step may run (pre-warm exits 0)" [ $? -eq 0 ]
 "$bin" rm "$busy" > /dev/null 2>&1
 check "10: the sandboxes are gone" sh -c "! sbx ls --json | grep -q 'sf-step-test-$$-10'"
+fi
+if part 11; then
+# 11. protocol 2: Ctrl-C to the process group while the agent's tool runs: the agent stops before after
+mkdir -p "$work/11/ws" "$work/11/run"
+name=sf-step-test-$$-11
+names="$names $name"
+printf '%s\n' "Run exactly this shell command with the Bash tool in the foreground and wait for it to \
+finish: python3 -c 'import time; time.sleep(240)'" > "$work/11/prompt.md"
+cat > "$work/11/spec.json" <<EOF
+{"protocol": 2, "name": "$name", "backend": "claude-anthropic", "workspace": "$work/11/ws",
+ "allow_hosts": ["api.anthropic.com"],
+ "work": {"agent": {"prompt_file": "$work/11/prompt.md", "model": "haiku", "max_turns": 3},
+          "after": [{"workdir": "", "argv": ["sh", "-c", "! pgrep -f '^claude -p' && ! pgrep -f '^python3 -c import time'"]}]},
+ "timeout_seconds": 400}
+EOF
+run=$work/11/run
+own_group "$bin" step --spec "$work/11/spec.json" --dir "$run" > "$work/11/events.ndjson" 2> "$work/11/stderr.txt" &
+pid=$!
+ran=
+i=0
+while [ "$i" -lt 240 ] && kill -0 "$pid" 2>/dev/null; do
+  if sbx exec "$name" pgrep -f '^python3 -c import time' > /dev/null 2>&1; then
+    ran=1
+    break
+  fi
+  sleep 1
+  i=$((i + 1))
+done
+[ -n "$ran" ] && ctrl_c "$pid"
+wait "$pid"
+code=$?
+if [ -n "$ran" ]; then
+  check "11: the step exits 130 (interrupted)" [ "$code" -eq 130 ]
+  check "11: the report says the agent was interrupted" \
+    json_ok "$run/report.json" "d['work']['interrupted'] and d['work']['stopped'] == 'interrupt'"
+  check "11: the agent and its command were gone when after ran" \
+    json_ok "$run/report.json" "d['work']['after'][0]['exit'] == 0"
+else
+  printf 'skip 11: the agent never ran the command (step exit %s), so nothing was interrupted\n' "$code"
+fi
+check "11: the sandbox is gone" gone "$name"
 fi
 
 for name in $names; do

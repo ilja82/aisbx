@@ -51,7 +51,8 @@ list or pick reaches the sandbox at its next session.
 
 - **Sharing is off** (`"share": "disabled"`). Else `/share` uploads the conversation and its data to `opencode.ai`.
 - **No update check** (`"update": "disable"`, `OPENCODE_DISABLE_AUTOUPDATE=true`).
-- **No telemetry switch exists** in 2.x. `models.dev` stays allowed: it is the model catalog.
+- **No telemetry switch exists** in 2.x. `models.dev` and `models.opencode.ai` stay allowed: they serve the model
+  catalog, which OpenCode 2.4 reads from `models.opencode.ai`.
 - **Only the gateway's models.** A `provider.use` deny policy hides `github-copilot` and the other built-in providers.
 - **No permission prompts.** One allow rule approves every prompt, because the sandbox is the boundary. A `deny` rule
   you add after it still holds.

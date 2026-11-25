@@ -3403,8 +3403,11 @@ mod live {
             );
         }
         // Approval requests, host-wide. A key that moves shows up here as an empty column, and a
-        // shape that moves as a list the plain one disagrees with.
+        // shape that moves as a list the plain one disagrees with, judged on the plain lists
+        // before and after it.
+        let before = quiet_names(&["policy", "approval", "ls", "-q"]);
         let pending = approvals().expect("sbx policy approval ls --json");
+        let after = quiet_names(&["policy", "approval", "ls", "-q"]);
         println!("{} approval request(s) pending", pending.len());
         for a in &pending {
             println!(
@@ -3420,14 +3423,19 @@ mod live {
                 "{a:?}"
             );
         }
-        let mut ids: Vec<String> = pending.iter().map(|a| a.id.clone()).collect();
-        ids.sort();
-        let mut quiet = quiet_names(&["policy", "approval", "ls", "-q"]);
-        quiet.sort();
-        assert_eq!(
-            ids, quiet,
-            "`approval ls --json` and `approval ls -q` disagree"
-        );
+        let ids: Vec<&str> = pending.iter().map(|a| a.id.as_str()).collect();
+        for id in before.iter().filter(|id| after.contains(id)) {
+            assert!(
+                ids.contains(&id.as_str()),
+                "`approval ls -q` lists {id} before and after `approval ls --json`, which misses it: {ids:?}"
+            );
+        }
+        for id in &ids {
+            assert!(
+                before.iter().chain(&after).any(|q| q == id),
+                "`approval ls --json` lists {id}, which `approval ls -q` lists neither before nor after it: {before:?}, {after:?}"
+            );
+        }
         for entry in &sandboxes {
             let inspect = inspect(&entry.name).expect("sbx inspect --json");
             println!(

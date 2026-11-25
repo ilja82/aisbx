@@ -1,8 +1,10 @@
 #![cfg(unix)]
 
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
+use std::time::Duration;
 
 const FAKE_SBX: &str = r#"#!/bin/sh
 [ "$1" = "--no-input" ] && shift
@@ -21,11 +23,21 @@ case "$1" in
     done
     shift
     run=
+    launch=
     for a in "$@"; do
       shift
-      case "$a" in /tmp/aisbx-run-*) a="$FAKE_ROOT$a"; run=1 ;; esac
+      case "$a" in
+        /tmp/aisbx-run-*) a="$FAKE_ROOT$a"; run=1 ;;
+        @@AISBX_PROMPT@@) launch=1 ;;
+      esac
       set -- "$@" "$a"
     done
+    if [ -n "$launch" ] && [ -n "$FAKE_CLIENT_DIES_ON_INT" ]; then
+      "$@" &
+      trap 'exit 1' INT
+      wait $!
+      exit
+    fi
     [ -n "$run" ] && exec "$@" ;;
   *) ;;
 esac
@@ -33,6 +45,10 @@ exit 0
 "#;
 
 const FAKE_CLAUDE: &str = r#"#!/bin/sh
+if [ -n "$FAKE_AGENT_PIDFILE" ]; then
+  echo $$ > "$FAKE_AGENT_PIDFILE"
+  exec sleep 30 < /dev/null > /dev/null 2>&1
+fi
 for a in "$@"; do
   printf '%s' "$a" | od -An -v -tx1 | tr -d ' \n'
   printf '\n'
@@ -95,13 +111,17 @@ impl Rig {
 
     fn aisbx(&self, args: &[&str]) -> Output {
         let _turn = ONE_RUN.lock().unwrap_or_else(|e| e.into_inner());
+        self.command(args).output().unwrap()
+    }
+
+    fn command(&self, args: &[&str]) -> Command {
         let path = format!(
             "{}:{}",
             self.base.join("bin").display(),
             std::env::var("PATH").unwrap_or_default()
         );
-        Command::new(env!("CARGO_BIN_EXE_aisbx"))
-            .args(args)
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_aisbx"));
+        cmd.args(args)
             .current_dir(&self.work)
             .env("PATH", path)
             .env("HOME", self.base.join("home"))
@@ -110,9 +130,8 @@ impl Rig {
             .env("FAKE_SBX_LOG", self.base.join("log"))
             .env("FAKE_SBX_LS", self.base.join("ls.json"))
             .env("FAKE_SBX_INSPECT", self.base.join("inspect.json"))
-            .env("FAKE_ROOT", self.base.join("fakeroot"))
-            .output()
-            .unwrap()
+            .env("FAKE_ROOT", self.base.join("fakeroot"));
+        cmd
     }
 
     fn up(&self, extra: &[&str]) -> Output {
@@ -269,4 +288,58 @@ fn run_refuses_a_system_prompt_with_a_nul_byte_before_it_uploads_anything() {
     assert!(err.contains("NUL byte"), "{err}");
     assert!(!rig.log().contains("exec"), "{}", rig.log());
     assert!(rig.run_dirs_left().is_empty(), "{:?}", rig.run_dirs_left());
+}
+
+fn alive(pid: &str) -> bool {
+    Command::new("kill")
+        .args(["-0", pid])
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+#[test]
+fn ctrl_c_to_the_process_group_stops_the_agent_although_the_client_ends_first() {
+    let rig = Rig::new("run-ctrl-c");
+    rig.existing_demo();
+    let pidfile = rig.base.join("agent.pid");
+    let _turn = ONE_RUN.lock().unwrap_or_else(|e| e.into_inner());
+    let run = rig
+        .command(&["run", "demo", "--prompt", "task", "--no-update"])
+        .env("FAKE_CLIENT_DIES_ON_INT", "1")
+        .env("FAKE_AGENT_PIDFILE", &pidfile)
+        .process_group(0)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut agent = String::new();
+    for _ in 0..200 {
+        agent = std::fs::read_to_string(&pidfile).unwrap_or_default();
+        agent = agent.trim().to_string();
+        if !agent.is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!agent.is_empty(), "the agent never started: {}", rig.log());
+    let group = format!("-{}", run.id());
+    let sent = Command::new("kill").args(["-INT", "--", &group]).status();
+    assert!(sent.is_ok_and(|s| s.success()), "kill -INT {group}");
+    let out = run.wait_with_output().unwrap();
+    let mut left = alive(&agent);
+    for _ in 0..50 {
+        if !left {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        left = alive(&agent);
+    }
+    if left {
+        let _ = Command::new("kill").args(["-KILL", &agent]).status();
+    }
+    let err = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(130), "{err}");
+    assert!(err.contains("interrupted"), "{err}");
+    assert!(!left, "the agent outlived the run: {}", rig.log());
 }
