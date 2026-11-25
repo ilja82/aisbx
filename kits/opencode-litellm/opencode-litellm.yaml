@@ -23,6 +23,7 @@ capabilities:
           - registry.npmjs.org         # the dashboard's pre-start update (npm)
           - "*.npmjs.org"              # npm CDN hosts
           - models.dev                 # OpenCode's model catalog (capabilities, metadata)
+          - models.opencode.ai         # the same catalog, where OpenCode 2.4 reads it
           - github.com                 # release pages
           - "*.github.com"             # api.github.com, codeload.github.com
           - "*.githubusercontent.com"  # release assets (language servers OpenCode fetches)

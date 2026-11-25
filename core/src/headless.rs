@@ -1783,10 +1783,9 @@ fn run(raw: &[String]) -> Outcome {
     let status = watch(
         &mut child,
         deadline,
-        &interrupted,
+        || interrupted.load(Ordering::SeqCst),
         &mut report,
-        &name,
-        &run_dir,
+        |child| stop_agent(child, &name, &run_dir),
     );
 
     let stopped = report.timed_out || report.interrupted;
@@ -1893,30 +1892,51 @@ pub(crate) fn upload_prompt(
     }
 }
 
-/// Wait for the agent, enforcing the deadline and Ctrl-C. On either, stop the agent inside the
-/// sandbox (killing the `sbx exec` client leaves it running), then the sandbox if it stays.
+/// Wait for the agent, enforcing the deadline and Ctrl-C. On either, `stop` stops the agent
+/// inside the sandbox ([`stop_agent`]: killing the `sbx exec` client leaves it running). An
+/// interrupt wins over the client's end, a deadline does not.
 fn watch(
     child: &mut Child,
     deadline: Option<Instant>,
-    interrupted: &AtomicBool,
+    interrupted: impl Fn() -> bool,
     report: &mut Report,
-    name: &str,
-    run_dir: &str,
+    stop: impl FnOnce(&mut Child) -> Option<ExitStatus>,
 ) -> Option<ExitStatus> {
     loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return Some(status),
-            Ok(None) => {}
+        let ended = match child.try_wait() {
+            Ok(ended) => ended,
             Err(_) => return None,
+        };
+        if interrupted() || (ended.is_some() && interrupt_follows(&interrupted)) {
+            report.interrupted = true;
+            return stop(child);
         }
-        let timed_out = deadline.is_some_and(|d| Instant::now() >= d);
-        let stop = interrupted.load(Ordering::SeqCst);
-        if timed_out || stop {
-            report.timed_out = timed_out && !stop;
-            report.interrupted = stop;
-            return stop_agent(child, name, run_dir);
+        if ended.is_some() {
+            return ended;
+        }
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            report.timed_out = true;
+            return stop(child);
         }
         std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// How long a wait loop gives an interrupt to show once the `sbx exec` client has ended.
+pub(crate) const INTERRUPT_GRACE: Duration = Duration::from_millis(100);
+
+/// Whether `interrupted` turns true within [`INTERRUPT_GRACE`]: Ctrl-C can end the `sbx exec`
+/// client before the handler records it.
+pub(crate) fn interrupt_follows(interrupted: impl Fn() -> bool) -> bool {
+    let end = Instant::now() + INTERRUPT_GRACE;
+    loop {
+        if interrupted() {
+            return true;
+        }
+        if Instant::now() >= end {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -6557,6 +6577,88 @@ mod tests {
             .success();
         assert!(!alive, "the grandchild was stopped too");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_interrupt_within_the_grace_counts_and_none_after_it() {
+        assert!(interrupt_follows(|| true));
+        let calls = std::cell::Cell::new(0);
+        assert!(interrupt_follows(|| {
+            calls.set(calls.get() + 1);
+            calls.get() > 1
+        }));
+        let start = Instant::now();
+        assert!(!interrupt_follows(|| false));
+        assert!(start.elapsed() >= INTERRUPT_GRACE);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn watch_stops_the_agent_on_ctrl_c_also_when_the_client_ended_first() {
+        for late in [false, true] {
+            let mut client = Command::new("sh").args(["-c", "exit 1"]).spawn().unwrap();
+            let _ = client.wait();
+            let calls = std::cell::Cell::new(0);
+            let interrupted = || {
+                calls.set(calls.get() + 1);
+                !late || calls.get() > 1
+            };
+            let mut report = Report::default();
+            let mut stopped = false;
+            let status = watch(&mut client, None, interrupted, &mut report, |c| {
+                stopped = true;
+                c.try_wait().ok().flatten()
+            });
+            assert!(
+                stopped,
+                "late {late}: the agent in the sandbox was left running"
+            );
+            assert!(report.interrupted && !report.timed_out, "late {late}");
+            assert_eq!(status.and_then(|s| s.code()), Some(1), "late {late}");
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn watch_takes_an_ended_client_as_it_is_without_ctrl_c_also_past_the_deadline() {
+        let mut client = Command::new("sh").args(["-c", "exit 3"]).spawn().unwrap();
+        let _ = client.wait();
+        let mut report = Report::default();
+        let mut stopped = false;
+        let status = watch(
+            &mut client,
+            Some(Instant::now()),
+            || false,
+            &mut report,
+            |_| {
+                stopped = true;
+                None
+            },
+        );
+        assert!(!stopped && !report.interrupted && !report.timed_out);
+        assert_eq!(status.and_then(|s| s.code()), Some(3));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn watch_stops_a_running_agent_at_the_deadline_and_ctrl_c_wins_over_it() {
+        for interrupt in [false, true] {
+            let mut client = Command::new("sleep").arg("30").spawn().unwrap();
+            let mut report = Report::default();
+            let status = watch(
+                &mut client,
+                Some(Instant::now()),
+                || interrupt,
+                &mut report,
+                |c| {
+                    let _ = c.kill();
+                    c.wait().ok()
+                },
+            );
+            assert!(status.is_some(), "interrupt {interrupt}");
+            assert_eq!(report.interrupted, interrupt);
+            assert_eq!(report.timed_out, !interrupt);
+        }
     }
 
     fn connection(name: &str, url: &str) -> litellm::Connection {

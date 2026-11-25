@@ -45,7 +45,7 @@ starts() { case $1 in "$2"*) return 0 ;; esac; return 1; }
 # --- static --------------------------------------------------------------------------------------------
 
 # The hosts each generic workload allows at run time: no gateway, because the connection kit adds it.
-OC_ALLOW='registry.npmjs.org *.npmjs.org models.dev github.com *.github.com *.githubusercontent.com plugins.gradle.org plugins-artifacts.gradle.org ports.ubuntu.com archive.ubuntu.com security.ubuntu.com download.docker.com'
+OC_ALLOW='registry.npmjs.org *.npmjs.org models.dev models.opencode.ai github.com *.github.com *.githubusercontent.com plugins.gradle.org plugins-artifacts.gradle.org ports.ubuntu.com archive.ubuntu.com security.ubuntu.com download.docker.com'
 # claude-litellm's api.anthropic.com is WebFetch's domain check, not a gateway.
 CL_ALLOW='downloads.claude.ai code.claude.com api.anthropic.com plugins.gradle.org plugins-artifacts.gradle.org ports.ubuntu.com archive.ubuntu.com security.ubuntu.com download.docker.com'
 PI_ALLOW='registry.npmjs.org plugins.gradle.org plugins-artifacts.gradle.org ports.ubuntu.com archive.ubuntu.com security.ubuntu.com download.docker.com'
