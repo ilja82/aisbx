@@ -46,7 +46,7 @@ $ cargo clippy --workspace --all-targets -- -D warnings
 $ sh tests/workspace/layout-test.sh
 $ sh tests/kit-hooks/claude-workloads-test.sh      # one script per kit topic
 $ sh tests/repo-skills-test.sh
-$ sh tests/step-test.sh                           # one live checks step; skips when sbx is not signed in
+$ sh tests/step-test.sh                           # the step protocol live, 16 sandboxes; skips when sbx is not signed in
 ```
 
 - The launchers run `cargo build --release -p aisbx` and `cargo build --release -p aisbx-ui`.

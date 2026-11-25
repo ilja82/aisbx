@@ -122,6 +122,7 @@ pub struct Registry {
     doc: Document,
     dirty: bool,
     unreadable: bool,
+    on_disk: bool,
     scratch: bool,
 }
 
@@ -132,19 +133,22 @@ impl Registry {
     }
 
     fn read(path: PathBuf) -> Self {
-        let (doc, unreadable) = match fs::read_to_string(&path) {
+        let (doc, unreadable, on_disk) = match fs::read_to_string(&path) {
             Ok(text) => match serde_json::from_str(&text) {
-                Ok(doc) => (doc, false),
-                Err(_) => (Document::default(), true),
+                Ok(doc) => (doc, false, true),
+                Err(_) => (Document::default(), true, true),
             },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Document::default(), false),
-            Err(_) => (Document::default(), true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                (Document::default(), false, false)
+            }
+            Err(_) => (Document::default(), true, true),
         };
         Self {
             path,
             doc,
             dirty: false,
             unreadable,
+            on_disk,
             scratch: false,
         }
     }
@@ -158,6 +162,7 @@ impl Registry {
             doc: Document::default(),
             dirty: false,
             unreadable: false,
+            on_disk: false,
             scratch: false,
         }
     }
@@ -279,6 +284,11 @@ impl Registry {
 
     pub fn is_unreadable(&self) -> bool {
         self.unreadable
+    }
+
+    /// Whether `registry.json` existed when this registry was read, readable or not.
+    pub fn was_on_disk(&self) -> bool {
+        self.on_disk
     }
 
     pub fn record_clipboard(&mut self, key: &str) -> Result<()> {
@@ -663,6 +673,21 @@ mod tests {
     }
 
     #[test]
+    fn a_registry_knows_whether_its_file_was_there() {
+        let dir = std::env::temp_dir().join(format!("aisbx-tests-on-disk-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        assert!(!Registry::at(&dir).was_on_disk());
+        fs::write(dir.join("registry.json"), "{}").unwrap();
+        assert!(Registry::at(&dir).was_on_disk());
+        fs::write(dir.join("registry.json"), "{ not json").unwrap();
+        let unreadable = Registry::at(&dir);
+        assert!(unreadable.was_on_disk() && unreadable.is_unreadable());
+        assert!(!Registry::empty().was_on_disk());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn the_last_litellm_connection_round_trips_and_clears() {
         let doc: Document =
             serde_json::from_str(r#"{"ui": {"last_litellm": "acme"}}"#).expect("parses");
@@ -671,6 +696,7 @@ mod tests {
             doc,
             dirty: false,
             unreadable: false,
+            on_disk: false,
             scratch: false,
         };
         assert_eq!(reg.last_litellm(), Some("acme"));
@@ -707,6 +733,7 @@ mod tests {
             doc: back,
             dirty: false,
             unreadable: false,
+            on_disk: false,
             scratch: false,
         };
         assert_eq!(reg.extra_folders("a"), specs);

@@ -306,6 +306,12 @@ pub struct KitsAnswers {
     /// What each host-cache addon would mount on this host, parallel to `addons` (`None` for other
     /// addons). Worked out when the form opens; a kit that would mount nothing cannot be ticked.
     pub host: Vec<Option<crate::model::HostDetect>>,
+    /// Per backend kit, whether its last create had the status line.
+    pub status_line_saved: BTreeMap<String, bool>,
+    /// The backend whose status-line choice the tick shows ([`CreateForm::sync_status_line`]).
+    pub status_line_for: Option<usize>,
+    /// The status line was switched by hand in this form, so a backend change keeps it.
+    pub status_line_touched: bool,
 }
 
 /// Step 6: the label and the per-sandbox options.
@@ -590,6 +596,22 @@ impl CreateForm {
         true
     }
 
+    /// After a backend change: the status line takes that backend's last create's choice, else
+    /// the default (on), unless it was switched by hand in this form.
+    pub(crate) fn sync_status_line(&mut self, catalog: &Catalog) {
+        let backend = self.harness.backend;
+        if self.kits.status_line_touched || self.kits.status_line_for == Some(backend) {
+            return;
+        }
+        self.kits.status_line_for = Some(backend);
+        let Some(i) = status_line_kit(catalog) else {
+            return;
+        };
+        let saved = (catalog.backends.get(backend))
+            .and_then(|b| self.kits.status_line_saved.get(&b.kit.name));
+        self.kits.addons[i] = saved.copied().unwrap_or(true);
+    }
+
     /// The answers the next form starts from ([`crate::state::CreateDefaults`]).
     pub fn defaults(&self, catalog: &Catalog) -> crate::state::CreateDefaults {
         let backend = (catalog.backends.get(self.harness.backend))
@@ -638,6 +660,10 @@ impl CreateForm {
         }
         let wanted = defaults.addons.get(&defaults.backend);
         let status_line = status_line_kit(catalog);
+        self.kits.status_line_saved = (defaults.addons.iter())
+            .map(|(kit, addons)| (kit.clone(), addons.iter().any(|a| a == STATUS_LINE_KIT)))
+            .collect();
+        self.kits.status_line_for = Some(backend);
         for (i, addon) in catalog.addons.iter().enumerate() {
             let on = match wanted {
                 Some(wanted) => {
@@ -658,6 +684,9 @@ impl CreateForm {
         ws.no_mcp = crate::sbx::is_no_mcp(&defaults.mcp);
         for (on, server) in ws.static_mcp.iter_mut().zip(&ws.mcp) {
             *on = !ws.no_mcp && defaults.mcp.contains(&server.name);
+        }
+        if !defaults.mcp.is_empty() && !ws.static_mcp.contains(&true) {
+            ws.no_mcp = true;
         }
         self.refresh_auto_name(catalog);
         true
@@ -3700,6 +3729,39 @@ mod tests {
         );
         let off = prefilled(Some(&[]));
         assert!(!off.fold_open(CreateRow::AdvancedFold));
+    }
+
+    #[test]
+    fn a_backend_change_takes_that_backends_own_status_line_choice() {
+        let (catalog, mut f) = status_line_form("pi-local");
+        let mut defaults = crate::state::CreateDefaults {
+            backend: "pi-local".into(),
+            ..Default::default()
+        };
+        defaults.addons.insert("pi-local".into(), Vec::new());
+        defaults.addons.insert("claude-litellm".into(), Vec::new());
+        defaults
+            .addons
+            .insert("claude-local".into(), vec![STATUS_LINE_KIT.into()]);
+        assert!(f.apply_defaults(&catalog, &defaults, crate::sbx::SkillsMode::default()));
+        let switch = |f: &mut CreateForm, kit: &str| {
+            f.harness.backend = (catalog.backends.iter())
+                .position(|b| b.kit.name == kit)
+                .unwrap();
+            f.sync_status_line(&catalog);
+        };
+        switch(&mut f, "claude-anthropic");
+        assert!(
+            has_status_line(&f, &catalog),
+            "no create there yet: the default"
+        );
+        switch(&mut f, "claude-litellm");
+        assert!(!has_status_line(&f, &catalog), "its last create had none");
+        switch(&mut f, "claude-local");
+        assert!(has_status_line(&f, &catalog), "its last create had it");
+        f.toggle_status_line(&catalog);
+        switch(&mut f, "claude-anthropic");
+        assert!(!has_status_line(&f, &catalog), "a switch by hand stays");
     }
 
     /// The properties addon is an opt-in for each new sandbox: it is neither saved with the

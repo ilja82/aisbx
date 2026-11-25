@@ -564,10 +564,16 @@ check "7: one usage event per window for the first rate_limit_event, before the 
   python3 -c "
 import json
 ev = [json.loads(l) for l in open('$work/7/events.ndjson')]
-usage = [e for e in ev if e['kind'] == 'usage']
 first = next(i for i, e in enumerate(ev) if e['kind'] == 'agent' and e['line'].get('type') == 'rate_limit_event')
-windows = [e['window'] for e in usage]
-assert 'five_hour' in windows and 'seven_day' in windows and ev[first + 1]['kind'] == 'usage', usage
+info = ev[first]['line'].get('rate_limit_info', {})
+named = sorted(info.get('unifiedWindows') or {}) or [info['rateLimitType']]
+after = []
+for e in ev[first + 1:]:
+    if e['kind'] != 'usage':
+        break
+    after.append(e)
+assert sorted(e['window'] for e in after) == named, (named, after)
+usage = [e for e in ev if e['kind'] == 'usage']
 assert all(set(e) >= {'window', 'utilization', 'status', 'resets_at'} and e['phase'] == 'work' for e in usage), usage
 "
 check "7: after's file exists after the removal" [ -s "$work/7/ws/after.txt" ]

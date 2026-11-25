@@ -154,9 +154,13 @@ Read-only, so the agent cannot change artifacts that your later host builds use.
 
 With `host-gradle`, a small helper command is on the sandbox's `PATH`. It prints `dummy-token` and exits 0 for any
 arguments, so Gradle plugins that ask for a token do not fail offline. It is a link, made at every start, into
-`/usr/local/bin` or else `~/.local/bin`. A command of the same name that is not ours stays. When the folder is not on
-the `PATH` that non-interactive commands get, one line in `/etc/sandbox-persistent.sh` adds it, so the agent's shell
-commands find the helper too.
+`/usr/local/bin` or else `~/.local/bin`. When the folder is not on the `PATH` that non-interactive commands get, one
+line in `/etc/sandbox-persistent.sh` adds it, so the agent's shell commands find the helper too.
+
+The helper never hides a command of the same name that you or a kit installed. When the `PATH` already has such a
+command at a start, the start makes no link, and it removes the helper's link and line from an earlier start. A
+command that you install while the sandbox runs takes over at the next start. A shell that already finds such a
+command does not add the helper's folder.
 
 ### Limits of the Maven and Gradle caches
 
@@ -196,8 +200,8 @@ mounts that folder read-only. At every start, the sandbox copies the file to `~/
   folder in either direction (it holds the folder, or lies inside it): a sandbox without the addon would see the copy.
   The one exception is the addon's own read-only mount of the folder on a sandbox that has the addon. A mount that
   cannot be resolved is refused too, naming the sandbox; if it is the addon's own folder that is gone, rebuild that
-  sandbox. aisbx reads the current mounts from `sbx` first, and copies nothing when it cannot. Set `XDG_STATE_HOME`
-  to a folder outside them. For an existing sandbox, `aisbx up` only warns.
+  sandbox. aisbx reads the current mounts from `sbx` first, and copies nothing when it cannot (`aisbx up` exits
+  125). Set `XDG_STATE_HOME` to a folder outside them. For an existing sandbox, `aisbx up` only warns.
 - A new sandbox without the addon is refused when its workspace or an extra folder holds a copy an earlier sandbox
   left in the state folder.
 - A rebuild adds the copy's mount when you confirm, together with the copy. A sandbox without a host folder
@@ -325,8 +329,12 @@ A Claude Code mod draws these rows: the plugin `aisbx-statusline` in `/usr/local
 `subagent-statusline.sh` for each row. The install hook lists that folder in `env.CLAUDE_CODE_PLUGIN_DIRS` of
 `~/.claude/settings.json`, after any folders already there, and removes the kit's older `subagentStatusLine` entry,
 which Claude Code deprecated. An entry of your own stays. To get the default rows back, remove the folder from
-`CLAUDE_CODE_PLUGIN_DIRS`. A Claude Code without mods, or a `CLAUDE_CODE_PLUGIN_DIRS` set in the process environment,
-shows the default rows.
+`CLAUDE_CODE_PLUGIN_DIRS`. A Claude Code without mods shows the default rows.
+
+Claude Code reads `env` in `settings.json` over the process environment. So with `statusline`, a
+`CLAUDE_CODE_PLUGIN_DIRS` that a kit of yours sets with `ENV` no longer applies, and its plugins do not load. Add
+those folders to `CLAUDE_CODE_PLUGIN_DIRS` in `~/.claude/settings.json` instead, for example from your kit's install
+hook. The `statusline` hook keeps the folders that are already there.
 
 ### Where the label and the kits come from
 

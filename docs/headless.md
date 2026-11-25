@@ -249,8 +249,9 @@ with exit 2 and names the option to drop:
 | `--no-slash-commands` | `--disable-slash-commands` | refused | refused |
 | `--no-session` | `--no-session-persistence` | `--no-session` | refused |
 
-The system prompt is part of the agent's command line, so the sandbox's process list shows it. Keep secrets out of
-it. A lean run on Claude Code, with the plain `sbx` equivalent being `sbx exec NAME claude -p … --tools "" …`:
+The system prompt is part of the agent's command line, so the process lists of the sandbox and of the host show it.
+Keep secrets out of it. A lean run on Claude Code, with the plain `sbx` equivalent being
+`sbx exec NAME claude -p … --tools "" …`:
 
 ```console
 $ aisbx run nightly --prompt-file task.md --model opus --effort xhigh \

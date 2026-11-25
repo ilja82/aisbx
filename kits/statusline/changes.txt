@@ -1,0 +1,1 @@
+The status bar now draws each subagent's row through a Claude Code mod instead of the old setting.

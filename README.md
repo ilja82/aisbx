@@ -24,7 +24,7 @@ sandbox with your project folder in it.
 aisbx builds on these sbx features. It does not replace them.
 
 - **Isolation:** each sandbox is a small VM with your project folder mounted. The agent cannot reach the rest of
-  the host.
+  the host, apart from the clipboard where you allow it ([The host clipboard](docs/sandboxes.md#the-host-clipboard-t)).
 - **Agents in the sandbox:** sbx runs the agent harness inside the VM and builds its image from **kits**.
 - **Keys stay on the host:** `sbx secret` stores keys and tokens in the host keychain. The sbx proxy on the host puts
   them into the agent's requests, so the agent never sees them ([Credentials](docs/accounts.md#credentials)).
@@ -62,6 +62,8 @@ aisbx builds on these sbx features. It does not replace them.
 - **No telemetry** from the agents, and sbx's own telemetry off unless you turned it on
   ([sbx's own telemetry](docs/network.md#sbxs-own-telemetry-t)). Keys stay in the host keychain
   ([one exception](docs/agents.md#antigravity-agy)).
+- **Copy and image paste** between sandboxes and your clipboard, on from the first start of a new install; `T` switches
+  them ([The host clipboard](docs/sandboxes.md#the-host-clipboard-t)).
 
 ## How it fits together
 

@@ -52,14 +52,24 @@ text_clean() {   # text_clean <root>: no file under it names what the helper is 
   scan_root=$1
   forbidden="(^|[^a-z])$(printf 'ga%s' r)([^a-z]|$)|$tool_name|$(printf 'artifact%sregistry' ' ?')"
   listing=$(mktemp) || return 1
-  find "$scan_root" \( -name target -o -name .git -o -name node_modules \) -prune -o -type f -print > "$listing"
+  if [ -e "$scan_root/.git" ] && command -v git >/dev/null 2>&1; then
+    git -C "$scan_root" -c core.quotePath=false ls-files -co --exclude-standard > "$listing.git" || {
+      rm -f "$listing" "$listing.git"
+      return 1
+    }
+    while IFS= read -r rel; do printf '%s/%s\n' "$scan_root" "$rel"; done < "$listing.git" > "$listing"
+    rm -f "$listing.git"
+  else
+    find "$scan_root" \( -name target -o -name .git -o -name node_modules \) -prune -o -type f -print > "$listing"
+  fi
   hits=0
   while IFS= read -r file; do
+    [ -f "$file" ] || continue
     tokens=$(allowed_tokens "${file#"$scan_root"/}")
     if [ -n "$tokens" ]; then
       lead="[[:space:]\"']|^[[:space:]]*[A-Za-z_][A-Za-z_0-9]*=|\\\$\\{[A-Za-z_][A-Za-z_0-9]*:-"
       strip="s#(^|$lead)($tokens)(\$|[[:space:]\"')}])#\\1\\3#g"
-      case $file in *.dockerfile) strip="/^COPY /{$strip}" ;; esac
+      case $file in *.dockerfile) strip="/^COPY /{$strip;}" ;; esac
     else
       strip="s#^\$##"
     fi
@@ -305,14 +315,25 @@ behaviour() {
   check "the stub prints dummy-token with any arguments" same "$("$stub" auth print-access-token --x)" "dummy-token"
   "$stub" a b >/dev/null
   check "the stub exits 0" same "$?" 0
+  bash_bin=$(command -v bash 2>/dev/null)
+  mkdir -p "$scratch/empty1" "$scratch/empty2"
+  empty=$scratch/empty1
   fresh stubs
   S=$H/stub-src
   mkdir -p "$S" "$H/sys bin"
   cp "$stub" "$S/$tool_name"
   stub_run() {   # stub_run <system bin dir> <PATH of a non-interactive bash>
-    env HOME="$H" HOST_GRADLE_STUB="$S/$tool_name" HOST_GRADLE_SYSTEM_BIN="$1" HOST_GRADLE_BASH_PATH="${2:-/usr/bin}" \
+    env HOME="$H" HOST_GRADLE_STUB="$S/$tool_name" HOST_GRADLE_SYSTEM_BIN="$1" HOST_GRADLE_BASH_PATH="${2:-$empty}" \
       HOST_GRADLE_ENV_FILE="$H/persistent.sh" sh "$stub_hook" >> "$scratch/hook.log" 2>&1
     rc=$?
+  }
+  by_name() {   # by_name <PATH> <command>: a fresh non-interactive bash that reads the persistent file
+    env -i HOME="$H" PATH="$1" BASH_ENV="$H/persistent.sh" "$bash_bin" -c "$2" </dev/null 2>/dev/null
+  }
+  other_command() {   # other_command <dir> <word>: a command of the helper's name that prints <word>
+    mkdir -p "$1"
+    printf '#!/bin/sh\necho %s\n' "$2" > "$1/$tool_name"
+    chmod 755 "$1/$tool_name"
   }
   stub_run "$H/sys bin" "$H/sys bin"
   check "exit 0" same "$rc" 0
@@ -322,75 +343,79 @@ behaviour() {
   check "a folder on the PATH needs no export" absent "$H/persistent.sh"
   stub_run "$H/sys bin" "$H/sys bin"
   check "a second run exits 0 and keeps the link" links_to "$H/sys bin/$tool_name" "$S/$tool_name"
+  other_command "$H/later" later
+  stub_run "$H/sys bin" "$H/sys bin:$H/later"
+  check "another command later on the PATH than the link: exit 0" same "$rc" 0
+  check "…the link goes" absent "$H/sys bin/$tool_name"
+  check "…and the other command stays" grep -q later "$H/later/$tool_name"
   fresh stubs2
   mkdir -p "$H/sys"
   printf 'mine\n' > "$H/sys/$tool_name"
   stub_run "$H/sys" "$H/sys"
-  check "a foreign command stays" same "$(cat "$H/sys/$tool_name")" mine
+  check "a foreign file that is no command stays" same "$(cat "$H/sys/$tool_name")" mine
   check "…and the home folder gets the link instead" links_to "$H/.local/bin/$tool_name" "$S/$tool_name"
   rm -rf "$H/.local" "$H/persistent.sh" "$H/sys/$tool_name"
   ln -s /elsewhere "$H/sys/$tool_name"
   stub_run "$H/sys" "$H/sys"
   check "a foreign link stays" same "$(readlink "$H/sys/$tool_name")" /elsewhere
   fresh stubs3
-  stub_run "/nonexistent/dir" "/usr/bin"
+  stub_run "/nonexistent/dir" "$empty"
   check "no writable system folder: the home folder is made" links_to "$H/.local/bin/$tool_name" "$S/$tool_name"
   check "…and one export line goes to the persistent file" same "$(grep -c 'export PATH=' "$H/persistent.sh")" 1
-  stub_run "/nonexistent/dir" "/usr/bin"
+  stub_run "/nonexistent/dir" "$empty"
   check "a second run exits 0" same "$rc" 0
   check "…keeps the link" links_to "$H/.local/bin/$tool_name" "$S/$tool_name"
   check "…and adds no second export line" same "$(grep -c 'export PATH=' "$H/persistent.sh")" 1
-  if command -v bash >/dev/null 2>&1; then
-    mkdir -p "$scratch/empty1" "$scratch/empty2"
-    found=$(env -i HOME="$H" PATH="$scratch/empty1:$scratch/empty2" BASH_ENV="$H/persistent.sh" "$(command -v bash)" -c "$tool_name x" 2>/dev/null)
+  other_command "$H/later" later
+  if [ -n "$bash_bin" ]; then
+    found=$(by_name "$scratch/empty1:$scratch/empty2" "$tool_name x")
     check "a fresh non-interactive bash runs the helper by name" same "$found" "dummy-token"
-    found=$(env -i HOME="$H" PATH="$scratch/empty1:$scratch/empty2:$H/.local/bin" BASH_ENV="$H/persistent.sh" "$(command -v bash)" -c 'echo "$PATH"')
+    found=$(by_name "$scratch/empty1:$scratch/empty2:$H/.local/bin" 'echo "$PATH"')
     check "…and the export does not repeat a folder already on the PATH" same "$found" "$scratch/empty1:$scratch/empty2:$H/.local/bin"
+    found=$(by_name "$scratch/empty1:$H/later" "$tool_name x")
+    check "…and a shell that finds another command of that name runs that one" same "$found" "later"
   fi
+  stub_run "/nonexistent/dir" "$H/later"
+  check "another command on the PATH at a later start: exit 0" same "$rc" 0
+  check "…the helper's link goes" absent "$H/.local/bin/$tool_name"
+  check "…and its export line goes" same "$(grep -c 'export PATH=' "$H/persistent.sh")" 0
   fresh stubs5
-  mkdir -p "$H/foreign" "$H/.local/bin"
-  printf '#!/bin/sh\necho foreign\n' > "$H/foreign/$tool_name"
-  chmod 755 "$H/foreign/$tool_name"
+  other_command "$H/foreign" foreign
   stub_run "/nonexistent/dir" "$H/foreign:$H/.local/bin"
-  check "a foreign command earlier on the PATH: exit 0" same "$rc" 0
+  check "another command on the PATH at the first start: exit 0" same "$rc" 0
   check "…it stays" grep -q foreign "$H/foreign/$tool_name"
-  check "…the link is made" links_to "$H/.local/bin/$tool_name" "$S/$tool_name"
-  check "…and one line puts the folder first" same "$(grep -c 'export PATH=' "$H/persistent.sh")" 1
-  if command -v bash >/dev/null 2>&1; then
-    found=$(env -i HOME="$H" PATH="$H/foreign:$H/.local/bin:/usr/bin:/bin" BASH_ENV="$H/persistent.sh" bash -c "$tool_name x" 2>/dev/null)
-    check "…so a name-based call runs the helper" same "$found" "dummy-token"
-    found=$(env -i HOME="$H" PATH="$H/.local/bin:$H/foreign:/usr/bin" BASH_ENV="$H/persistent.sh" bash -c 'echo "$PATH"')
-    check "…and does not repeat once the folder is first" same "$found" "$H/.local/bin:$H/foreign:/usr/bin"
+  check "…no link is made" absent "$H/.local/bin/$tool_name"
+  check "…and no export line" absent "$H/persistent.sh"
+  if [ -n "$bash_bin" ]; then
+    check "…so a name-based call runs it" same "$(by_name "$H/foreign:$H/.local/bin" "$tool_name x")" "foreign"
   fi
+  fresh stubs9
+  stub_run "/nonexistent/dir" "$S"
+  check "the helper's own folder on the PATH is no other command" links_to "$H/.local/bin/$tool_name" "$S/$tool_name"
   fresh stubs7
   mkdir -p "$H/.local/bin"
   stub_run "/nonexistent/dir" "$H/.local/bin"
   check "the home folder first on the startup PATH: exit 0" same "$rc" 0
   check "…still writes the guarded export for later shells" same "$(grep -c 'export PATH=' "$H/persistent.sh")" 1
-  if command -v bash >/dev/null 2>&1; then
-    found=$(env -i HOME="$H" PATH=/usr/bin:/bin BASH_ENV="$H/persistent.sh" bash -c "$tool_name x" 2>/dev/null)
+  if [ -n "$bash_bin" ]; then
+    found=$(by_name "$empty" "$tool_name x")
     check "…so a later shell without that folder runs the helper" same "$found" "dummy-token"
   fi
   fresh stubs6
   printf 'export KEEP=1' > "$H/persistent.sh"
-  stub_run "/nonexistent/dir" "/usr/bin"
+  stub_run "/nonexistent/dir" "$empty"
   check "a persistent file without a final newline: exit 0" same "$rc" 0
   check "…keeps its own line whole" same "$(head -n 1 "$H/persistent.sh")" "export KEEP=1"
-  check "…and puts the export on a line of its own" same "$(grep -c '^case ' "$H/persistent.sh")" 1
-  if command -v bash >/dev/null 2>&1; then
-    found=$(env -i HOME="$H" PATH=/usr/bin:/bin BASH_ENV="$H/persistent.sh" bash -c "echo \$KEEP; $tool_name x" 2>&1)
+  check "…and puts the export on a line of its own" same "$(grep -c '^command -v ' "$H/persistent.sh")" 1
+  if [ -n "$bash_bin" ]; then
+    found=$(by_name "$empty" "echo \$KEEP; $tool_name x")
     check "…so the next non-interactive bash reads it and runs the helper" same "$found" "1
 dummy-token"
   fi
-  fresh stubs7
-  mkdir -p "$H/other"
-  printf '#!/bin/sh\necho other\n' > "$H/other/$tool_name"
-  chmod 755 "$H/other/$tool_name"
-  stub_run "/nonexistent/dir" "/usr/bin"
-  if command -v bash >/dev/null 2>&1; then
-    found=$(env -i HOME="$H" PATH="$H/other:/usr/bin:/bin" BASH_ENV="$H/persistent.sh" bash -c "$tool_name x" 2>/dev/null)
-    check "a PATH that changed after startup, with a foreign command first: the helper still wins" same "$found" "dummy-token"
-  fi
+  other_command "$H/other" other
+  stub_run "/nonexistent/dir" "$H/other"
+  check "the line goes again when another command comes: exit 0" same "$rc" 0
+  check "…and the file's own line stays" same "$(cat "$H/persistent.sh")" "export KEEP=1"
   fresh stubs4
   mkdir -p "$H/.local"
   : > "$H/.local/bin"

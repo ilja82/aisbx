@@ -320,7 +320,7 @@ fn staging_stops_when_a_mount_of_another_sandbox_cannot_be_read() {
     let other = r#"{"name":"other","agent":"claude-anthropic","kits":["/repo/kits/host-gradle"],"host_mounts":[{"host_path":5}]}"#;
     std::fs::write(rig.base.join("inspect.json.other"), other).unwrap();
     let out = rig.up(&["--kit", "host-gradle-properties"]);
-    assert!(!out.status.success());
+    assert_eq!(out.status.code(), Some(125), "{}", text(&out.stderr));
     assert!(text(&out.stderr).contains("other"), "{}", text(&out.stderr));
     assert!(staged(&rig).is_none());
     assert!(!rig.log().contains("create"), "{}", rig.log());
@@ -341,7 +341,7 @@ fn staging_stops_on_a_relative_source_or_a_missing_field_of_another_sandbox() {
         );
         std::fs::write(rig.base.join("inspect.json.other"), other).unwrap();
         let out = rig.up(&["--kit", "host-gradle-properties"]);
-        assert!(!out.status.success(), "{tag}");
+        assert_eq!(out.status.code(), Some(125), "{tag}: {}", text(&out.stderr));
         assert!(
             text(&out.stderr).contains("other"),
             "{tag}: {}",

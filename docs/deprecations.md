@@ -28,7 +28,7 @@ change. The pre-start sync of the picks warns nothing.
 | Old way | `aisbx up` created a sandbox in sbx's dynamic MCP mode: the agent could find and add the host's MCP servers. The create wizard opened with no MCP answer ticked, the same mode. |
 | Replacement | MCP is off by default: `aisbx up` passes `--static-mcp none`, and the wizard opens with *No MCP servers* ticked. `aisbx up --mcp` and unticking *No MCP servers* give the old mode ([MCP servers](sandboxes.md#mcp-servers), [`up` options](headless.md)). |
 | Your step | Add `--mcp` to each `aisbx up` that relies on the agent reaching the host's MCP servers. `--no-mcp` stays accepted and changes nothing; both flags together exit 2. In the wizard, untick *No MCP servers* once: the wizard remembers it. |
-| Deprecated in | the first release after 0.54.0.0 |
+| Deprecated in | 0.54.1.0 |
 
 Sandboxes that exist, the wizard's saved answers and rebuilds do not change. A saved empty MCP answer stays the
 dynamic mode. A create with neither flag prints one note on stderr; stdout does not change.
@@ -41,6 +41,7 @@ refuses an older sbx, and a row names that sbx release.
 
 | Break | sbx version | Your step |
 | --- | --- | --- |
+| aisbx 0.54.1.0 creates a sandbox without MCP servers unless you ask for them: `aisbx up` passes `--static-mcp none`, and the wizard opens with *No MCP servers* ticked ([`mcp-default`](#mcp-default)). This is a decision of aisbx, not of sbx. | none (aisbx) | Add `--mcp` to each `aisbx up` that needs the host's MCP servers. In the wizard, untick *No MCP servers* once. |
 | aisbx 0.54.1.0 needs sbx 0.54.1 or later and refuses an older sbx. | 0.54.1 | Upgrade sbx to 0.54.1 or later, then check it with `sbx version`. |
 | aisbx 0.54.0.0 switches every skill of the sbx skills store off, also the skills already in it: a sandbox gets a store skill only when you switch it on. Before, every sharing sandbox got every store skill. This is a decision of aisbx, not of sbx. | none (aisbx) | Press `K` and switch on the skills every sandbox should get, or press `i` on a sandbox to switch skills on for it alone ([Switches](skills.md#switches)). `aisbx skills on --global SKILL` does the same in a script. |
 | aisbx 0.54.0.0 needs sbx 0.54.0 or later and refuses an older sbx. | 0.54.0 | Upgrade sbx to 0.54.0 or later, then check it with `sbx version`. |

@@ -625,6 +625,9 @@ impl CreateForm {
                     .iter()
                     .map(|a| model::host_cache_detection_in(&a.kit.name, home))
                     .collect(),
+                status_line_saved: Default::default(),
+                status_line_for: None,
+                status_line_touched: false,
             },
             workspace: WorkspaceAnswers {
                 name: TextInput::default(),
@@ -651,6 +654,7 @@ impl CreateForm {
         if let Some(i) = crate::create::status_line_kit(catalog) {
             form.kits.addons[i] = true;
         }
+        form.kits.status_line_for = Some(form.harness.backend);
         form.refresh_auto_name(catalog);
         form
     }
@@ -1027,6 +1031,7 @@ impl CreateForm {
     pub(crate) fn toggle_status_line(&mut self, catalog: &Catalog) {
         if let Some(i) = self.status_line_addon(catalog) {
             self.toggle_addon(i);
+            self.kits.status_line_touched = true;
         }
     }
 
@@ -2873,6 +2878,9 @@ pub fn clipboard_status(change: &sbx::ClipboardChange) -> Option<(String, bool)>
     if !change.turned_on.is_empty() {
         parts.push(format!("{} on; off in T", change.turned_on.join(", ")));
     }
+    if !change.left_off.is_empty() {
+        parts.push(format!("{} left off; on in T", change.left_off.join(", ")));
+    }
     if !change.failed.is_empty() {
         let keys: Vec<&str> = change.failed.iter().map(|(key, _)| *key).collect();
         parts.push(format!("{} failed", keys.join(", ")));
@@ -3623,6 +3631,7 @@ impl App {
                     if let Some(names) = snapshot.secrets.take() {
                         self.secrets = Some(names);
                     }
+                    snapshot.secrets = self.secrets.clone();
                     self.mcp = std::mem::take(&mut snapshot.mcp);
                     let store_read = match snapshot.skills.take() {
                         Some(store) => {
@@ -6037,6 +6046,7 @@ impl App {
         };
         let before = form.connection.litellm.clone();
         form.sync_connections(&catalog);
+        form.sync_status_line(&catalog);
         let local = form.conn_kind(&catalog) == Some(crate::litellm::Kind::Local);
         if local && !form.connection.discovered {
             form.take_found(&catalog, crate::local::discover());
@@ -12264,35 +12274,38 @@ mod tests {
     #[test]
     fn the_clipboard_notice_fits_80_columns_in_every_combination() {
         let both = vec![sbx::CLIPBOARD_TEXT_COPY, sbx::CLIPBOARD_IMAGE_PASTE];
-        let ons = [
-            Vec::new(),
+        let some = [
             vec![sbx::CLIPBOARD_TEXT_COPY],
             vec![sbx::CLIPBOARD_IMAGE_PASTE],
             both.clone(),
         ];
-        for turned_on in ons {
-            for failed in [
-                Vec::new(),
-                vec![sbx::CLIPBOARD_TEXT_COPY, sbx::CLIPBOARD_IMAGE_PASTE],
-            ] {
+        let mut outcomes = vec![(Vec::new(), Vec::new())];
+        for keys in &some {
+            outcomes.push((keys.clone(), Vec::new()));
+            outcomes.push((Vec::new(), keys.clone()));
+        }
+        for (turned_on, left_off) in outcomes {
+            for failed in [Vec::new(), both.clone()] {
                 let failed: Vec<(&'static str, String)> = failed
                     .into_iter()
-                    .filter(|k| !turned_on.contains(k))
+                    .filter(|k| !turned_on.contains(k) && !left_off.contains(k))
                     .map(|k| (k, "denied".to_string()))
                     .collect();
                 for not_saved in [false, true] {
                     for registry_unreadable in [false, true] {
-                        if registry_unreadable && (!turned_on.is_empty() || !failed.is_empty()) {
+                        let handled = !turned_on.is_empty() || !left_off.is_empty();
+                        if registry_unreadable && (handled || !failed.is_empty()) {
                             continue;
                         }
                         let change = sbx::ClipboardChange {
                             turned_on: turned_on.clone(),
+                            left_off: left_off.clone(),
                             failed: failed.clone(),
                             not_saved,
                             registry_unreadable,
                         };
                         let Some((text, error)) = clipboard_status(&change) else {
-                            assert!(turned_on.is_empty() && failed.is_empty());
+                            assert!(!handled && failed.is_empty());
                             continue;
                         };
                         let footer = " ✓ ".chars().count() + text.chars().count();
@@ -12301,12 +12314,11 @@ mod tests {
                             error,
                             !failed.is_empty() || not_saved || registry_unreadable
                         );
-                        for key in &turned_on {
+                        for key in turned_on.iter().chain(&left_off) {
                             assert!(text.contains(key), "{text}");
                         }
-                        if !turned_on.is_empty() {
-                            assert!(text.contains("off in T"), "{text}");
-                        }
+                        assert_eq!(text.contains("off in T"), !turned_on.is_empty(), "{text}");
+                        assert_eq!(text.contains("on in T"), !left_off.is_empty(), "{text}");
                         for (key, _) in &failed {
                             assert!(text.contains(key) && text.contains("failed"), "{text}");
                         }
@@ -12315,6 +12327,20 @@ mod tests {
             }
         }
         assert_eq!(clipboard_status(&sbx::ClipboardChange::default()), None);
+    }
+
+    #[test]
+    fn on_an_older_host_the_notice_says_both_keys_stay_off_and_where_to_turn_them_on() {
+        let change = sbx::ClipboardChange {
+            left_off: vec![sbx::CLIPBOARD_TEXT_COPY, sbx::CLIPBOARD_IMAGE_PASTE],
+            ..sbx::ClipboardChange::default()
+        };
+        let (text, error) = clipboard_status(&change).unwrap();
+        assert!(!error);
+        assert_eq!(
+            text,
+            "clipboard.textCopy, clipboard.imagePaste left off; on in T"
+        );
     }
 
     #[test]
@@ -17732,6 +17758,30 @@ mod tests {
     }
 
     #[test]
+    fn every_wizard_input_gives_a_new_backend_its_own_status_line_choice() {
+        let mut app = App::for_test(Catalog::load().unwrap(), Vec::new());
+        app.cwd = PathBuf::from("/proj");
+        app.open_create();
+        let catalog = Arc::clone(&app.catalog);
+        let mut defaults = crate::state::CreateDefaults {
+            backend: "pi-local".into(),
+            ..Default::default()
+        };
+        defaults.addons.insert("pi-local".into(), Vec::new());
+        defaults.addons.insert("claude-litellm".into(), Vec::new());
+        let skills = app.skills_default;
+        assert!(create_form(&mut app).apply_defaults(&catalog, &defaults, skills));
+        let on = |app: &mut App| {
+            let form = create_form(app);
+            (form.selected_addons(&catalog).iter()).any(|a| a == crate::create::STATUS_LINE_KIT)
+        };
+        wizard_for(&mut app, "claude-anthropic", CreateStep::Workspace);
+        assert!(on(&mut app), "no create there yet: the default");
+        wizard_for(&mut app, "claude-litellm", CreateStep::Workspace);
+        assert!(!on(&mut app), "its last create had none");
+    }
+
+    #[test]
     fn a_config_file_row_opens_the_file_in_an_editor_and_delete_resets_it() {
         use crate::litellm::{Agent, FileState};
         let file_help = |app: &App| {
@@ -18066,6 +18116,42 @@ mod tests {
             };
             assert_eq!(form.workspace.no_mcp, none, "{saved}");
             assert_eq!(form.workspace.static_mcp, [ticked], "{saved}");
+        }
+    }
+
+    #[test]
+    fn saved_servers_the_host_list_lacks_start_with_no_mcp_not_the_dynamic_mode() {
+        for (listed, none, ticked) in [
+            (Vec::new(), true, Vec::new()),
+            (vec!["github"], true, vec![false]),
+            (vec!["notion", "github"], false, vec![true, false]),
+        ] {
+            let mut app = app_on(&[crate::testkit::acme()], Vec::new());
+            app.mcp = (listed.iter())
+                .map(|name| sbx::McpServer {
+                    name: name.to_string(),
+                    status: "ready".into(),
+                    ..sbx::McpServer::default()
+                })
+                .collect();
+            app.open_create();
+            let catalog = Arc::clone(&app.catalog);
+            let Screen::Create(form) = &mut app.screen else {
+                panic!("the create form is open")
+            };
+            let mut defaults = form.defaults(&catalog);
+            defaults.mcp = vec!["notion".into()];
+            app.registry.set_create_defaults(defaults);
+            app.screen = Screen::List;
+            app.open_create();
+            let Screen::Create(form) = &app.screen else {
+                panic!("the create form is open")
+            };
+            assert_eq!(form.workspace.no_mcp, none, "{listed:?}");
+            assert_eq!(form.workspace.static_mcp, ticked, "{listed:?}");
+            if none {
+                assert_eq!(form.selected_mcp(), ["none"], "{listed:?}");
+            }
         }
     }
 
@@ -21578,5 +21664,91 @@ mod history_tests {
         app.tick();
         assert!(app.histories.get("a").is_none(), "stopped");
         assert!(app.histories.get("b").is_none(), "not listed");
+    }
+}
+
+#[cfg(test)]
+mod refresh_tests {
+    use super::*;
+    use crate::model::{Auth, CardNote, Raw, Snapshot};
+
+    fn on_token(token: &str, secrets: Option<sbx::Secrets>) -> Snapshot {
+        let catalog = Catalog::load().unwrap();
+        let kits = [
+            catalog.kits_dir.join("claude-token"),
+            crate::tokens::kit_dir(token),
+        ]
+        .map(|p| p.display().to_string());
+        Snapshot {
+            sandboxes: vec![Raw {
+                ls: sbx::LsEntry {
+                    name: "t".into(),
+                    agent: "claude-token".into(),
+                    status: "stopped".into(),
+                    workspaces: vec!["/proj".into()],
+                    ..Default::default()
+                },
+                inspect: Some(sbx::InspectEntry {
+                    kits: kits.to_vec(),
+                    ..Default::default()
+                }),
+            }],
+            kit_hashes: Default::default(),
+            secrets,
+            mcp: Vec::new(),
+            skills: None,
+            skills_default: sbx::SkillsMode::default(),
+            approvals: None,
+            policy_needs_init: None,
+            fetchers: Vec::new(),
+            disk: None,
+        }
+    }
+
+    fn holding(placeholders: &[String]) -> sbx::Secrets {
+        sbx::Secrets {
+            services: Vec::new(),
+            custom: placeholders
+                .iter()
+                .map(|placeholder| sbx::CustomSecret {
+                    scope: sbx::GLOBAL_SCOPE.into(),
+                    targets: vec![sbx::TOKEN_HOST.into()],
+                    env: String::new(),
+                    placeholder: placeholder.clone(),
+                    masked: "sk-ant***".into(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_refresh_keeps_a_token_sandboxs_account_also_when_the_secret_store_cannot_be_read() {
+        let mut app = App::for_test(Catalog::load().unwrap(), Vec::new());
+        app.tick();
+        let placeholder = sbx::named_token_placeholder("private");
+        let stored = Some(Auth::Token {
+            name: "private".into(),
+            placeholder: placeholder.clone(),
+            stored: true,
+        });
+        let first = on_token("private", Some(holding(std::slice::from_ref(&placeholder))));
+        app.tx.send(Ok(first)).unwrap();
+        app.tick();
+        assert_eq!(app.sandboxes[0].auth, stored);
+        app.select(0);
+        assert!(app.can_edit_auth());
+
+        app.tx.send(Ok(on_token("private", None))).unwrap();
+        app.tick();
+        assert_eq!(app.sandboxes[0].auth, stored, "the last answer stands");
+
+        app.tx
+            .send(Ok(on_token("private", Some(holding(&[])))))
+            .unwrap();
+        app.tick();
+        let gone = app.sandboxes[0].auth.clone().unwrap();
+        assert!(gone.broken(), "{gone:?}");
+        assert_eq!(app.sandboxes[0].card_note(0), Some(CardNote::NoToken));
+        assert!(app.can_edit_auth());
     }
 }
