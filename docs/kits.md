@@ -34,6 +34,7 @@ Pick the kits in the create wizard (`n`, or **New sandbox**). You can add an *ad
 | `headroom` | stackable mixin | **unmeasured**: the headroom context-compression proxy for Claude Code's model requests ([Headroom](addons.md#headroom-context-compression-proxy-unmeasured)) |
 | `ponytail` | stackable mixin | the Ponytail "lazy senior dev" prompt and commands for Claude Code and OpenCode |
 | `host-gradle` | stackable mixin | the host's Gradle caches and wrapper dists, read-only |
+| `host-gradle-properties` | stackable mixin, opt-in | a copy of the host's `~/.gradle/gradle.properties`, which may hold secrets ([Host Gradle properties file](addons.md#host-gradle-properties-file)) |
 | `host-maven` | stackable mixin | the host's Maven repository and wrapper dists, read-only |
 | `host-npm` | stackable mixin | the host's npm cache, read-only, through a sandbox-local overlay |
 | `host-pip` | stackable mixin | the host's pip and uv caches, read-only, through sandbox-local overlays |

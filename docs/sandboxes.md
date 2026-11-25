@@ -27,9 +27,9 @@ Press `e` to add or remove kits.
 
 | Kit | What an add does |
 | --- | --- |
-| `jdk25`, `rtk`, `statusline` | adds the kit live, in about a minute; the workspace, session history and installed tools stay |
+| `jdk25`, `rtk`, `statusline`, `swiftlint` | adds the kit live, in about a minute; the workspace, session history and installed tools stay |
 | `web`, `remote-dev`, `rust`, `headroom`, `ponytail` | fails, because the kit widens the network rules; the dashboard offers a rebuild |
-| `host-npm`, `host-pip`, `host-gradle`, `host-maven`, `host-skills` | fails, because the kit needs mounts fixed at creation; the dashboard offers a rebuild |
+| `host-npm`, `host-pip`, `host-gradle`, `host-gradle-properties`, `host-maven`, `host-skills` | fails, because the kit needs mounts fixed at creation; the dashboard offers a rebuild |
 
 To remove a kit, rebuild: sbx has no "kit remove".
 
@@ -203,17 +203,23 @@ first. Each connection creates its own [mountless sandbox](#mountless-sandboxes)
 
 ## The host clipboard (`T`)
 
-sbx's own default keeps sandboxes away from your clipboard. The first time `aisbx` or `aisbx-ui` starts on a host (or
-`aisbx up`, `run`, `step`, `ls`, `status`, `stop` or `rm` runs), it turns each of the two switches below on, if sbx
-reports its default (off) and no environment variable sets it, and says so once. It does this once per switch: it
-records the switch in `registry.json` in its state folder and never reads or sets that switch at start again. Switch
-one off with `T` (or *Settings* in the window's header) or with `sbx settings set <key> false`, and it stays off at
-every later start, as long as `registry.json` keeps the handled switches. sbx forgets an earlier explicit `false`, so one set before the first start of this version looks
-like the default and is turned on once; switch it off again after that start. A switch that could not be read or set
-is tried again at the next start. If `registry.json` exists but cannot be read, aisbx leaves both switches alone and
-warns. If the record cannot be saved, aisbx may turn the switch on again at the next start. A value stored with
-`true`, or set through the environment, is left as it is. The *Settings* screen still reads the live values. The
-switches apply to every sandbox on this host:
+sbx's own default keeps sandboxes away from your clipboard. On a new install, the first start of `aisbx` or
+`aisbx-ui` turns each of the two switches below on and says so once. A new install is a state folder that has no
+`registry.json` yet. Where an earlier aisbx ran, the first start of this version leaves both switches as they are and
+says once that `T` turns them on. The headless commands (`aisbx up`, `run`, `step`, `ls`, `status`, `stop`, `rm`)
+never change them.
+
+aisbx handles each switch once: it records the switch in `registry.json` in its state folder and never reads or sets
+it at start again. It turns a switch on only where sbx reports its default (off) and no environment variable sets
+it. A value stored with `true`, or set through the environment, is left as it is. On a new install, a `false` that
+you set before the first start looks like sbx's default, so it is turned on once; switch it off again after that
+start. A switch that sbx refuses to set is recorded too and not tried again: turn it on with `T`. A switch that could
+not be read is tried again at the next start.
+
+If `registry.json` exists but cannot be read, aisbx leaves both switches alone and warns. If the record cannot be
+saved, aisbx may handle the switch again at the next start. Switch one off with `T` (or *Settings* in the window's
+header) or with `sbx settings set <key> false`. The *Settings* screen reads the live values. The switches apply to
+every sandbox on this host:
 
 - **Clipboard copy** lets a sandbox copy text to your clipboard: a copy in Codex, for example, then reaches the host.
   While it is on, any process in any sandbox can put text on your clipboard.
@@ -290,7 +296,8 @@ When no saved answers apply, the wizard starts with *No MCP servers* ticked. Its
 - **Servers ticked:** the agent gets only those servers (static mode). Ticking a server unticks *No MCP servers*.
 
 The wizard remembers this answer like the others ([Remembered answers](dashboard.md#remembered-answers-and-checks)),
-and sandboxes that already exist keep what they have. `aisbx up` also starts without MCP; `--mcp` turns it on
+and sandboxes that already exist keep what they have. When none of the remembered servers is in the host's list yet,
+the wizard starts with *No MCP servers* ticked. `aisbx up` also starts without MCP; `--mcp` turns it on
 ([`up` options](headless.md)). See [`mcp-default`](deprecations.md#mcp-default).
 
 Press `t` on a sandbox to see the servers registered on this computer and which of them the sandbox has loaded.

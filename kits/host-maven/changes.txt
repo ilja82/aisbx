@@ -1,0 +1,1 @@
+On Windows hosts the sandbox now finds the host's Maven repository; elsewhere a rebuild is optional.

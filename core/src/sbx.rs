@@ -2485,6 +2485,7 @@ pub fn clipboard_set_argv(key: &str) -> Vec<String> {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct ClipboardChange {
     pub turned_on: Vec<&'static str>,
+    pub left_off: Vec<&'static str>,
     pub failed: Vec<(&'static str, String)>,
     pub not_saved: bool,
     pub registry_unreadable: bool,
@@ -2507,46 +2508,48 @@ fn enable_clipboard_with(
         change.registry_unreadable = true;
         return change;
     }
+    let first_run = !registry.was_on_disk();
     for key in CLIPBOARD_DEFAULT_ON {
         if registry.clipboard_handled(key) {
             continue;
         }
-        match clipboard_key_on(key, read, write) {
-            Ok(turned_on) => {
-                if turned_on {
-                    change.turned_on.push(key);
-                }
-                if registry.record_clipboard(key).is_err() {
-                    change.not_saved = true;
-                }
+        let current = match read_clipboard(key, read) {
+            Ok(current) => current,
+            Err(e) => {
+                change.failed.push((key, format!("{e:#}")));
+                continue;
             }
-            Err(e) => change.failed.push((key, format!("{e:#}"))),
+        };
+        if clipboard_left_off(&current) {
+            if !first_run {
+                change.left_off.push(key);
+            } else if let Err(e) = write(&clipboard_set_argv(key)) {
+                change.failed.push((key, format!("{e:#}")));
+            } else {
+                change.turned_on.push(key);
+            }
+        }
+        if registry.record_clipboard(key).is_err() {
+            change.not_saved = true;
         }
     }
     change
 }
 
-fn clipboard_key_on(
-    key: &str,
-    read: &mut dyn FnMut(&str) -> Result<Setting>,
-    write: &mut dyn FnMut(&[String]) -> Result<()>,
-) -> Result<bool> {
+fn read_clipboard(key: &str, read: &mut dyn FnMut(&str) -> Result<Setting>) -> Result<Setting> {
     let current = read(key)?;
     anyhow::ensure!(
         current.key == key,
         "sbx settings get {key} answered for `{}`",
         current.key
     );
-    if clipboard_left_off(&current) {
-        write(&clipboard_set_argv(key))?;
-        return Ok(true);
-    }
     anyhow::ensure!(
-        current.value.is_boolean()
-            && matches!(current.source.as_str(), "default" | "override" | "envvar"),
+        clipboard_left_off(&current)
+            || (current.value.is_boolean()
+                && matches!(current.source.as_str(), "default" | "override" | "envvar")),
         "sbx settings get {key} gave an answer aisbx does not know"
     );
-    Ok(false)
+    Ok(current)
 }
 
 fn run_setting_set(argv: &[String]) -> Result<()> {
@@ -3852,36 +3855,106 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_clipboard_key_reports_the_other_one_that_changed_and_is_tried_again() {
+    fn a_failed_clipboard_read_reports_the_other_key_that_changed_and_is_tried_again() {
         for failing in CLIPBOARD_DEFAULT_ON {
             let changed = CLIPBOARD_DEFAULT_ON
                 .iter()
                 .copied()
                 .find(|k| *k != failing)
                 .unwrap();
-            for on_write in [false, true] {
-                let mut fake = FakeClipboard::new();
-                if on_write {
-                    fake.write_fails.push(failing);
-                } else {
-                    fake.read_fails.push(failing);
-                }
-                let mut registry = Registry::empty();
-                let change = fake.run(&mut registry);
-                assert_eq!(change.turned_on, [changed]);
-                assert_eq!(change.failed.len(), 1);
-                assert_eq!(change.failed[0].0, failing);
-                assert!(registry.clipboard_handled(changed));
-                assert!(!registry.clipboard_handled(failing));
-                fake.read_fails.clear();
-                fake.write_fails.clear();
-                fake.forget_calls();
-                let retry = fake.run(&mut registry);
-                assert_eq!(retry.turned_on, [failing]);
-                assert!(retry.failed.is_empty());
-                assert_eq!(*fake.reads.borrow(), [failing]);
-            }
+            let mut fake = FakeClipboard::new();
+            fake.read_fails.push(failing);
+            let mut registry = Registry::empty();
+            let change = fake.run(&mut registry);
+            assert_eq!(change.turned_on, [changed]);
+            assert_eq!(change.failed.len(), 1);
+            assert_eq!(change.failed[0].0, failing);
+            assert!(registry.clipboard_handled(changed));
+            assert!(!registry.clipboard_handled(failing));
+            fake.read_fails.clear();
+            fake.forget_calls();
+            let retry = fake.run(&mut registry);
+            assert_eq!(retry.turned_on, [failing]);
+            assert!(retry.failed.is_empty());
+            assert_eq!(*fake.reads.borrow(), [failing]);
         }
+    }
+
+    #[test]
+    fn a_clipboard_key_sbx_refuses_to_set_is_recorded_and_not_tried_again() {
+        for failing in CLIPBOARD_DEFAULT_ON {
+            let changed = CLIPBOARD_DEFAULT_ON
+                .iter()
+                .copied()
+                .find(|k| *k != failing)
+                .unwrap();
+            let mut fake = FakeClipboard::new();
+            fake.write_fails.push(failing);
+            let mut registry = Registry::empty();
+            let change = fake.run(&mut registry);
+            assert_eq!(change.turned_on, [changed]);
+            assert_eq!(change.failed.len(), 1);
+            assert_eq!(change.failed[0].0, failing);
+            for key in CLIPBOARD_DEFAULT_ON {
+                assert!(registry.clipboard_handled(key), "{key}");
+            }
+            fake.forget_calls();
+            assert_eq!(fake.run(&mut registry), ClipboardChange::default());
+            assert!(fake.reads.borrow().is_empty());
+            assert!(fake.writes.borrow().is_empty());
+        }
+    }
+
+    const REGISTRY_0_54_0_0: &str = r#"{"sandboxes":{"claude-anthropic-proj":{"display_name":"Proj","kit_hash":"0123456789abcdef"}},"ui":{"create":{"backend":"pi-local","addons":{"pi-local":[]}}}}"#;
+
+    #[test]
+    fn a_host_with_a_registry_from_an_older_aisbx_keeps_both_keys_off_and_is_pointed_to_t() {
+        let fake = FakeClipboard::new();
+        let dir = clip_dir("older-host");
+        std::fs::write(dir.join("registry.json"), REGISTRY_0_54_0_0).unwrap();
+        let mut registry = Registry::at(&dir);
+        assert!(registry.was_on_disk() && !registry.is_unreadable());
+        let change = fake.run(&mut registry);
+        assert_eq!(
+            change,
+            ClipboardChange {
+                left_off: vec![CLIPBOARD_TEXT_COPY, CLIPBOARD_IMAGE_PASTE],
+                ..ClipboardChange::default()
+            }
+        );
+        assert!(fake.writes.borrow().is_empty());
+        let saved = std::fs::read_to_string(dir.join("registry.json")).unwrap();
+        for key in CLIPBOARD_DEFAULT_ON {
+            assert!(saved.contains(key), "{saved}");
+        }
+        assert!(
+            saved.contains("claude-anthropic-proj") && saved.contains("Proj"),
+            "{saved}"
+        );
+        fake.forget_calls();
+        let mut next = Registry::at(&dir);
+        assert_eq!(fake.run(&mut next), ClipboardChange::default());
+        assert!(fake.reads.borrow().is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn on_an_older_host_a_key_somebody_turned_on_is_recorded_without_a_pointer() {
+        let fake = FakeClipboard::new();
+        fake.stored
+            .borrow_mut()
+            .insert(CLIPBOARD_IMAGE_PASTE.into(), (true, "override"));
+        let dir = clip_dir("older-host-on");
+        std::fs::write(dir.join("registry.json"), "{}").unwrap();
+        let mut registry = Registry::at(&dir);
+        let change = fake.run(&mut registry);
+        assert_eq!(change.left_off, [CLIPBOARD_TEXT_COPY]);
+        assert!(change.turned_on.is_empty() && change.failed.is_empty());
+        assert!(fake.writes.borrow().is_empty());
+        for key in CLIPBOARD_DEFAULT_ON {
+            assert!(registry.clipboard_handled(key), "{key}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

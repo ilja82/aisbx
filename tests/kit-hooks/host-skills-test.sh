@@ -2,7 +2,7 @@
 # Tests the host-skills hook kits/host-skills/files/host-skills/startup.sh.
 #
 #   sh tests/kit-hooks/host-skills-test.sh --static   the kit (descriptor, Dockerfile) and the script
-#   sh tests/kit-hooks/host-skills-test.sh            the hook's cases, for real
+#   sh tests/kit-hooks/host-skills-test.sh            the static checks, then the hook's cases, for real
 #
 # Needs no root, no sudo and no sbx: the host homes, the sandbox's home and the mounts table are
 # scratch folders and files.
@@ -305,7 +305,7 @@ EOF
 
 case ${1:-} in
   --static) static ;;
-  "") behaviour ;;
+  "") static; behaviour ;;
   *) echo "usage: sh tests/kit-hooks/host-skills-test.sh [--static]" >&2; exit 2 ;;
 esac
 if [ "$failures" -gt 0 ]; then

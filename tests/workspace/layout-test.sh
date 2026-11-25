@@ -164,6 +164,13 @@ check "bin/windows/aisbx-ui.cmd runs aisbx-ui.ps1" has '%~dp0aisbx-ui\.ps1"' "$r
 check "bin/windows/aisbx-ui.cmd and .ps1 exist" gui_launchers
 check "bin/windows/aisbx.ps1 and aisbx-ui.ps1 share Get-Sources and Test-Stale" same_source_walk
 
+# The host clipboard switch runs at the dashboard's start, never in a headless command.
+clipboard_callers() {
+  [ "$(grep -rl --include='*.rs' 'enable_clipboard_by_default' "$core/src" "$tui/src" "$gui/src" \
+    | sed "s#^$root/##" | sort | tr '\n' ' ')" = "core/src/app.rs core/src/sbx.rs gui/src/shell.rs tui/src/main.rs " ]
+}
+check "only the dashboard's start runs the clipboard switch" clipboard_callers
+
 if [ "$failures" -ne 0 ]; then
   printf '%s check(s) failed\n' "$failures"
   exit 1

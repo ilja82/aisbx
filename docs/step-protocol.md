@@ -40,7 +40,7 @@ One JSON object. Unknown fields are an error (exit 2).
 | `protocol` | int | `1` or `2` (see [Versions](#versions)); the report carries the same number |
 | `name` | string | sandbox name, fresh and unique; the step refuses a name that exists |
 | `backend` | string | backend kit, e.g. `claude-anthropic` |
-| `kits` | [string] | addon kits |
+| `kits` | [string] | addon kits; `host-gradle-properties` copies the host's `~/.gradle/gradle.properties`, which may hold secrets, into the step's sandbox |
 | `workspace` | string | host folder mounted read-write at its own path |
 | `mounts` | [{`path`, `readonly`}] | extra host folders at their own paths |
 | `allow_hosts` | [string] | hosts the sandbox may reach on 443; everything else a kit opened is denied at create; must be empty with `"open"` |
