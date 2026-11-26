@@ -3891,7 +3891,7 @@ impl App {
         let tx = self.notice_tx.clone();
         let argv = crate::headless::job_argv(&["skills", "update"]);
         std::thread::spawn(move || {
-            let out = std::process::Command::new(&argv[0])
+            let out = crate::proc::command(&argv[0])
                 .args(&argv[1..])
                 .stdin(std::process::Stdio::null())
                 .output();
@@ -4010,7 +4010,7 @@ impl App {
         if post.prune_kit_images && !cfg!(any(test, feature = "test-support")) {
             let argv = crate::headless::job_argv(&["prune-images"]);
             std::thread::spawn(move || {
-                let _ = std::process::Command::new(&argv[0])
+                let _ = crate::proc::command(&argv[0])
                     .args(&argv[1..])
                     .stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::null())

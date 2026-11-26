@@ -457,7 +457,7 @@ impl Args {
 pub(crate) fn sbx_command(argv: &[String], ssh_agent: bool) -> Command {
     let argv = sbx::no_input(argv);
     let (program, args) = argv.split_first().expect("an argv names its program");
-    let mut cmd = Command::new(program);
+    let mut cmd = crate::proc::command(program);
     cmd.args(args);
     if !ssh_agent {
         cmd.env_remove("SSH_AUTH_SOCK");

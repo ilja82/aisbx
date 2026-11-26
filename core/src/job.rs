@@ -1,7 +1,7 @@
 //! Runs a sequence of `sbx` commands off the UI thread, streaming their output into a modal.
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -338,7 +338,7 @@ fn run_step(step: &Step, records: &Records, index: usize) -> Result<ExitStatus, 
         .split_first()
         .ok_or_else(|| "empty command".to_string())?;
 
-    let mut child = Command::new(program)
+    let mut child = crate::proc::command(program)
         .args(args)
         .stdin(if step.stdin.is_some() {
             Stdio::piped()
@@ -397,7 +397,7 @@ pub fn run_quiet(step: &Step) -> bool {
         true => Stdio::piped(),
         false => Stdio::null(),
     };
-    let Ok(mut child) = Command::new(program)
+    let Ok(mut child) = crate::proc::command(program)
         .args(args)
         .stdin(stdin)
         .stdout(Stdio::null())

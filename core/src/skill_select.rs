@@ -1409,7 +1409,7 @@ pub fn plan(state: &Path, sandbox: &str, hold: bool) -> Result<Plan> {
 fn sbx_command(argv: &[String]) -> Command {
     let argv = sbx::no_input(argv);
     let (program, args) = argv.split_first().expect("an argv names its program");
-    let mut cmd = Command::new(program);
+    let mut cmd = crate::proc::command(program);
     cmd.args(args);
     for v in ["SSH_AUTH_SOCK", "GITHUB_TOKEN", "GH_TOKEN"] {
         cmd.env_remove(v);

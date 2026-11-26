@@ -4,7 +4,6 @@
 //! [`crate::job`] runs with its output streamed into the UI.
 
 use std::path::Path;
-use std::process::Command;
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -72,7 +71,7 @@ impl SkillsMode {
 /// The host's `skills.defaultMode`, what an omitted `--skills` would mean and what the create form
 /// opens on. `readonly` on any failure, which is sbx's own built-in value.
 pub fn skills_default_mode() -> SkillsMode {
-    Command::new("sbx")
+    crate::proc::command("sbx")
         .args(["settings", "get", "skills.defaultMode"])
         .output()
         .ok()
@@ -750,7 +749,7 @@ struct VersionClient {
 
 /// The CLI's own version, `v0.54.1`, from `sbx version --json`.
 pub fn version() -> Result<String> {
-    let out = Command::new("sbx")
+    let out = crate::proc::command("sbx")
         .args(["version", "--json"])
         .output()
         .context("running `sbx version` — is the sbx CLI installed and on PATH?")?;
@@ -786,7 +785,7 @@ fn gate(version: String) -> Result<String> {
 
 /// Every local sandbox. `sbx ls --json` is a bare array of rows, and an empty host answers `[]`.
 pub fn list() -> Result<Vec<LsEntry>> {
-    let out = Command::new("sbx")
+    let out = crate::proc::command("sbx")
         .args(["ls", "--json"])
         .output()
         .context("running `sbx ls --json`")?;
@@ -800,7 +799,7 @@ pub fn list() -> Result<Vec<LsEntry>> {
 }
 
 pub fn inspect(name: &str) -> Result<InspectEntry> {
-    let out = Command::new("sbx")
+    let out = crate::proc::command("sbx")
         .args(["inspect", name, "--json"])
         .output()
         .with_context(|| format!("running `sbx inspect {name} --json`"))?;
@@ -816,7 +815,7 @@ pub fn inspect(name: &str) -> Result<InspectEntry> {
 /// Policy rules that apply to one sandbox — the kit's `caps.network.allow`, the global local
 /// policy, and anything an org policy adds, already intersected by the daemon.
 pub fn policy_rules(name: &str) -> Result<Vec<PolicyRule>> {
-    let out = Command::new("sbx")
+    let out = crate::proc::command("sbx")
         .args(["policy", "ls", name, "--json"])
         .output()
         .with_context(|| format!("running `sbx policy ls {name} --json`"))?;
@@ -834,7 +833,7 @@ pub fn policy_rules(name: &str) -> Result<Vec<PolicyRule>> {
 /// What the egress proxy actually allowed and blocked for one sandbox, newest first. `--limit`
 /// bounds each of the two lists, not their sum.
 pub fn policy_log(name: &str, limit: u32) -> Result<PolicyLog> {
-    let out = Command::new("sbx")
+    let out = crate::proc::command("sbx")
         .args([
             "policy",
             "log",
@@ -858,7 +857,7 @@ pub fn policy_log(name: &str, limit: u32) -> Result<PolicyLog> {
 /// stopped sandbox: `sbx exec` starts it. Each probe opens a session, which keeps an idle sandbox
 /// alive.
 pub fn probe(name: &str) -> Result<crate::stats::Sample> {
-    let out = Command::new("sbx")
+    let out = crate::proc::command("sbx")
         .args(["exec", name, "sh", "-c", crate::stats::PROBE])
         .output()
         .with_context(|| format!("running `sbx exec {name}` to read /proc"))?;
@@ -875,7 +874,7 @@ pub fn probe(name: &str) -> Result<crate::stats::Sample> {
 /// Ports published from this sandbox to the host. Safe on a stopped sandbox: it answers `[]` and
 /// does not start it.
 pub fn ports(name: &str) -> Result<Vec<Port>> {
-    let out = Command::new("sbx")
+    let out = crate::proc::command("sbx")
         .args(["port", "ls", name, "--json"])
         .output()
         .with_context(|| format!("running `sbx port ls {name} --json`"))?;
@@ -901,7 +900,7 @@ pub fn check_target(sandbox: &str, target: &str, protocol: Option<&str>) -> Resu
         args.extend(["--protocol", protocol]);
     }
     args.push(target);
-    let out = Command::new("sbx")
+    let out = crate::proc::command("sbx")
         .args(&args)
         .output()
         .with_context(|| format!("running `sbx policy check network {target}`"))?;
@@ -1006,7 +1005,7 @@ impl Approval {
 /// Every approval request pending on this host, for every sandbox. A failure is an error, never
 /// an empty list.
 pub fn approvals() -> Result<Vec<Approval>> {
-    let out = Command::new("sbx")
+    let out = crate::proc::command("sbx")
         .args(["policy", "approval", "ls", "--json"])
         .output()
         .context("running `sbx policy approval ls --json`")?;
@@ -1230,7 +1229,7 @@ impl Secrets {
 /// Secrets stored on this host, from `sbx secret ls --json`. sbx masks the values, and none of
 /// them is read here.
 pub fn secrets() -> Result<Secrets> {
-    let out = Command::new("sbx")
+    let out = crate::proc::command("sbx")
         .args(["secret", "ls", "--json"])
         .output()
         .context("running `sbx secret ls --json`")?;
@@ -1389,7 +1388,7 @@ fn read_host_memory_mib() -> Option<u64> {
         } else {
             &["sysctl", "-n", "hw.memsize"]
         };
-        let out = Command::new(argv[0])
+        let out = crate::proc::command(argv[0])
             .args(&argv[1..])
             .stdin(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -1671,7 +1670,7 @@ pub fn network_policy_needs_init() -> Option<bool> {
     struct Setup {
         needed: bool,
     }
-    let out = Command::new("sbx")
+    let out = crate::proc::command("sbx")
         .args(["daemon", "status", "--json"])
         .output()
         .ok()
@@ -1726,7 +1725,7 @@ pub fn global_network_allows() -> Result<Vec<String>> {
 /// Every rule of the host's local policy, `sbx policy ls --json` without a sandbox: the presets,
 /// the fallback and what `sbx policy allow|deny` added globally.
 pub fn global_policy_rules() -> Result<Vec<PolicyRule>> {
-    let out = Command::new("sbx")
+    let out = crate::proc::command("sbx")
         .args(["policy", "ls", "--json"])
         .output()
         .context("running `sbx policy ls --json`")?;
@@ -1877,7 +1876,7 @@ pub fn repo_skills_argv(name: &str, args: &[String]) -> Vec<String> {
 pub fn read_models_cache(name: &str) -> Option<String> {
     use std::io::Read;
     let limit = crate::models::MAX_HARVEST_BYTES;
-    let mut child = Command::new("sbx")
+    let mut child = crate::proc::command("sbx")
         .args(["exec", name, "cat", MODELS_CACHE])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -1944,7 +1943,7 @@ impl PrunePreview {
 /// What `sbx prune` would remove, as sbx itself reports it. Read-only: it never starts a sandbox.
 /// A failure is an error rather than an empty preview.
 pub fn prune_preview() -> Result<PrunePreview> {
-    let out = Command::new("sbx")
+    let out = crate::proc::command("sbx")
         .args(["prune", "--dry-run", "--json"])
         .output()
         .context("running `sbx prune --dry-run --json`")?;
@@ -2117,7 +2116,7 @@ pub fn template_rm_argv(id: &str) -> Vec<String> {
 
 /// The host's disk usage by sbx. Read-only and quick; a failure is an error, never zero bytes.
 pub fn disk_usage() -> Result<DiskUsage> {
-    let out = Command::new("sbx")
+    let out = crate::proc::command("sbx")
         .args(["df", "--json"])
         .output()
         .context("running `sbx df --json`")?;
@@ -2410,7 +2409,7 @@ impl Setting {
 
 /// Read one setting from sbx.
 pub fn setting(key: &str) -> Result<Setting> {
-    let out = Command::new("sbx")
+    let out = crate::proc::command("sbx")
         .args(["settings", "get", key, "--json"])
         .output()
         .with_context(|| format!("running `sbx settings get {key} --json`"))?;
@@ -2457,7 +2456,7 @@ pub fn disable_telemetry_by_default() -> Result<bool> {
         return Ok(false);
     }
     let argv = setting_set_argv(TELEMETRY_DISABLED, "true");
-    let out = Command::new(&argv[0])
+    let out = crate::proc::command(&argv[0])
         .args(&argv[1..])
         .stdin(std::process::Stdio::null())
         .output()
@@ -2554,7 +2553,7 @@ fn read_clipboard(key: &str, read: &mut dyn FnMut(&str) -> Result<Setting>) -> R
 
 fn run_setting_set(argv: &[String]) -> Result<()> {
     let line = argv.join(" ");
-    let out = Command::new(&argv[0])
+    let out = crate::proc::command(&argv[0])
         .args(&argv[1..])
         .stdin(std::process::Stdio::null())
         .output()
@@ -2592,7 +2591,10 @@ pub fn is_no_mcp(servers: &[String]) -> bool {
 /// Every MCP server registered on this host. A *failure* is also an empty list: an unexpected
 /// shape must not stop a sandbox being created.
 pub fn mcp_servers() -> Vec<McpServer> {
-    let Ok(out) = Command::new("sbx").args(["mcp", "ls", "--json"]).output() else {
+    let Ok(out) = crate::proc::command("sbx")
+        .args(["mcp", "ls", "--json"])
+        .output()
+    else {
         return Vec::new();
     };
     if !out.status.success() {
@@ -2675,7 +2677,7 @@ pub struct Diagnosis {
 /// sbx's own checks of this host. The answer is read whatever the exit status; no answer is an
 /// error, never "all passed".
 pub fn diagnose() -> Result<Diagnosis> {
-    let out = Command::new("sbx")
+    let out = crate::proc::command("sbx")
         .args(["diagnose", "--format", "json"])
         .stdin(std::process::Stdio::null())
         .output()
@@ -2826,7 +2828,7 @@ pub struct SkillsStore {
 /// The shared store's contents. Read-only and cheap (no daemon round-trip is needed to list a
 /// directory, though sbx may start the daemon anyway).
 pub fn skills_ls() -> Result<SkillsStore> {
-    let out = Command::new("sbx")
+    let out = crate::proc::command("sbx")
         .args(["skills", "ls", "--json"])
         .output()
         .context("running `sbx skills ls --json`")?;
@@ -3209,6 +3211,7 @@ mod daemon_tests {
 #[cfg(test)]
 mod live {
     use super::*;
+    use std::process::Command;
 
     /// The names `sbx <cmd> -q` prints, one per line — a second opinion that shares no parser
     /// with the JSON read it checks.
