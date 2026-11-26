@@ -1437,7 +1437,6 @@ const SWITCH_EDGE: usize = 84;
 /// panel the name and the note give way: the switch keeps its place.
 fn switch_row(width: usize, name: &str, meta: &str, switch: Option<bool>) -> Vec<Span<'static>> {
     const NAME: usize = 30;
-    let width = width.min(SWITCH_EDGE);
     let Some(on) = switch else {
         return vec![
             Span::raw("   "),
@@ -1449,21 +1448,20 @@ fn switch_row(width: usize, name: &str, meta: &str, switch: Option<bool>) -> Vec
         ];
     };
     let words = switch_words(on);
+    let panel = width;
+    let width = panel.min(SWITCH_EDGE);
     let fixed = 3 + 2 + words.chars().count();
-    let name_width = NAME
-        .max(name.chars().count() + 2)
-        .min(width.saturating_sub(fixed).max(4));
-    let room = width.saturating_sub(fixed + name_width);
+    let wanted = NAME.max(cells(name) + 2);
+    let name_width = wanted.min(panel.saturating_sub(fixed));
+    let edge = width.max(fixed + name_width);
+    let room = edge - fixed - name_width;
     vec![
         Span::raw("   "),
         Span::styled(
-            column(name, name_width),
+            pad_cells(name, name_width.saturating_sub(2), name_width),
             Style::default().add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            format!("{:<room$}", super::clip(meta, room)),
-            theme::muted(),
-        ),
+        Span::styled(pad_cells(meta, room, room), theme::muted()),
         Span::raw("  "),
         Span::styled(
             words,
@@ -1473,6 +1471,32 @@ fn switch_row(width: usize, name: &str, meta: &str, switch: Option<bool>) -> Vec
             },
         ),
     ]
+}
+
+fn cells(text: &str) -> usize {
+    text.chars().map(theme::unicode_width).sum()
+}
+
+fn pad_cells(text: &str, keep: usize, width: usize) -> String {
+    let mut out = String::new();
+    let mut used = 0;
+    if cells(text) <= keep {
+        out.push_str(text);
+        used = cells(text);
+    } else if keep > 0 {
+        for c in text.chars() {
+            let w = theme::unicode_width(c);
+            if used + w > keep - 1 {
+                break;
+            }
+            out.push(c);
+            used += w;
+        }
+        out.push('…');
+        used += 1;
+    }
+    out.push_str(&" ".repeat(width.saturating_sub(used)));
+    out
 }
 
 /// `text` in a fixed column `width` cells wide, cut two cells short of it, so the next column
@@ -3178,6 +3202,76 @@ mod tests {
 
     fn text(spans: &[Span]) -> String {
         spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    fn row_text(width: usize, name: &str, meta: &str, on: bool) -> String {
+        text(&switch_row(width, name, meta, Some(on)))
+    }
+
+    #[test]
+    fn a_switch_row_keeps_its_whole_switch_on_a_narrow_panel() {
+        let long = "a-very-long-skill-name-from-a-git-repository-of-fifty";
+        for width in 12..=84 {
+            for on in [true, false] {
+                let row = row_text(width, long, "own · on for all sandboxes", on);
+                assert!(row.ends_with(switch_words(on)), "{width}: {row:?}");
+                assert!(cells(&row) <= width.max(10), "{width}: {row:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_switch_row_counts_display_columns() {
+        let wide = "技能".repeat(9);
+        let row = row_text(30, &wide, "", false);
+        assert!(row.ends_with("○ off"), "{row:?}");
+        assert_eq!(cells(&row), 30, "{row:?}");
+    }
+
+    #[test]
+    fn a_switch_row_follows_a_long_name_while_the_panel_fits_it() {
+        let name = "n".repeat(80);
+        let row = row_text(110, &name, "", true);
+        assert!(row.contains(&name), "{row:?}");
+        assert!(row.ends_with("● on "), "{row:?}");
+        let short = row_text(110, "pdf", "", true);
+        assert_eq!(cells(&short), SWITCH_EDGE, "{short:?}");
+    }
+
+    #[test]
+    fn a_repo_skill_keeps_its_switch_on_both_skills_screens() {
+        use crate::app::{App, Screen, SkillsForm};
+        use aisbx_core::input::{KeyCode, KeyEvent};
+        use aisbx_core::store_skills::{Origin, Scope};
+        let long = "a-very-long-skill-name-from-a-git-repository-of-fifty";
+        let mut sb = crate::model::sample("claude-anthropic-proj", Some("claude-anthropic"), &[]);
+        sb.running = true;
+        let mut app = App::for_test(crate::kits::Catalog::load().unwrap(), vec![sb]);
+        app.skills = Some(crate::sbx::SkillsStore {
+            store: "/store".into(),
+            skills: vec![long.to_string()],
+        });
+        app.switches
+            .record([(long.to_string(), Origin::Repo("acme/skills".into()))]);
+        app.switches
+            .set(Scope::Sandbox("claude-anthropic-proj"), long, true);
+        let line = |screen: &str| {
+            screen
+                .lines()
+                .find(|l| l.contains("a-very-long"))
+                .unwrap_or_else(|| panic!("{screen}"))
+                .to_string()
+        };
+        for width in [40u16, 50, 60, 70, 84] {
+            app.screen = Screen::Skills(SkillsForm::default());
+            let screen = crate::ui::tests_support::render_at(&mut app, width, 60);
+            assert!(line(&screen).contains("○ off"), "{width}: {screen}");
+            app.screen = Screen::List;
+            app.cursor = 0;
+            app.on_key(KeyEvent::from(KeyCode::Char('i')));
+            let screen = crate::ui::tests_support::render_at(&mut app, width, 60);
+            assert!(line(&screen).contains("● on"), "{width}: {screen}");
+        }
     }
 
     #[test]
