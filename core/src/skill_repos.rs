@@ -839,7 +839,7 @@ pub fn update_calls(route: &Route, git_ref: Option<&str>, dir: &Path, env: &Env)
 
 fn command(call: &GitCall) -> Command {
     let (program, args) = call.argv.split_first().expect("a call names its program");
-    let mut cmd = Command::new(program);
+    let mut cmd = crate::proc::command(program);
     cmd.args(args).stdin(Stdio::null());
     for v in &call.env_remove {
         cmd.env_remove(v);
