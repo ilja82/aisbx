@@ -8,7 +8,7 @@ RUN set -eu; \
     JDK_TAG="jdk-25.0.3%2B9"; \
     case "$TARGETARCH" in \
       amd64) TARBALL="OpenJDK25U-jdk_x64_linux_hotspot_25.0.3_9.tar.gz"; \
-             SHA256="0fed9bb44bcd8c0ef48acc815b1aa8165577b2dd73c1675782619c851d77984e" ;; \
+             SHA256="69264a7a211bf5029830d07bc3370f879769d62ebc5b5488e90c9343a2da0e1f" ;; \
       arm64) TARBALL="OpenJDK25U-jdk_aarch64_linux_hotspot_25.0.3_9.tar.gz"; \
              SHA256="3e4287cb98870ba824ed698854bdc27cff984254caf66dd12cc291e7bfdde26b" ;; \
       *) echo "unsupported arch: $TARGETARCH" >&2; exit 1 ;; \
