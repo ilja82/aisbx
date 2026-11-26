@@ -553,7 +553,7 @@ fn run_step(argv: &[String], log: &Arc<Mutex<Vec<String>>>) -> io::Result<i32> {
     let (program, args) = argv
         .split_first()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "empty command"))?;
-    let mut child = Command::new(program)
+    let mut child = crate::proc::command(program)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

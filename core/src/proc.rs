@@ -38,8 +38,6 @@ mod tests {
         assert!(String::from_utf8_lossy(&out.stdout).contains("tests::"));
     }
 
-    /// No spawn of the shared code starts a console program the plain way: that would flash a
-    /// window on Windows. `terminal` is the one place that opens a window on purpose.
     #[test]
     fn no_spawn_outside_the_tests_bypasses_the_helper() {
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -47,17 +45,18 @@ mod tests {
         for entry in std::fs::read_dir(&src).unwrap() {
             let path = entry.unwrap().path();
             let name = path.file_name().unwrap().to_string_lossy().into_owned();
-            if path.extension().is_none_or(|e| e != "rs")
-                || name == "proc.rs"
-                || name == "terminal.rs"
-            {
+            if path.extension().is_none_or(|e| e != "rs") || name == "proc.rs" {
                 continue;
             }
             let text = std::fs::read_to_string(&path).unwrap();
-            // Everything after the first `#[cfg(test)]` is test code, which may run any program.
             let code = text.split("\n#[cfg(test)]").next().unwrap();
             for (i, line) in code.lines().enumerate() {
-                if line.contains("Command::new(") && !line.trim_start().starts_with("//") {
+                let terminal = name == "terminal.rs"
+                    && line.trim() == "let mut command = Command::new(program);";
+                if line.contains("Command::new(")
+                    && !line.trim_start().starts_with("//")
+                    && !terminal
+                {
                     offenders.push(format!("{name}:{}: {}", i + 1, line.trim()));
                 }
             }
