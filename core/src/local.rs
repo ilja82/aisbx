@@ -410,7 +410,7 @@ fn ps_output() -> String {
     if cfg!(windows) {
         return String::new();
     }
-    std::process::Command::new("ps")
+    crate::proc::command("ps")
         .args(["-axww", "-o", "args="])
         .output()
         .ok()

@@ -24,6 +24,7 @@ pub mod model;
 pub mod model_fetch;
 pub mod model_picks;
 pub mod models;
+pub mod proc;
 pub mod remote;
 pub mod repo_skills_ui;
 pub mod roster;

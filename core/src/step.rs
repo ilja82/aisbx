@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -2848,7 +2848,7 @@ pub fn doctor_json() -> serde_json::Value {
             sbx::REQUIRED_VERSION
         ));
     }
-    let signed_in = match Command::new("sbx").args(["ls", "--json"]).output() {
+    let signed_in = match crate::proc::command("sbx").args(["ls", "--json"]).output() {
         Ok(out) if out.status.success() => Some(true),
         Ok(out) => {
             let text = String::from_utf8_lossy(&out.stderr).to_ascii_lowercase();
@@ -3057,6 +3057,7 @@ pub fn doctor_text(doc: &serde_json::Value) -> String {
 mod tests {
     use super::*;
     use crate::headless::EXIT_USAGE;
+    use std::process::Command;
 
     #[test]
     fn a_check_workdir_is_a_folder_inside_the_sandbox() {
