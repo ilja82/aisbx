@@ -112,8 +112,8 @@ numbers differ from `sbx::REQUIRED_VERSION`.
 
 - Put every `sbx` call in `core/src/sbx.rs`.
 - Start every child process in `core` with `proc::command`, not `Command::new`. The Windows GUI has no console, so a
-  plain start opens a console window each time. A test fails when a file other than `proc.rs` and `terminal.rs` calls
-  `Command::new` outside its tests.
+  plain start opens a console window each time. A test fails when a file calls `Command::new` outside its tests. The one
+  exception is the start in `terminal.rs` that opens the terminal the user asked for.
 - Pass `--force` / `-f` on every removal. Without a terminal, a confirmation prompt exits 1.
 - Do not rebuild a sandbox whose workspace folder is gone. sbx refuses to create it without a terminal.
 - Give a new sandbox a name that no sandbox has in other upper and lower case, as `model::unique_sandbox_name` does.
