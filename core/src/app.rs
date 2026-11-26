@@ -17258,6 +17258,43 @@ mod tests {
     }
 
     #[test]
+    fn every_skill_has_a_switch_whatever_its_origin() {
+        let mut sb = model::sample(SB, Some("claude-anthropic"), &[]);
+        sb.workspace = PathBuf::from("/proj");
+        let mut app = App::for_test(Catalog::load().unwrap(), vec![sb]);
+        app.skills = Some(store(&["from-repo", "from-folder", "unrecorded"]));
+        app.host_skill_folders = vec![store_skills::HostFolder {
+            dir: "~/.claude/skills".into(),
+            skills: ["from-folder"].map(String::from).into(),
+        }];
+        app.switches.record([(
+            "from-repo".to_string(),
+            store_skills::Origin::Repo("o/a".into()),
+        )]);
+        for skill in ["from-repo", "from-folder", "unrecorded"] {
+            assert!(
+                app.skill_switch(&SkillRow::Skill(skill.into())).is_some(),
+                "{skill}"
+            );
+            assert!(
+                app.sandbox_skill_switch(SB, &SandboxSkillRow::Skill(skill.into()))
+                    .is_some(),
+                "{skill}"
+            );
+        }
+        let sources = app.skill_sources();
+        assert!(sources
+            .iter()
+            .any(|(s, _)| matches!(s, store_skills::Source::Repo(_))));
+        assert!(sources
+            .iter()
+            .any(|(s, _)| matches!(s, store_skills::Source::Folder(_))));
+        assert!(sources
+            .iter()
+            .any(|(s, _)| matches!(s, store_skills::Source::Unknown)));
+    }
+
+    #[test]
     fn i_switches_store_skills_for_one_sandbox() {
         let mut sb = model::sample(SB, Some("claude-anthropic"), &[]);
         sb.workspace = PathBuf::from("/proj");

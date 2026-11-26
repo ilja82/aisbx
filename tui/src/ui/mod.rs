@@ -5113,6 +5113,38 @@ mod tests {
     }
 
     #[test]
+    fn a_long_repo_skill_keeps_its_switch_on_a_narrow_terminal() {
+        let long = "a-very-long-skill-name-from-a-git-repository-of-fifty";
+        let mut app = app_with(populated());
+        switched_store(&mut app);
+        if let Some(store) = app.skills.as_mut() {
+            store.skills.push(long.to_string());
+        }
+        app.switches.record([(
+            long.to_string(),
+            aisbx_core::store_skills::Origin::Repo("acme/skills".into()),
+        )]);
+        for width in [30u16, 36, 40, 44, 50, 60, 70, 84] {
+            app.screen = Screen::Skills(crate::app::SkillsForm::default());
+            let screen = super::tests_support::render_at(&mut app, width, 60);
+            let line = line_with(&screen, "a-very-long");
+            assert!(
+                line.contains('●') || line.contains('○'),
+                "{width}: {screen}"
+            );
+            app.screen = Screen::List;
+            app.cursor = 0;
+            app.on_key(KeyEvent::from(KeyCode::Char('i')));
+            let screen = super::tests_support::render_at(&mut app, width, 60);
+            let line = line_with(&screen, "a-very-long");
+            assert!(
+                line.contains('●') || line.contains('○'),
+                "{width}: {screen}"
+            );
+        }
+    }
+
+    #[test]
     fn the_mcp_screen_shows_which_servers_the_sandbox_has_loaded() {
         let mut app = app_with(populated());
         app.cursor = 0;

@@ -1433,37 +1433,46 @@ fn switch_words(on: bool) -> &'static str {
 const SWITCH_EDGE: usize = 84;
 
 /// One skills row: the name in bold, a muted note after it, and the switch, where the row has
-/// one, at the right edge of `width`, or of [`SWITCH_EDGE`] when that is nearer.
+/// one, at the right edge of `width`, or of [`SWITCH_EDGE`] when that is nearer. On a narrow
+/// panel the name and the note give way: the switch keeps its place.
 fn switch_row(width: usize, name: &str, meta: &str, switch: Option<bool>) -> Vec<Span<'static>> {
     const NAME: usize = 30;
     let width = width.min(SWITCH_EDGE);
-    let mut spans = vec![
-        Span::raw("   "),
-        Span::styled(
-            column(name, NAME),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-    ];
     let Some(on) = switch else {
-        spans.push(Span::styled(meta.to_string(), theme::muted()));
-        return spans;
+        return vec![
+            Span::raw("   "),
+            Span::styled(
+                column(name, NAME),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(meta.to_string(), theme::muted()),
+        ];
     };
     let words = switch_words(on);
-    let used = 3 + NAME.max(name.chars().count() + 2) + words.chars().count() + 2;
-    let room = width.saturating_sub(used);
-    spans.push(Span::styled(
-        format!("{:<room$}", super::clip(meta, room)),
-        theme::muted(),
-    ));
-    spans.push(Span::raw("  "));
-    spans.push(Span::styled(
-        words,
-        match on {
-            true => Style::default().fg(theme::RUNNING),
-            false => theme::muted(),
-        },
-    ));
-    spans
+    let fixed = 3 + 2 + words.chars().count();
+    let name_width = NAME
+        .max(name.chars().count() + 2)
+        .min(width.saturating_sub(fixed).max(4));
+    let room = width.saturating_sub(fixed + name_width);
+    vec![
+        Span::raw("   "),
+        Span::styled(
+            column(name, name_width),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{:<room$}", super::clip(meta, room)),
+            theme::muted(),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            words,
+            match on {
+                true => Style::default().fg(theme::RUNNING),
+                false => theme::muted(),
+            },
+        ),
+    ]
 }
 
 /// `text` in a fixed column `width` cells wide, cut two cells short of it, so the next column
