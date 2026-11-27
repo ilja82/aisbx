@@ -22476,9 +22476,9 @@ mod screen_decision_tests {
         assert_eq!(app.skills_intro(), vec![SKILLS_INTRO.to_string()]);
         for says in [
             "every sandbox needs",
-            "most of them off",
-            "when you create it",
-            "(i)",
+            "most of them 'off'",
+            "when you create them",
+            "existing sandboxes",
         ] {
             assert!(SKILLS_INTRO.contains(says), "{says}");
         }
