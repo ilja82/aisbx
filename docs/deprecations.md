@@ -26,8 +26,8 @@ change. The pre-start sync of the picks warns nothing.
 | | |
 | --- | --- |
 | Old way | The `host-skills` addon: the host's `~/.agents/skills` and `~/.claude/skills`, mounted read-only and linked into the agent's skills folders. |
-| Replacement | The sbx skills store: import your skills on `K` (*Import this host's skills*, or `sbx skills import`), then switch them on for all sandboxes on `K`, or for one sandbox on `i` ([Switches](skills.md#switches)). |
-| Your step | Press `K`, choose *Import this host's skills* and switch on the skills you want. Then press `e` on each sandbox that has `host-skills`, untick it and apply: that is a rebuild. In scripts, drop `--kit host-skills` from `aisbx up` and switch skills on with `aisbx skills on --global SKILL`. |
+| Replacement | The sbx skills store: add your skills from Git on `K` (*Add from a Git repository*, or `sbx skills add REPO` and `aisbx skills update --track REPO`), then switch them on for all sandboxes on `K`, or for one sandbox on `i` ([Switches](skills.md#switches)). |
+| Your step | Press `K`, choose *Add from a Git repository* for each repository that holds your skills, and switch on the skills that every sandbox needs. Then press `e` on each sandbox that has `host-skills`, untick it and apply: that is a rebuild. In scripts, drop `--kit host-skills` from `aisbx up`, add the skills with `sbx skills add REPO` and `aisbx skills update --track REPO`, and switch them on with `aisbx skills on --global SKILL`. |
 | Deprecated in | 0.54.1.2 |
 
 Sandboxes that have the kit keep working: aisbx links the host's skills before each start, and a rebuild keeps the
@@ -35,8 +35,9 @@ kit. The create wizard no longer offers it, and the kits editor (`e`) lists it o
 sandbox says so in its details, and shows `⟳ update ready` once, because the kit's description now says it is
 deprecated. `aisbx up --kit host-skills` still works and prints one warning on stderr; stdout does not change.
 
-The store holds a copy of each skill, not the host folder: an edit to a skill on the host reaches the sandboxes when
-you import it again.
+The store holds a copy of each skill, not the host folder. A repository added from Git stays in step: aisbx updates its
+skills daily ([Updates](skills.md#updates)). *Import this host's skills* also exists, but it is not recommended: an
+imported skill does not update, and an edit on the host reaches the sandboxes only when you import it again.
 
 ### `mcp-default`
 
