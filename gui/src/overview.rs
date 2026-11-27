@@ -4,7 +4,7 @@
 
 use aisbx_core::actions::Action;
 use aisbx_core::app::App;
-use aisbx_core::model::{self, Auth, FolderRelation, Hue, Lifecycle, Sandbox, Skills};
+use aisbx_core::model::{self, Auth, FolderRelation, Hue, Lifecycle, Sandbox};
 use aisbx_core::sbx;
 use aisbx_core::state;
 use eframe::egui::{self, Color32, RichText};
@@ -195,15 +195,16 @@ fn agent_rows(app: &App, sb: &Sandbox) -> Vec<Row> {
             .collect();
         out.push(row("Models", value));
     }
-    if let Some(skills) = sb.skills {
-        let (value, gloss) = match skills {
-            Skills::Known(mode) => (
-                aisbx_core::create::skills_mode_name(mode),
-                aisbx_core::create::skills_gloss(mode),
-            ),
-            Skills::Unrecorded => ("shared", "created outside aisbx"),
+    if let Some(skills) = app.skills_summary(sb) {
+        let gloss = match skills.warn {
+            true => warn(skills.gloss),
+            false => weak(skills.gloss),
         };
-        out.push(glossed("Skills", vec![plain(value)], weak(gloss)));
+        let row = glossed("Skills", vec![plain(skills.value)], gloss);
+        out.push(match skills.fix {
+            Some((action, label)) => row.acting(action, label),
+            None => row,
+        });
     }
     let secrets = sb.injected_secrets();
     if !secrets.is_empty() {
@@ -303,6 +304,9 @@ fn lifecycle_rows(sb: &Sandbox) -> Vec<Row> {
 /// disk, its image and how sbx signs it in.
 fn build_rows(app: &App, sb: &Sandbox) -> Vec<Row> {
     let mut out = vec![row("sbx name", vec![plain(&sb.name)]), kits(app, sb)];
+    if let Some(note) = aisbx_core::compat::host_skills_note(&sb.addons) {
+        out.push(row("⚠ Kits", vec![warn(note)]).acting(Action::EditKits, "Edit kits"));
+    }
     if let Some(dir) = &sb.other_checkout {
         let text = format!(
             "matched by name — this sandbox points at {}; a rebuild takes them from here",
@@ -560,6 +564,44 @@ mod tests {
             hues,
             [model::kit_hue("jdk25"), model::kit_hue("rtk")].map(Tone::Hue)
         );
+    }
+
+    /// Core's summary of the skills the agent gets, with the button that changes them; and the
+    /// deprecated kit's note with the editor that removes it.
+    #[test]
+    fn the_skills_row_says_what_the_agent_gets_and_offers_the_change() {
+        let sb = model::sample("box", Some("claude-anthropic"), &["host-skills"]);
+        let mut app = App::for_test(Catalog::load().unwrap(), vec![sb.clone()]);
+        app.skills = Some(sbx::SkillsStore {
+            store: "/store".into(),
+            skills: vec!["pdf".into(), "web".into()],
+        });
+        app.switches
+            .set(aisbx_core::store_skills::Scope::All, "pdf", true);
+        let rows = rows(&app, &sb);
+        let skills = rows.iter().find(|r| r.label == "Skills").unwrap();
+        assert_eq!(skills.value, [plain("pdf")]);
+        assert_eq!(skills.gloss, Some(weak("1 of 2 shared skills")));
+        assert_eq!(skills.action, Some((Action::SandboxSkills, "Change")));
+        let deprecated = rows.iter().find(|r| r.label == "⚠ Kits").unwrap();
+        assert!(deprecated.value[0]
+            .text
+            .starts_with("host-skills is deprecated"));
+        assert_eq!(deprecated.action, Some((Action::EditKits, "Edit kits")));
+
+        app.skills = Some(sbx::SkillsStore::default());
+        let rows = super::rows(&app, &sb);
+        let skills = rows.iter().find(|r| r.label == "Skills").unwrap();
+        assert_eq!(skills.action, Some((Action::Skills, "Add skills")));
+
+        let mut rw = sb.clone();
+        rw.skills = Some(model::Skills::Known(sbx::SkillsMode::Readwrite));
+        let rows = super::rows(&app, &rw);
+        let skills = rows.iter().find(|r| r.label == "Skills").unwrap();
+        let gloss = skills.gloss.clone().expect("a gloss");
+        assert_eq!(gloss.tone, Tone::Warn, "read-write warns");
+        assert!(gloss.text.starts_with("⚠ read-write"), "{}", gloss.text);
+        assert_eq!(skills.action, Some((Action::SandboxSkills, "Change")));
     }
 
     /// `sbx` stays lowercase as the product's name, and a mark before the label is not a letter.

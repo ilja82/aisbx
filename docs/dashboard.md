@@ -127,13 +127,13 @@ foreign kit.
      account  setup token “private”   no other sandbox uses it
         kits  jdk25 Temurin JDK 25   rtk RTK (token reducer)
       folder  ~/my-project   this folder
-      skills  read-only   the agent gets the shared skills switched on for it
+      skills  docx, pdf   2 of 5 shared skills — press i
         name  My private Claude Code
     sbx name  claude-token-my-project
          ssh  claude-token-my-project.sbx   o connects an editor
      created  2026-10-28 05:20 UTC   11 hours ago
 ────────────────────────────────────────────────────────────────────────────────────────────────
- ↵ start  y approvals  x shell  n new  e kits  o connect  w start folder  A account  i sandbox skills
+ ↵ start  y approvals  x shell  n new  e kits  o connect  w start folder  A account  i skills
 ```
 
 ### The list and its sections
@@ -177,18 +177,18 @@ Each sandbox is one row of three columns. The columns line up down the list.
 | --- | --- |
 | `↵` | start the sandbox: the agent is [updated first](sandboxes.md#always-starting-on-the-current-agent), then `sbx run --name …` takes the terminal until the agent exits. On `+ New sandbox`, open [the create wizard](#the-create-wizard) |
 | `x` | open a shell inside (`sbx exec -it … bash`), in the folder the agent starts in; starts a stopped sandbox |
-| `n` | create a sandbox for this folder, step by step in [the create wizard](#the-create-wizard): agent and connection, kits, name, start folder, [clone mode](sandboxes.md#clone-mode), [skills mode](skills.md#shared-agent-skills), ports, [blocked hosts](network.md#blocked-hosts), [MCP servers](sandboxes.md#mcp-servers) |
+| `n` | create a sandbox for this folder, step by step in [the create wizard](#the-create-wizard): agent and connection, kits, name, start folder, [clone mode](sandboxes.md#clone-mode), [skills](skills.md#shared-agent-skills), ports, [blocked hosts](network.md#blocked-hosts), [MCP servers](sandboxes.md#mcp-servers) |
 | `e` | add or remove kits; on the gateway backend, [pin models](litellm.md#pinning-claude-codes-models-on-the-gateway) |
 | `w` | set [the folder inside the workspace](sandboxes.md#opening-the-agent-in-a-subfolder-w) the agent starts in |
 | `o` | [connect an editor or app](sandboxes.md#editor-and-app-integrations-vs-code-intellij-claude-desktop) over SSH |
 | `A` | [change the Anthropic account](accounts.md#accounts-a) or rotate its token; on a LiteLLM sandbox, move it to another connection |
 | `S` | [every secret stored on the host](accounts.md#stored-secrets-s); add (`n`), edit (`↵`) or delete (`d`) a LiteLLM connection |
-| `K` | [the shared agent-skills store](skills.md#shared-agent-skills): its skills grouped by where they came from, each with a [switch](skills.md#switches) for all sandboxes, and the *Update daily* switch |
-| `i` | *Sandbox skills*: the store's skills with this sandbox's own [switches](skills.md#switches), and *Apply now* |
+| `K` | *Skills · all sandboxes*: [the shared agent-skills store](skills.md#shared-agent-skills). Add a Git repository's skills (recommended: they update daily) or import this host's, switch on only the skills every sandbox needs ([Switches](skills.md#switches)), and the *Update daily* switch |
+| `i` | *Sandbox skills*: the skills this sandbox's agent gets, each with its [switch](skills.md#switches) for this sandbox, *Apply now*, and the same two ways to add skills as on `K` |
 | `t` | *MCP servers*: the [MCP servers](sandboxes.md#mcp-servers) registered on this computer, each with whether this sandbox has it loaded; `space` loads or unloads one |
 | `f` | [the folders this sandbox mounts](sandboxes.md#a-sandboxs-own-folders-f) beside its workspace: add one, switch its access (`←→`) or drop it (`d`), then *Apply* to rebuild |
 | `F` | [the host folders every sandbox mounts](sandboxes.md#host-folders-f-and-companionjson): add, edit (`↵`) or delete (`d`) one |
-| `T` | sbx's settings for this host: [telemetry](network.md#sbxs-own-telemetry-t), [clipboard copy and image paste](sandboxes.md#the-host-clipboard-t), [FUSE](sandboxes.md#fuse-filesystems-t), [Claude in Chrome and Remote Control](sandboxes.md#claude-in-chrome-and-remote-control-t) and [post-quantum TLS](sandboxes.md#post-quantum-tls-t), each turned on or off with `↵`, and the [skills default](skills.md#share-modes), which `↵`, `←` and `→` walk |
+| `T` | sbx's settings for this host: [telemetry](network.md#sbxs-own-telemetry-t), [clipboard copy and image paste](sandboxes.md#the-host-clipboard-t), [FUSE](sandboxes.md#fuse-filesystems-t), [Claude in Chrome and Remote Control](sandboxes.md#claude-in-chrome-and-remote-control-t) and [post-quantum TLS](sandboxes.md#post-quantum-tls-t), each turned on or off with `↵`, and the [skills default](skills.md#share-modes): `↵`, `←` and `→` switch it between off and read-only, and `w` asks before it makes it read-write |
 | `p` / `u` | [publish / unpublish a port](sandboxes.md#ports-p--u) |
 | `L` | LiteLLM sandboxes: fetch the connection's [model list](litellm.md#the-gateways-model-list) now |
 | `b` | [keep the sandbox running](sandboxes.md#keeping-a-sandbox-running-b) after its sessions end, or rebuild it back |
@@ -310,8 +310,10 @@ like a setup assistant. In both, click a step to go there.
    - Most kits can be added only now: adding one later means a rebuild. The terminal marks those *only now*. The
      window marks the few that can be added later, *Can add later*.
 6. **Workspace and options**: the label, where the agent starts, more folders to mount, clone mode,
-   *`.git` read-only* and the skills mode. *Shared skills* is a fold with a switch per skill of the store, for this
-   sandbox alone ([Switches](skills.md#switches)); it starts on the switches for all sandboxes. *More options* is a
+   *`.git` read-only* and *Skills*. *Skills* is a fold. It holds the agent's *access* to the shared skills store
+   ([Share modes](skills.md#share-modes)) and a switch per skill of the store, for this sandbox alone
+   ([Switches](skills.md#switches)); the switches start on the ones for all sandboxes. While the store holds no
+   skill, the fold says so: add skills on `K` after the create. *More options* is a
    fold, closed until you open it, with the [status line](addons.md#status-line-inside-the-sandbox), the ports, the
    [blocked hosts](network.md#blocked-hosts) and the [MCP servers](sandboxes.md#mcp-servers).
    - *Status line* is there for Claude Code only, and ticked: a new Claude Code sandbox gets the `statusline` kit.
@@ -331,7 +333,7 @@ like a setup assistant. In both, click a step to go there.
 ### Remembered answers and checks
 
 The wizard remembers the answers of your last create: the provider and harness, the account or connection, the kits
-per harness, clone mode, `.git` read-only, skills mode, ports, blocked hosts and MCP servers (a first create starts with *No MCP
+per harness, clone mode, `.git` read-only, skills access, ports, blocked hosts and MCP servers (a first create starts with *No MCP
 servers* ticked; untick it to let the agent find the host's servers, or tick specific servers:
 [MCP servers](sandboxes.md#mcp-servers)). The next create opens on
 them, on the Review, headed *Prefilled from your last sandbox*. Create there, or pick a step to change its answers.
@@ -373,7 +375,8 @@ The terminal wizard is built for the keyboard, in a frame that does not move.
 | `↑` `↓` `tab` | move between rows; the buttons are one row, and `←` `→` move along them |
 | `j` `k` / `h` `l` | as `↓` `↑` / `←` `→`, on any row that does not take typing |
 | `space` / `↵` | tick a box, pick a radio, show or hide a fold; `↵` on a provider, harness or account radio, or on a stored connection, picks it and goes on (a harness to the rows under it, if any) |
-| `←` `→` | pick a value on a row that has several: the connection, the skills mode, a mounted folder's access |
+| `←` `→` | pick a value on a row that has several: the connection, the skills access (off or read-only), a mounted folder's access |
+| `w` | on the skills *access* row: read-write, after a red confirmation that names the risk |
 | `del` | remove a mounted folder |
 | `1`…`7` | go to that step, from any row that does not take typing (forward only past steps whose answers pass) |
 | `pgdn` / `pgup` | the next / the previous step, from any row |
@@ -407,9 +410,10 @@ The window wizard is a form to read and point at.
 - A text answer is an input box. Its label is above it. Under it is what goes in it, or what is wrong with it once
   that is worth saying; then its edge turns red.
 - The LiteLLM connections are tiles too, with *Last used* on the one used last.
-- The skills mode and each mounted folder's access are segmented controls. Each takes one click.
-- *Pick models*, *Config files* and *More options* are folds, marked *Optional*. Click one to show or hide what it
-  holds. A closed fold names what is set under it.
+- The skills access and each mounted folder's access are segmented controls. Each takes one click; *Read-write* on
+  the skills access asks first.
+- *Pick models*, *Config files*, *Skills* and *More options* are folds, marked *Optional*. Click one to show or hide
+  what it holds. A closed fold names what is set under it.
 - Every control's tooltip holds the terminal's help text for it. Core's cursor is a ring around the control.
 - Each control tells screen readers its role and state. A secret's field reports dots only.
 - The column of steps at the left starts with the sandbox being built and its sbx name. Each step then has a tick
@@ -430,7 +434,7 @@ The details pane shows the selected sandbox in seven tabs. Press `tab` or `1`…
 
 | Tab | Shows | From |
 | --- | --- | --- |
-| `1 Overview` | what needs you first: status (and an unresponsive guest), where the requests waiting for approval go, a missing secret, keep-running. Then agent, account, pinned models and kits, folder, start folder and skills mode, names and SSH host, created / last used and CPU/memory limits, the size of the container's own files, image, injected secrets, the MCP servers it has loaded. On a wide terminal, the names and everything after them are in a second column | `sbx ls --json`, `sbx inspect --json`, `sbx policy approval ls --json`, `sbx df --json` |
+| `1 Overview` | what needs you first: status (and an unresponsive guest), where the requests waiting for approval go, a missing secret, keep-running. Then agent, account, pinned models and kits, folder, start folder and the skills the agent gets (with the key that changes them: `i`, or `K` while the store holds none), names and SSH host, created / last used and CPU/memory limits, the size of the container's own files, image, injected secrets, the MCP servers it has loaded. On a wide terminal, the names and everything after them are in a second column | `sbx ls --json`, `sbx inspect --json`, `sbx policy approval ls --json`, `sbx df --json` |
 | `2 Resources` | vCPUs and load, memory, disk, uptime (the sandbox's own, not the host's). From the second reading on, CPU and memory also show as sparklines of the readings taken while the tab is open, beside their meters where the terminal is wide enough | `sbx exec` of a `/proc` + `df` probe |
 | `3 Mounts` | every folder sbx mounts from the host: the workspace, extra folders, the skills store, folders added later with `sbx mount`. Each with its path in the sandbox where that differs, read-write or read-only, and a warning when the host folder is gone | `sbx inspect --json`, `sbx ls --json` |
 | `4 Ports` | port forwards, as URLs | `sbx port ls <name> --json` |

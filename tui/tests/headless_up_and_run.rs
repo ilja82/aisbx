@@ -221,6 +221,52 @@ fn up_on_an_existing_sandbox_creates_nothing_and_notes_no_mcp_default() {
 }
 
 #[test]
+fn up_with_the_deprecated_host_skills_kit_still_creates_and_warns_once_on_stderr() {
+    const DEPRECATED: &str = "docs/deprecations.md#host-skills";
+    for (kit, warned) in [("host-skills", true), ("rtk", false)] {
+        let rig = Rig::new("up-host-skills");
+        let out = rig.up(&["--kit", kit, "--mcp"]);
+        let err = text(&out.stderr);
+        assert_eq!(out.status.code(), Some(0), "{kit}: {err}");
+        assert_eq!(
+            text(&out.stdout),
+            "demo\n",
+            "{kit}: stdout is the name alone"
+        );
+        assert_eq!(
+            err.matches(DEPRECATED).count(),
+            usize::from(warned),
+            "{kit}: {err}"
+        );
+        let create = rig.create_line().expect("a create");
+        assert!(create.contains(&format!("kits/{kit}")), "{create}");
+    }
+}
+
+#[test]
+fn up_warns_on_stderr_before_it_creates_a_read_write_sandbox() {
+    for (mode, warned) in [("readwrite", true), ("readonly", false), ("off", false)] {
+        let rig = Rig::new("up-readwrite");
+        let out = rig.up(&["--skills", mode, "--mcp"]);
+        let err = text(&out.stderr);
+        assert_eq!(out.status.code(), Some(0), "{mode}: {err}");
+        assert_eq!(
+            text(&out.stdout),
+            "demo\n",
+            "{mode}: stdout is the name alone"
+        );
+        let warning = "the shared skills are read-write in this sandbox";
+        assert_eq!(
+            err.matches(warning).count(),
+            usize::from(warned),
+            "{mode}: {err}"
+        );
+        let create = rig.create_line().expect("a create");
+        assert!(create.contains(&format!("--skills {mode}")), "{create}");
+    }
+}
+
+#[test]
 fn both_mcp_flags_exit_2_before_any_sbx_call() {
     let rig = Rig::new("up-mcp-both");
     let out = rig.up(&["--mcp", "--no-mcp"]);

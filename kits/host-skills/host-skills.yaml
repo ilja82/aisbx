@@ -6,9 +6,10 @@ schemaVersion: "3"
 kind: mixin
 displayName: Host skills (read-only)
 description: >-
-  The host's own skills (~/.agents/skills and ~/.claude/skills), mounted read-only and
-  linked into the skill folders this agent reads. Relevant when a skill is missing, or
-  before changing one: they cannot be edited here.
+  Deprecated: use the shared skills store instead (Skills, K, in aisbx). The host's own
+  skills (~/.agents/skills and ~/.claude/skills), mounted read-only and linked into the
+  skill folders this agent reads. Relevant when a skill is missing, or before changing
+  one: they cannot be edited here.
 
 capabilities:
   - type: com.docker.sandbox/lifecycle@1

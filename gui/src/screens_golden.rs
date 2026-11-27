@@ -378,13 +378,29 @@ fn the_settings_page_sets_the_skills_default_with_a_mode_button() {
     for text in ["Skills default", "read-only", "Off", "Read-write"] {
         assert!(drawn.contains(text), "{text}: {drawn}");
     }
-    let pos = drawn_at(&mut w, "Read-write");
+    let pos = drawn_at(&mut w, "Off");
     click(&mut w, pos);
     let Some(Modal::Running(_, pending)) = &w.app.modal else {
         panic!("the mode's button runs the job: {:?}", w.app.status)
     };
-    let set = aisbx_core::sbx::setting_set_argv(aisbx_core::sbx::SKILLS_DEFAULT_MODE, "readwrite");
-    assert_eq!(pending.steps[0].argv, set);
+    let set = |mode| aisbx_core::sbx::setting_set_argv(aisbx_core::sbx::SKILLS_DEFAULT_MODE, mode);
+    assert_eq!(pending.steps[0].argv, set("off"));
+    w.app.modal = None;
+    w.frame(Vec::new());
+    let pos = drawn_at(&mut w, "Read-write");
+    click(&mut w, pos);
+    assert!(
+        matches!(&w.app.modal, Some(Modal::Confirm(c)) if c.danger),
+        "read-write asks first: {:?}",
+        w.app.status
+    );
+    w.frame(Vec::new());
+    let pos = drawn_at(&mut w, aisbx_core::app::ALLOW_READWRITE);
+    click(&mut w, pos);
+    let Some(Modal::Running(_, pending)) = &w.app.modal else {
+        panic!("Allow read-write runs the job: {:?}", w.app.status)
+    };
+    assert_eq!(pending.steps[0].argv, set("readwrite"));
 }
 
 // --- the same frame -------------------------------------------------------------------------
@@ -668,7 +684,8 @@ fn the_kits_editor_groups_the_kits_as_the_wizard_does() {
     let hosts = top(&w, crate::wizard::HOST_CACHES);
     let others = top(&w, crate::wizard::ADDITIONAL_KITS);
     assert!(hosts < others, "the host caches come first");
-    for addon in &w.app.catalog.addons {
+    let offered = (w.app.catalog.addons.iter()).filter(|a| !a.kit.deprecated());
+    for addon in offered {
         // A long title is cut on its item: the start is enough to find it.
         let title: String = addon.kit.display_name.chars().take(8).collect();
         let at = top(&w, &title);
@@ -921,15 +938,18 @@ fn the_store_lists_its_skills_where_they_came_from_each_with_its_switch() {
         lines.beside(title, gloss);
         lines.text(title).top()
     };
-    let subtitle = (w.drawn.iter()).find(|t| t.starts_with("The store: /store."));
-    let subtitle = subtitle.unwrap_or_else(|| panic!("the subtitle: {:?}", w.drawn));
-    let shared = aisbx_core::app::skills_shared_line(w.app.skills_sharers());
-    let intro = w.app.skills_intro().join(" ");
+    let intro = w.app.skills_intro().join("\n");
+    assert_eq!(intro, aisbx_core::app::SKILLS_INTRO);
     assert!(
-        subtitle.contains(&format!("{shared} ")),
-        "who shares it: {subtitle}"
+        w.drawn.contains(&intro),
+        "the subtitle is only the hint: {:?}",
+        w.drawn
     );
-    assert!(subtitle.ends_with(&format!("\n{intro}")), "{subtitle}");
+    assert!(
+        !w.drawn.iter().any(|t| t.contains("/store")),
+        "no store path: {:?}",
+        w.drawn
+    );
     let source = |s: Source| App::source_heading(&s);
     let (host_title, host_gloss) = source(Source::Folder("~/.claude/skills".into()));
     let (repo_title, repo_gloss) = source(Source::Repo("anthropics/skills".into()));
@@ -938,6 +958,14 @@ fn the_store_lists_its_skills_where_they_came_from_each_with_its_switch() {
     let (change, _) = w.app.skill_heading(&SkillRow::Import).expect("a heading");
     let store = lines.text(&change).top();
     assert!(host < repo && repo < store, "{host} {repo} {store}");
+    let (add, recommended) = w.app.skill_view(&SkillRow::AddRepo);
+    let (import, not_recommended) = w.app.skill_view(&SkillRow::Import);
+    lines.beside(&add, &recommended);
+    lines.beside(&import, &not_recommended);
+    assert!(
+        lines.text(&add).top() < lines.text(&import).top(),
+        "the recommended way first"
+    );
     let visuals = w.ctx.global_style().visuals.clone();
     let (green, weak) = (
         crate::theme::running(visuals.dark_mode),
@@ -997,7 +1025,7 @@ fn the_store_lists_its_skills_where_they_came_from_each_with_its_switch() {
     let (daily, last) = w.app.skill_view(&SkillRow::AutoUpdate);
     let (_, on) = lines.word(&daily);
     assert!(on, "the daily update is on until switched off");
-    lines.beside(&daily, &last);
+    assert_eq!(last, "", "never run: the name says how often");
     for button in ["Import…", "Add…", "Update…"] {
         assert!(
             w.drawn.iter().any(|t| t == button),
@@ -1137,7 +1165,8 @@ fn a_sandboxs_skills_page_shows_its_switches_and_its_commands() {
     lines.text(&format!("Skills · {}", w.app.sandbox_label(SB)));
     lines.text(&w.app.sandbox_skills_intro(SB).join(" "));
     let (other, gloss) = App::source_heading(&Source::Unknown);
-    lines.beside(&other, &gloss);
+    assert_eq!(gloss, "", "an unknown origin has no gloss");
+    lines.text(&other);
     let meta = |skill: &str| {
         let row = SandboxSkillRow::Skill(skill.into());
         w.app.sandbox_skill_view(SB, &row).1

@@ -473,7 +473,6 @@ fn the_golden_answers_through_the_window_start_the_same_job() {
             Do::Type(CreateRow::Name, "My box"),
             Do::Tick(CreateRow::Clone),
             Do::Tick(CreateRow::Skills),
-            Do::Tick(CreateRow::Skills),
             Do::Type(CreateRow::Ports, "8080:3000, 5173"),
             Do::Type(CreateRow::DenyNetwork, "api.example.com"),
         ],
@@ -700,7 +699,8 @@ fn enter_on_the_start_folder_row_then_down_opens_the_picker_unmoved() {
         | FieldEffect::FetchModels
         | FieldEffect::EditConfig(_)
         | FieldEffect::ResetConfig(_)
-        | FieldEffect::PickFolder => panic!("↵ opens the picker"),
+        | FieldEffect::PickFolder
+        | FieldEffect::AskReadwrite => panic!("↵ opens the picker"),
     }
     w.frame(vec![
         pressed(Key::Enter, Modifiers::NONE),
@@ -1192,7 +1192,7 @@ fn the_shared_skills_fold_ticks_the_store_skills_as_core_does() {
     w.type_text("n");
     run(&mut w, &[Do::Walk(CreateStep::Workspace)]);
     w.frame(Vec::new());
-    let fold = step_text(&w, crate::wizard::SHARED_SKILLS);
+    let fold = step_text(&w, crate::wizard::SKILLS);
     let summary = |w: &Win| form(&w.app).fold_summary(&w.app, CreateRow::SkillsFold);
     let first = summary(&w).expect("the fold says what is on");
     let beside = step_text(&w, &first);
@@ -1266,11 +1266,27 @@ fn a_click_on_a_segment_or_a_tile_picks_that_value() {
     click(&mut w, tile);
     assert_eq!(form(&w.app).connection.litellm.as_deref(), Some("acme"));
 
-    run(&mut w, &[Do::Walk(CreateStep::Workspace)]);
+    run(
+        &mut w,
+        &[
+            Do::Walk(CreateStep::Workspace),
+            Do::Go(WizardRow::Field(CreateRow::Skills)),
+        ],
+    );
     w.frame(Vec::new());
     let segment = text_from(&w, "Read-write", 0.0).center();
     click(&mut w, segment);
+    assert!(
+        matches!(&w.app.modal, Some(Modal::Confirm(c)) if c.danger),
+        "read-write asks first"
+    );
+    assert_eq!(form(&w.app).workspace.skills, sbx::SkillsMode::Readonly);
+    w.frame(Vec::new());
+    let allow = text_from(&w, aisbx_core::app::ALLOW_READWRITE, 0.0).center();
+    click(&mut w, allow);
+    assert!(w.app.modal.is_none());
     assert_eq!(form(&w.app).workspace.skills, sbx::SkillsMode::Readwrite);
+    w.frame(Vec::new());
     let segment = text_from(&w, "Off", 0.0).center();
     click(&mut w, segment);
     assert_eq!(form(&w.app).workspace.skills, sbx::SkillsMode::Off);

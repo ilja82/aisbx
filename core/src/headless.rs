@@ -626,6 +626,9 @@ pub(crate) fn up_inner(raw: &[String]) -> Result<String, Fail> {
             )));
         }
     }
+    if let Some(line) = compat::host_skills_warning(&addons) {
+        eprintln!("{line}");
+    }
     let template = template_arg(args.one("template")?, &backend_name)?;
 
     let token = args.one("token")?;
@@ -839,6 +842,9 @@ pub(crate) fn up_inner(raw: &[String]) -> Result<String, Fail> {
             })?),
             None => backend.shares_skills().then(sbx::skills_default_mode),
         };
+    if skills == Some(sbx::SkillsMode::Readwrite) {
+        eprintln!("{READWRITE_WARNING}");
+    }
     let (cpus, memory) = limit_args(args.one("cpus")?, args.one("memory")?)?;
     let deny_network = args.all("deny-network");
     let home = model::home_dir();
@@ -1023,6 +1029,12 @@ fn stage_fail(e: model::StageError) -> Fail {
         model::StageError::Failed(text) => Fail::sandbox(format!("{text}; nothing was created")),
     }
 }
+
+/// What `up` prints on stderr before it creates a sandbox with the shared skills read-write, by
+/// `--skills readwrite` or by the host's default.
+pub const READWRITE_WARNING: &str = "aisbx: warning: the shared skills are read-write in this \
+     sandbox: its agent can change the skills that every other sandbox loads; pass --skills \
+     readonly unless you write skills in it (docs/skills.md#share-modes)";
 
 /// The deprecation line `up --skill` prints on stderr, once however many `--skill` it has.
 fn up_skill_note(specs: &[String]) -> Option<String> {

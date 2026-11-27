@@ -12,8 +12,8 @@ Add an addon in one of these ways:
 - All other addons join only at creation or with a rebuild, because they have network rules or host folders. See
   [Names, kits and rebuilds](sandboxes.md#names-kits-and-rebuilds).
 
-The wizard lists the host-folder kits first, under *Host caches*: `host-gradle`, `host-gradle-properties`, `host-maven`, `host-npm`,
-`host-pip` and `host-skills`. A kit that finds no folder on this host is greyed out and shows what it looked for.
+The wizard lists the host-folder kits first, under *Host caches*: `host-gradle`, `host-gradle-properties`, `host-maven`, `host-npm`
+and `host-pip`. A kit that finds no folder on this host is greyed out and shows what it looked for.
 
 ## JDK / Java projects
 
@@ -244,13 +244,17 @@ before this file exists: wait for it before you rely on the cache.
 
 ## Host skills (read-only)
 
+**Deprecated:** import your skills into the skills store on `K` instead, and switch them on there or per sandbox on
+`i` ([Shared agent skills](skills.md#quick-start), [Deprecations](deprecations.md#host-skills)). The create wizard no
+longer offers this kit. A sandbox that has it keeps working; `e` removes it with a rebuild.
+
 `host-skills` gives a sandbox your host skills from `~/.agents/skills` and `~/.claude/skills`, live and read-only, on
 every backend. Unlike `sbx skills import` (`K` → `i`), nothing is copied:
 
 - An edit to a host skill shows inside at once.
 - A skill added or removed on the host shows at the next session that aisbx starts.
 
-Tick it at creation, or rebuild with it.
+`aisbx up --kit host-skills` still adds it at creation, with a warning on stderr.
 
 ### When the links are made
 

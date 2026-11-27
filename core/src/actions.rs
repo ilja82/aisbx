@@ -149,8 +149,8 @@ impl Action {
             Action::Secrets => "Manage the stored tokens, keys and connections",
             Action::Connect => "Connect a terminal, an editor or a desktop app over SSH",
             Action::StartDir => "Choose the folder the agent starts in",
-            Action::Skills => "Manage the shared skills",
-            Action::SandboxSkills => "Switch the shared skills this sandbox gets",
+            Action::Skills => "Add skills and switch them for all sandboxes",
+            Action::SandboxSkills => "Pick the skills this sandbox's agent gets",
             Action::SandboxMcp => "Load or unload this computer's MCP servers in the sandbox",
             Action::Folders => "Choose the folders every sandbox mounts",
             Action::SandboxFolders => {

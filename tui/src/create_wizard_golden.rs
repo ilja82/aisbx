@@ -316,8 +316,7 @@ fn w2_opencode_options() {
     next(&mut app);
     type_into(&mut app, CreateRow::Name, "My box");
     tick(&mut app, WizardRow::Field(CreateRow::Clone));
-    // readonly → readwrite → off.
-    tick(&mut app, WizardRow::Field(CreateRow::Skills));
+    // readonly → off.
     tick(&mut app, WizardRow::Field(CreateRow::Skills));
     type_into(&mut app, CreateRow::Ports, "8080:3000, 5173");
     type_into(&mut app, CreateRow::DenyNetwork, "api.example.com");

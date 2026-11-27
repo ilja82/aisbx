@@ -142,7 +142,8 @@ sbx builds a removed image again at the next create with the same kits. This tak
 An agent updates itself only for its next launch. So `↵` prepares the sandbox first:
 
 1. It writes the label for the status line.
-2. With [`host-skills`](addons.md#host-skills-read-only), it links the host's skills.
+2. It links the [store skills](skills.md#switches) that are on for the sandbox, then, with the deprecated
+   [`host-skills`](addons.md#host-skills-read-only), the host's skills.
 3. On an OpenCode or Pi sandbox on a connection, it writes the
    [model list](litellm.md#the-gateways-model-list) and your picks into the agent's config.
 4. It updates the agent ([OpenCode](agents.md#opencode) has its own version rule).

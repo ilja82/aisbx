@@ -53,18 +53,22 @@ impl SkillsMode {
         self == Self::Readwrite
     }
 
-    /// The next value when the create form's row is toggled. Ordered by how much the sandbox is
-    /// given, so `space` walks from the tightest to the loosest and wraps.
-    pub fn next(self) -> Self {
+    /// The value a key gives a skills-mode row (the create wizard's, the settings screen's):
+    /// `off` and `readonly` swap, and `readwrite` goes back to `readonly`. No key gives
+    /// `readwrite`: it is picked on purpose, behind a confirmation.
+    pub fn toggled(self) -> Self {
         match self {
-            Self::Off => Self::Readonly,
-            Self::Readonly => Self::Readwrite,
-            Self::Readwrite => Self::Off,
+            Self::Off | Self::Readwrite => Self::Readonly,
+            Self::Readonly => Self::Off,
         }
     }
 
-    pub fn prev(self) -> Self {
-        self.next().next()
+    /// The mode a form starts on where it would start on `self`: never `readwrite`.
+    pub fn safe(self) -> Self {
+        match self {
+            Self::Readwrite => Self::Readonly,
+            other => other,
+        }
     }
 }
 
@@ -5698,14 +5702,25 @@ mod tests {
     }
 
     #[test]
-    fn skills_mode_cycles_both_ways() {
-        let mut mode = SkillsMode::default();
+    fn a_key_never_gives_readwrite() {
+        let mode = SkillsMode::default();
         assert_eq!(mode, SkillsMode::Readonly, "sbx's own built-in default");
-        for _ in 0..3 {
-            mode = mode.next();
+        assert_eq!(mode.toggled(), SkillsMode::Off);
+        assert_eq!(mode.toggled().toggled(), SkillsMode::Readonly);
+        assert_eq!(
+            SkillsMode::Readwrite.toggled(),
+            SkillsMode::Readonly,
+            "back to the safe mode"
+        );
+        for start in [SkillsMode::Off, SkillsMode::Readonly, SkillsMode::Readwrite] {
+            let mut mode = start;
+            for _ in 0..4 {
+                mode = mode.toggled();
+                assert_ne!(mode, SkillsMode::Readwrite, "from {start:?}");
+            }
+            assert_ne!(start.safe(), SkillsMode::Readwrite, "{start:?}");
         }
-        assert_eq!(mode, SkillsMode::Readonly);
-        assert_eq!(SkillsMode::Readonly.prev(), SkillsMode::Off);
+        assert_eq!(SkillsMode::Off.safe(), SkillsMode::Off);
         assert!(SkillsMode::Readwrite.writable());
         assert!(!SkillsMode::Readonly.writable());
         assert_eq!(SkillsMode::parse("READWRITE"), Some(SkillsMode::Readwrite));
