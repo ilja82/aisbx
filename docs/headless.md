@@ -92,12 +92,12 @@ Give the workspace folder as the last argument: `aisbx up --backend <kit> [optio
 | Option | What it does |
 | --- | --- |
 | `--backend KIT` | the backend kit, by name (required) |
-| `--kit ADDON` | stacks an addon, by name (repeatable) |
+| `--kit ADDON` | stacks an addon, by name (repeatable); the deprecated `host-skills` warns on stderr ([Deprecations](deprecations.md#host-skills)) |
 | `--token NAME` | the setup token, for `claude-token` |
 | `--litellm NAME` | the LiteLLM connection, for a LiteLLM backend (see below) |
 | `--local NAME` | the local engine, for a `*-local` backend (see below) |
 | `--clone` | clone mode: the agent works on its own clone, your repo is read-only |
-| `--skills MODE` | `off`, `readonly` or `readwrite`: how the sandbox mounts the [skills store](skills.md#shared-agent-skills); default the host's `skills.defaultMode` |
+| `--skills MODE` | `off`, `readonly` or `readwrite`: how the sandbox mounts the [skills store](skills.md#shared-agent-skills); default the host's `skills.defaultMode`. A read-write create, by this flag or by the default, prints a warning on stderr ([Share modes](skills.md#share-modes)) |
 | `--skill-on SKILL`, `--skill-off SKILL` | the sandbox's own switch for a skill of the [skills store](skills.md#switches) (repeatable; see below) |
 | `--skill REPO[#SKILL]` | **deprecated**, use `--skill-on`: skills from a cached skill repo (repeatable; [Skills from skill repos](skills.md#skills-from-skill-repos-aisbx-skill), [Deprecations](deprecations.md#skill-repos)) |
 | `--deny-network HOST` | keeps the sandbox off a host (repeatable; a deny beats every allow) |
@@ -415,8 +415,8 @@ An exit code of 0 does not prove the agent succeeded. Read the agent's own outpu
 - `run` updates the agent first, as `↵` does. `--no-update` skips it; use it right after `up`, because the kit's
   install hook just did the update.
 - Before the update, `run` links the store skills that are on for the sandbox
-  ([When the switches apply](skills.md#when-the-switches-apply)). Then, on a sandbox with `host-skills`, it links
-  the host's skills. Both steps run also with `--no-update`. A failure is one stderr line, and the run goes on.
+  ([When the switches apply](skills.md#when-the-switches-apply)). Then, on a sandbox with the deprecated
+  `host-skills`, it links the host's skills. Both steps run also with `--no-update`. A failure is one stderr line, and the run goes on.
   When `run` cannot read the switches, it says so on stderr and skips the store link: the sandbox keeps the links
   of its last start.
 

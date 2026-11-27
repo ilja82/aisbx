@@ -91,7 +91,7 @@ const DAILY_UPDATED: &str = "the skills added from Git are up to date (daily upd
 
 /// …and when it could not run at all.
 const DAILY_FAILED: &str = "the daily update of the skills added from Git did not run — Update \
-     from repositories in Skills (K) shows why";
+     now in Skills (K) shows why";
 
 /// The status line after the daily update: what `aisbx skills update` reported, one part per
 /// repository (an error when one failed), or that nothing changed. The full report stays on
@@ -106,6 +106,19 @@ fn daily_message(ok: bool, report: &str) -> (bool, String) {
             format!("skills from Git, daily update: {}", lines.join(" · ")),
         ),
     }
+}
+
+/// The status line once the store was read after an import or an add: the skills new to it.
+fn new_skills_message(new: &[String]) -> String {
+    let names = match new.len() {
+        0 => return "no new skills in the store".to_string(),
+        n if n <= SKILLS_NAMED => new.join(", "),
+        n => format!("{} +{}", new[..SKILLS_NAMED].join(", "), n - SKILLS_NAMED),
+    };
+    format!(
+        "{} in the store: {names}",
+        plural(new.len(), "new skill", "new skills")
+    )
 }
 
 /// [`App::litellm_root`]: the real folder, or under `cargo test` one that does not exist.
@@ -164,16 +177,44 @@ const STATUS_TTL: Duration = Duration::from_secs(6);
 const GLOBAL_SAVED: &str = "saved for every sandbox — existing sandboxes get the change at \
      their next start, new ones at their first";
 /// What an add of skills says when skill names follow the repository: it always takes them all.
-const ADD_WHOLE_REPO: &str = "type only the repository: every skill of it comes in, off until you \
-     switch it on, so you pick the ones you want on Skills (K)";
+const ADD_WHOLE_REPO: &str = "type only the repository: all its skills come in, and you switch on \
+     the ones you want";
 
-/// The first line under the skills screen's title.
-pub const SKILLS_INTRO: &str = "A switch on gives the skill to every sandbox at its next start. A \
-     sandbox can switch single skills the other way (Sandbox skills, i).";
+/// The first line under the skills screen's title: switch on only what every sandbox needs.
+pub const SKILLS_INTRO: &str = "Hint: Switch 'on' here only the skills that every sandbox needs: keep \
+     most of them 'off'. You can selectively switch 'on' skills later for any sandbox when you create them, and \
+     also for existing sandboxes.";
+
+/// What the skills screen says over an empty store.
+pub const NO_STORE_SKILLS_YET: &str = "No skills yet: add a Git repository's skills below.";
 
 /// The line under a sandbox skills screen's title, where the switches reach the sandbox.
-pub const SANDBOX_SKILLS_INTRO: &str = "On: the agent gets the skill at the sandbox's next start. \
-     A switch that differs from all sandboxes is this sandbox's own (own).";
+pub const SANDBOX_SKILLS_INTRO: &str = "The agent gets the skills switched on here, from the \
+     sandbox's next start. A skill you do not switch here follows its switch for all sandboxes \
+     (Skills, K); set here marks the ones you switched.";
+
+/// The heading over the rows that bring skills into the store, on `K` and on `i`.
+const ADD_SKILLS: &str = "Add skills";
+
+/// What a sandbox's own switch is called beside its skill: on `i`, in the create wizard.
+pub const SET_HERE: &str = "set here";
+
+/// The title of the skills screen (`K`); a sandbox's skills screen (`i`) is `Skills · <label>`.
+pub const SKILLS_TITLE: &str = "Skills · all sandboxes";
+
+/// What read-write access to the shared skills risks: the body of every confirmation in front of
+/// it, one paragraph each.
+pub const READWRITE_RISK: [&str; 3] = [
+    "Read-write lets the agent change the shared skills, and every other sandbox loads its \
+     changes, read-only ones included.",
+    "A skill holds scripts that agents run: one prompt-injected agent could plant code in every \
+     sandbox that uses the skill.",
+    "The skill switches do not apply: the sandbox gets every shared skill. Use read-write only to \
+     write skills in a sandbox; keep read-only otherwise.",
+];
+
+/// The answer of every confirmation in front of read-write access to the shared skills.
+pub const ALLOW_READWRITE: &str = "Allow read-write";
 
 /// Two clicks on the same row inside this window start the sandbox.
 const DOUBLE_CLICK: Duration = Duration::from_millis(450);
@@ -476,7 +517,7 @@ impl CreateRow {
             | CreateRow::ModelPick(..)
             | CreateRow::ModelOn(_) => Some(CreateRow::ModelsFold),
             CreateRow::ConfigFile(_) => Some(CreateRow::FilesFold),
-            CreateRow::StoreSkill(_) => Some(CreateRow::SkillsFold),
+            CreateRow::Skills | CreateRow::StoreSkill(_) => Some(CreateRow::SkillsFold),
             CreateRow::StatusLine
             | CreateRow::Ports
             | CreateRow::DenyNetwork
@@ -539,11 +580,12 @@ pub enum CreateRow {
     Clone,
     /// Mount the workspace's `.git` folder read-only. Only where it has one and clone mode is off.
     GitGuard,
-    /// How the host's shared agent-skills store is mounted (`--skills`). Only where sbx mounts it
-    /// for the backend's base agent.
+    /// How the host's shared agent-skills store is mounted (`--skills`), first under
+    /// [`CreateRow::SkillsFold`].
     Skills,
-    /// Shows or hides a switch per store skill under it ([`WizardState::skills_open`]). Only
-    /// while the store is shared read-only and holds a skill.
+    /// Shows or hides the skills mode and a switch per store skill under it
+    /// ([`WizardState::skills_open`]). Only where sbx mounts the store for the backend's base
+    /// agent.
     SkillsFold,
     /// One of the store's skills, by index into [`WorkspaceAnswers::store_skills`]: on, the
     /// sandbox gets it.
@@ -639,7 +681,7 @@ impl CreateForm {
                 git_offered: false,
                 folders: Default::default(),
                 extra_folders: Vec::new(),
-                skills: skills_default,
+                skills: skills_default.safe(),
                 store_skills: Vec::new(),
                 store_global: Default::default(),
                 store_own: Default::default(),
@@ -776,7 +818,7 @@ impl CreateForm {
             .is_some_and(Backend::shares_skills)
     }
 
-    /// Are the store-skill switches offered ([`CreateRow::SkillsFold`])? Only where the backend's
+    /// Are the store-skill switches offered ([`CreateRow::StoreSkill`])? Only where the backend's
     /// hook links the store, the store is shared read-only and holds a skill: off, the sandbox
     /// gets no store; read-write, every skill.
     pub fn store_skills_offered(&self, catalog: &Catalog) -> bool {
@@ -924,9 +966,8 @@ impl CreateForm {
             rows.push(CreateRow::GitGuard);
         }
         if self.skills_offered(catalog) {
-            rows.push(CreateRow::Skills);
+            rows.extend([CreateRow::SkillsFold, CreateRow::Skills]);
             if self.store_skills_offered(catalog) {
-                rows.push(CreateRow::SkillsFold);
                 rows.extend((0..self.workspace.store_skills.len()).map(CreateRow::StoreSkill));
             }
         }
@@ -979,10 +1020,14 @@ impl CreateForm {
 
     /// The order the addon rows are offered in: the host-cache kits first (the form's *Host
     /// caches* block), then the others, each in catalog order. The renderer draws them the same way.
-    /// A kit that does not work with the picked harness ([`Addon::applies_to`]) is not offered.
+    /// A kit that does not work with the picked harness ([`Addon::applies_to`]) is not offered, nor
+    /// is a deprecated one ([`crate::kits::Kit::deprecated`]).
     pub fn addon_order(&self, catalog: &Catalog) -> Vec<usize> {
         let harness = self.effective_backend(catalog).map(Backend::harness);
-        let applies = |i: &usize| harness.is_none_or(|h| catalog.addons[*i].applies_to(h));
+        let applies = |i: &usize| {
+            let addon = &catalog.addons[*i];
+            !addon.kit.deprecated() && harness.is_none_or(|h| addon.applies_to(h))
+        };
         let host = |i: &usize| self.kits.host.get(*i).is_some_and(Option::is_some);
         let (mut first, rest): (Vec<usize>, Vec<usize>) =
             (0..catalog.addons.len()).filter(applies).partition(host);
@@ -1331,15 +1376,6 @@ impl AuthForm {
             };
         }
         &["Applying this stores the token. It works at once; nothing is rebuilt."]
-    }
-}
-
-/// The skills screen's line on who gets its changes: the sandboxes that share the store.
-pub fn skills_shared_line(sharers: usize) -> String {
-    match sharers {
-        0 => "Shared with every new sandbox that gets the skills; none here yet.".into(),
-        1 => "Shared with 1 sandbox here: it gets a change at its next session.".into(),
-        n => format!("Shared with {n} sandboxes here: they get a change at their next session."),
     }
 }
 
@@ -2081,7 +2117,8 @@ impl SettingsForm {
                 SettingTone::Plain,
             ),
             sbx::SkillsMode::Readwrite => (
-                "new sandboxes can change the shared skills every sandbox loads",
+                "new sandboxes can change the shared skills every sandbox loads; the create \
+                 wizard still starts read-only",
                 SettingTone::Warn,
             ),
         };
@@ -2182,9 +2219,36 @@ pub enum SandboxSkillRow {
     ApplyNow,
     /// Drop this sandbox's own switches: it follows the switches for all sandboxes again.
     Reset,
+    /// Rebuild a sandbox that mounts the store read-write with it read-only.
+    MakeReadonly,
+    /// [`SkillRow::Import`] from here: this host's skills into the store.
+    Import,
+    /// [`SkillRow::AddRepo`] from here: a Git repository's skills into the store.
+    AddRepo,
     /// Deprecated: this sandbox's Repo skills screen. Only while skill repositories are in use.
     RepoSkills,
     Close,
+}
+
+/// The details pane's skills row of one sandbox ([`App::skills_summary`]): what its agent gets,
+/// a muted gloss, and the action that changes it with that action's button words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillsSummary {
+    pub value: String,
+    pub gloss: String,
+    /// The gloss is a warning: the sandbox mounts the store read-write.
+    pub warn: bool,
+    /// The sandbox's skills (`i`), or the store (`K`) while the sandbox has none to switch;
+    /// `None` where neither changes what the agent gets.
+    pub fix: Option<(Action, &'static str)>,
+}
+
+/// How many skill names the details pane's skills row lists before it counts the rest.
+const SKILLS_NAMED: usize = 3;
+
+/// `n` and the noun for it: `1 skill`, `2 skills`.
+fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
 }
 
 /// The MCP screen of one sandbox (`t`): which MCP servers its gateway has loaded.
@@ -2276,14 +2340,14 @@ impl KitsForm {
 
     /// The order the editor lists the kits in, as the create wizard's Kits step does: the
     /// host-folder kits first ([`model::is_host_folder_kit`]), then the others, in catalog order.
-    /// A kit that does not work with the sandbox's harness is left out, unless the sandbox has it.
+    /// A kit that does not work with the sandbox's harness, or a deprecated one, is left out,
+    /// unless the sandbox has it.
     pub fn addon_order(&self, catalog: &Catalog) -> Vec<usize> {
         let applies = |i: &usize| {
+            let addon = &catalog.addons[*i];
             self.original.get(*i) == Some(&true)
-                || self
-                    .harness
-                    .as_deref()
-                    .is_none_or(|h| catalog.addons[*i].applies_to(h))
+                || (!addon.kit.deprecated()
+                    && self.harness.as_deref().is_none_or(|h| addon.applies_to(h)))
         };
         let host = |i: &usize| model::is_host_folder_kit(&catalog.addons[*i].kit.name);
         let (mut first, rest): (Vec<usize>, Vec<usize>) =
@@ -2790,10 +2854,9 @@ impl Ask {
             ],
             Ask::SetSecret(_) => &[],
             Ask::AddSkills => &[
-                "owner/repo (GitHub) or a Git URL, for example anthropics/skills. Every skill of",
-                "the repository comes in, off until you switch it on; skills it gains later come",
-                "in with the daily update. A skill of the same name already in the store is",
-                "replaced (--force).",
+                "owner/repo (GitHub) or a Git URL, for example anthropics/skills. All skills of",
+                "the repository come in; skills it gains later come in with the daily update.",
+                "A skill of the same name already in the store is replaced (--force).",
             ],
         };
         lines.iter().map(|l| (*l).to_string()).collect()
@@ -2925,8 +2988,9 @@ pub struct Registered {
 /// Where the skills of a finished store job came from, recorded once the store is read again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OriginRecord {
-    /// `sbx skills import` ran: a skill a host folder holds came from the first such folder.
-    Import,
+    /// `sbx skills import` ran while the store held `before`: a skill a host folder holds came
+    /// from the first such folder.
+    Import { before: Vec<String> },
     /// `sbx skills add <repo>` ran while the store held `before`.
     Added { repo: String, before: Vec<String> },
 }
@@ -3004,6 +3068,11 @@ pub struct PostJob {
     pub stage_beside: Vec<PathBuf>,
     /// The staging folder's read-only mount, added to the create once the copy is staged.
     pub stage_mount: Option<String>,
+    /// A rebuild changed the sandbox's skills mode: record it, so the next rebuild repeats it.
+    pub skills_mode: Option<(String, sbx::SkillsMode)>,
+    /// The create form's skills mode, set once its read-write confirmation is answered: a
+    /// confirmation without steps runs no job and applies this at once.
+    pub form_skills: Option<sbx::SkillsMode>,
     // No field for detached mode: `sbx ls --json` reports it (`detached`).
 }
 
@@ -3031,6 +3100,8 @@ pub struct RebuildPlan {
     pub approved: usize,
     /// It comes back in detached mode.
     pub keep_running: bool,
+    /// The skills mode it comes back with where that changes; `None` keeps the sandbox's.
+    pub skills: Option<sbx::SkillsMode>,
     /// Host folders an addon wanted that the new container will not mount, and why.
     pub mount_notes: Vec<String>,
 }
@@ -3513,7 +3584,11 @@ impl App {
             .find(|step| form.step_problem(*step, &catalog).is_some());
         form.wizard.prefilled = true;
         form.wizard_set_step(&catalog, refused.unwrap_or(CreateStep::Review));
-        self.set_info(crate::create::PREFILLED);
+        let saved = defaults.addons.get(&defaults.backend);
+        let dropped = crate::compat::host_skills_prefill(saved.map_or(&[], Vec::as_slice));
+        let readwrite = defaults.skills == Some(sbx::SkillsMode::Readwrite);
+        let read_only = readwrite.then_some(crate::create::PREFILLED_READ_ONLY);
+        self.set_info(dropped.or(read_only).unwrap_or(crate::create::PREFILLED));
     }
 
     /// Put the models of a connection on offer for pinning — the list a sandbox on it harvested
@@ -3850,19 +3925,27 @@ impl App {
         }
         let store: Vec<String> = self.skills.iter().flat_map(|s| s.skills.clone()).collect();
         let mut found = Vec::new();
+        let mut new: Vec<String> = Vec::new();
         for record in std::mem::take(&mut self.pending_origins) {
-            match record {
-                OriginRecord::Import => {
-                    found.extend(store_skills::imported(&store, &self.host_skill_folders))
+            let before = match record {
+                OriginRecord::Import { before } => {
+                    found.extend(store_skills::imported(&store, &self.host_skill_folders));
+                    before
                 }
                 OriginRecord::Added { repo, before } => {
-                    found.extend(store_skills::added(&repo, &before, &store))
+                    found.extend(store_skills::added(&repo, &before, &store));
+                    before
+                }
+            };
+            for skill in store.iter().filter(|s| !before.contains(s)) {
+                if !new.contains(skill) {
+                    new.push(skill.clone());
                 }
             }
         }
-        let recorded = self.change_switches(|s| s.record(found));
-        if let Err(e) = recorded {
-            self.set_error(e);
+        match self.change_switches(|s| s.record(found)) {
+            Ok(_) => self.set_info(new_skills_message(&new)),
+            Err(e) => self.set_error(e),
         }
     }
 
@@ -4075,6 +4158,12 @@ impl App {
         }
         if let Some((name, label)) = &post.relabel {
             self.registry.set_display_name(name, Some(label.clone()));
+        }
+        if let Some((name, mode)) = &post.skills_mode {
+            self.registry.set_skills(name, Some(*mode));
+        }
+        if let (Some(mode), Screen::Create(form)) = (post.form_skills, &mut self.screen) {
+            form.workspace.skills = mode;
         }
         if let Some(name) = &post.forget {
             self.registry.forget(name);
@@ -5764,6 +5853,10 @@ impl App {
                     self.action_pick_folder();
                     return;
                 }
+                FieldEffect::AskReadwrite => {
+                    self.ask_skills_readwrite();
+                    return;
+                }
             }
         }
 
@@ -5881,11 +5974,14 @@ impl App {
     /// takes the cursor and the answer takes that value. A stored connection whose key is there
     /// answers its step, like a radio: picked, and on.
     fn pick_form_choice(&mut self, index: usize, value: usize) {
+        let readwrite = crate::create::SKILLS_MODES.get(value) == Some(&sbx::SkillsMode::Readwrite);
         if let Screen::Settings(form) = &mut self.screen {
             if form.rows().get(index) == Some(&SettingsRow::SkillsDefault) {
                 form.focus = index;
-                if let Some(&mode) = crate::create::SKILLS_MODES.get(value) {
-                    self.set_skills_default(mode);
+                match crate::create::SKILLS_MODES.get(value) {
+                    _ if readwrite => self.ask_skills_readwrite_default(),
+                    Some(&mode) => self.set_skills_default(mode),
+                    None => {}
                 }
             }
             return;
@@ -5898,6 +5994,11 @@ impl App {
         let Some(WizardRow::Field(row)) = rows.get(index).copied() else {
             return;
         };
+        if row == CreateRow::Skills && readwrite {
+            form.set_wizard_focus(index);
+            self.ask_skills_readwrite();
+            return;
+        }
         let before = form.connection.litellm.clone();
         if !form.pick_choice(row, value) {
             return;
@@ -5911,6 +6012,40 @@ impl App {
         if picked.is_some_and(|name| !self.litellm_key_missing(&name)) {
             self.wizard_next();
         }
+    }
+
+    /// `w` on the create wizard's skills mode, or a click on its *read-write*: the confirmation in
+    /// front of read-write for the new sandbox. Its answer sets the mode on the form; no job runs.
+    pub fn ask_skills_readwrite(&mut self) {
+        let Screen::Create(form) = &self.screen else {
+            return;
+        };
+        if form.workspace.skills == sbx::SkillsMode::Readwrite {
+            return;
+        }
+        let mut body: Vec<String> = READWRITE_RISK.map(String::from).to_vec();
+        body.push(
+            "A rebuild keeps it. Make read-only on the sandbox's skills (Sandbox skills, i) takes \
+             it back."
+                .into(),
+        );
+        self.modal = Some(Modal::Confirm(Confirm {
+            title: "Read-write skills for this sandbox".into(),
+            body,
+            danger: true,
+            confirm_label: ALLOW_READWRITE.into(),
+            yes: false,
+            job: PendingJob {
+                title: "Read-write skills".into(),
+                steps: Vec::new(),
+                post: PostJob {
+                    form_skills: Some(sbx::SkillsMode::Readwrite),
+                    ..Default::default()
+                },
+                fallback: None,
+                fallback_hint: None,
+            },
+        }));
     }
 
     /// Next, or ↵ on a radio that answers its step: refused with the step's own message.
@@ -6372,11 +6507,17 @@ impl App {
         let Some(Modal::Confirm(confirm)) = &self.modal else {
             return;
         };
-        if yes {
-            let job = confirm.job.clone();
-            self.start_job(job);
-        } else {
+        if !yes {
             self.modal = None;
+            return;
+        }
+        let job = confirm.job.clone();
+        match job.steps.is_empty() {
+            true => {
+                self.modal = None;
+                self.apply_post(&job.post);
+            }
+            false => self.start_job(job),
         }
     }
 
@@ -7592,6 +7733,9 @@ impl App {
         let mut body = vec![
             format!("Copies the skills in {} into", join_names(&sources)),
             "the store sbx mounts into every sandbox that shares it.".into(),
+            "Imported skills do not update: import again to refresh them. Skills added from a"
+                .into(),
+            "Git repository update daily.".into(),
             String::new(),
             self.skills_sharers_line(),
         ];
@@ -7608,6 +7752,7 @@ impl App {
             body.push(format!("Store: {}", model::tilde(&store)));
             body.push("It outlives every sandbox; `sbx reset` is what clears it.".into());
         }
+        let before: Vec<String> = self.skills.iter().flat_map(|s| s.skills.clone()).collect();
         self.modal = Some(Modal::Confirm(Confirm {
             title: "Import host skills into the shared store".into(),
             body,
@@ -7621,7 +7766,7 @@ impl App {
                     sbx::skills_import_argv(true),
                 )],
                 post: PostJob {
-                    record_origins: Some(OriginRecord::Import),
+                    record_origins: Some(OriginRecord::Import { before }),
                     ..Default::default()
                 },
                 fallback: None,
@@ -7640,8 +7785,8 @@ impl App {
             .map(SkillRow::Skill)
             .collect();
         let any = !rows.is_empty();
-        rows.push(SkillRow::Import);
         rows.push(SkillRow::AddRepo);
+        rows.push(SkillRow::Import);
         if any {
             rows.push(SkillRow::Update);
         }
@@ -7673,10 +7818,7 @@ impl App {
         match source {
             store_skills::Source::Folder(dir) => (dir.clone(), "imported from this host".into()),
             store_skills::Source::Repo(repo) => (repo.clone(), "added from Git".into()),
-            store_skills::Source::Unknown => (
-                "Other skills".into(),
-                "where they came from is not recorded".into(),
-            ),
+            store_skills::Source::Unknown => ("Other skills".into(), String::new()),
         }
     }
 
@@ -7693,13 +7835,13 @@ impl App {
         match self.skills_writers() {
             0 => {}
             1 => out.push(
-                "1 sandbox mounts the store read-write: it gets every skill, whatever the switch \
-                 says."
+                "1 sandbox has the skills read-write: it gets all of them and can change them for \
+                 every sandbox. Make read-only on its skills (i) stops that."
                     .into(),
             ),
             n => out.push(format!(
-                "{n} sandboxes mount the store read-write: they get every skill, whatever the \
-                 switch says."
+                "{n} sandboxes have the skills read-write: they get all of them and can change \
+                 them for every sandbox. Make read-only on their skills (i) stops that."
             )),
         }
         out
@@ -7764,8 +7906,9 @@ impl App {
     pub fn skill_heading(&self, row: &SkillRow) -> Option<(String, String)> {
         match row {
             SkillRow::Skill(skill) => Some(Self::source_heading(&self.skill_source(skill))),
-            SkillRow::Import | SkillRow::AddRepo | SkillRow::Update | SkillRow::AutoUpdate => {
-                Some(("Change the store".into(), String::new()))
+            SkillRow::Import | SkillRow::AddRepo => Some((ADD_SKILLS.into(), String::new())),
+            SkillRow::Update | SkillRow::AutoUpdate => {
+                Some(("Updates".into(), "of the skills added from Git".into()))
             }
             SkillRow::RepoSkills => Some(("Skill repositories".into(), "deprecated".into())),
             SkillRow::Close => None,
@@ -7796,26 +7939,20 @@ impl App {
                 };
                 (name.clone(), meta)
             }
-            SkillRow::Import => ("Import this host's skills".to_string(), {
-                let sources = sbx::host_skill_sources();
-                match sources.is_empty() {
-                    true => "no skill directories on this host".to_string(),
-                    false => sources.join(", "),
-                }
-            }),
             SkillRow::AddRepo => (
                 "Add from a Git repository".to_string(),
-                "owner/repo or a Git URL".to_string(),
+                "recommended: updates automatically".to_string(),
             ),
-            SkillRow::Update => (
-                "Update from repositories".to_string(),
-                "the skills added from a repository".to_string(),
+            SkillRow::Import => (
+                "Import this host's skills".to_string(),
+                "not recommended: no updates".to_string(),
             ),
+            SkillRow::Update => ("Update now".to_string(), String::new()),
             SkillRow::AutoUpdate => (
                 "Update daily".to_string(),
                 match self.switches.updated_at {
                     Some(at) => update_meta(&crate::state::ago(at), &self.switches.last_report),
-                    None => "the skills added from Git, every 24 hours".to_string(),
+                    None => String::new(),
                 },
             ),
             SkillRow::RepoSkills => (
@@ -7828,60 +7965,54 @@ impl App {
 
     /// What ↵, d and the letter keys do to the skills-screen row under the cursor.
     pub fn skill_notes(&self, row: &SkillRow) -> Vec<String> {
-        // Whole sentences naming what acts, as the secrets' notes do.
         match row {
             SkillRow::Skill(name) => {
-                let from = match self.skill_source(name) {
+                let mut notes = vec![format!(
+                    "On: every sandbox gets {name} at its next start, unless the sandbox \
+                     switches it off on its skills (i). d removes it from the store."
+                )];
+                match self.skill_source(name) {
                     store_skills::Source::Repo(repo) if self.switches.repos.contains_key(&repo) => {
-                        format!(
-                            "It came from {repo}: the daily update and Update from repositories \
-                             keep it in step, and remove it when the repository deletes it."
-                        )
+                        notes.push(format!(
+                            "From {repo}: the daily update and Update now keep it in step."
+                        ))
                     }
                     store_skills::Source::Repo(repo) => {
-                        format!("It came from {repo}: Update from repositories refreshes it.")
+                        notes.push(format!("From {repo}: Update now refreshes it."))
                     }
-                    store_skills::Source::Folder(dir) => {
-                        format!("It is in {dir} on this host: import again to refresh it.")
-                    }
-                    store_skills::Source::Unknown => {
-                        "Where it came from is not recorded: aisbx records it when you add or \
-                         import here."
-                            .to_string()
-                    }
-                };
-                vec![
-                    format!(
-                        "When on, every sandbox gets {name} at its next start, except one that \
-                         switches it off. Otherwise, only a sandbox that switches it on gets it \
-                         (Sandbox skills, i). Remove deletes it from the store."
-                    ),
-                    from,
-                ]
+                    store_skills::Source::Folder(dir) => notes.push(format!(
+                        "From {dir} on this host: it does not update. Import again to refresh it."
+                    )),
+                    store_skills::Source::Unknown => {}
+                }
+                notes
             }
-            SkillRow::Import => vec![
-                "Runs `sbx skills import --force`: copies every skill in those directories into \
-                 the store, replacing a skill of the same name whole. Asks first."
-                    .into(),
-            ],
             SkillRow::AddRepo => vec![
-                "Asks for a repository, then runs `sbx skills add <repo> --force` — every SKILL.md \
-                 in it, or only the names you list after it."
+                "Asks for owner/repo or a Git URL and adds all its skills. The daily update keeps \
+                 them in step with the repository."
                     .into(),
             ],
-            SkillRow::Update => vec![format!(
-                "Runs `sbx skills update`: every skill added from a repository is fetched again \
-                 and replaced. {} sandbox{} here would load the new versions.",
-                self.skills_sharers(),
-                if self.skills_sharers() == 1 { "" } else { "es" }
-            )],
+            SkillRow::Import => {
+                let sources = sbx::host_skill_sources();
+                vec![match sources.is_empty() {
+                    true => "This host has no agent skill folders to import.".to_string(),
+                    false => format!(
+                        "Copies the skills in {} into the store. They do not update: import \
+                         again to refresh them.",
+                        sources.join(", ")
+                    ),
+                }]
+            }
+            SkillRow::Update => vec![
+                "Brings the skills added from Git in step with their repositories now, as the \
+                 daily update does. Asks first."
+                    .into(),
+            ],
             SkillRow::AutoUpdate => {
                 let mut notes = vec![
-                    "When on, the dashboard brings the skills added from Git in step with their \
-                     repositories once a day while it runs: new skills come in (off until you \
-                     switch them on), changed ones are replaced, deleted ones leave the store. \
-                     Otherwise, only Update from repositories does. A skill's scripts are code, \
-                     so an update brings new code into every sandbox that has the skill."
+                    "On: once a day while the dashboard runs, the skills added from Git follow \
+                     their repositories. A skill's scripts are code: an update brings new code \
+                     into the sandboxes that use it."
                         .into(),
                 ];
                 if !self.switches.last_report.is_empty() {
@@ -7971,7 +8102,7 @@ impl App {
         }) {
             Ok(_) => self.set_info(match on {
                 true => "the skills added from Git now update once a day",
-                false => "the skills added from Git now update only with Update from repositories",
+                false => "the skills added from Git now update only with Update now",
             }),
             Err(why) => self.set_error(why),
         }
@@ -8011,7 +8142,8 @@ impl App {
 
     /// Every line on a sandbox's skills screen, in drawing order: the store's skills under where
     /// they came from (only while the switches reach it), *Apply now* while it runs, *Reset*
-    /// while it has its own switches, the deprecated Repo skills, and *Close*.
+    /// while it has its own switches, the ways to add skills to the store (while it mounts the
+    /// store), the deprecated Repo skills, and *Close*.
     pub fn sandbox_skill_rows(&self, sandbox: &str) -> Vec<SandboxSkillRow> {
         let mut rows: Vec<SandboxSkillRow> = Vec::new();
         if self.switches_apply(sandbox) && self.switches_error.is_none() {
@@ -8031,6 +8163,17 @@ impl App {
                 rows.push(SandboxSkillRow::Reset);
             }
         }
+        if self.store_mode(sandbox) == Some(model::Skills::Known(sbx::SkillsMode::Readwrite)) {
+            rows.push(SandboxSkillRow::MakeReadonly);
+        }
+        let mounted = match self.store_mode(sandbox) {
+            Some(model::Skills::Known(mode)) => mode != sbx::SkillsMode::Off,
+            Some(model::Skills::Unrecorded) => true,
+            None => false,
+        };
+        if mounted {
+            rows.extend([SandboxSkillRow::AddRepo, SandboxSkillRow::Import]);
+        }
         if self.skill_repos_in_use {
             rows.push(SandboxSkillRow::RepoSkills);
         }
@@ -8043,8 +8186,11 @@ impl App {
     pub fn sandbox_skill_heading(&self, row: &SandboxSkillRow) -> Option<(String, String)> {
         match row {
             SandboxSkillRow::Skill(skill) => Some(Self::source_heading(&self.skill_source(skill))),
-            SandboxSkillRow::ApplyNow | SandboxSkillRow::Reset => {
+            SandboxSkillRow::ApplyNow | SandboxSkillRow::Reset | SandboxSkillRow::MakeReadonly => {
                 Some(("This sandbox".into(), String::new()))
+            }
+            SandboxSkillRow::Import | SandboxSkillRow::AddRepo => {
+                Some((ADD_SKILLS.into(), String::new()))
             }
             SandboxSkillRow::RepoSkills => Some(("Skill repositories".into(), "deprecated".into())),
             SandboxSkillRow::Close => None,
@@ -8069,7 +8215,7 @@ impl App {
                     false => "off",
                 };
                 let meta = match self.switches.own(sandbox, skill) {
-                    Some(_) => format!("own · {all} for all sandboxes"),
+                    Some(_) => format!("{SET_HERE} · {all} for all sandboxes"),
                     None => String::new(),
                 };
                 (skill.clone(), meta)
@@ -8079,9 +8225,15 @@ impl App {
                 "link the switched-on skills into the running sandbox".into(),
             ),
             SandboxSkillRow::Reset => (
-                "Follow all sandboxes".into(),
-                "drops this sandbox's own switches".into(),
+                "Reset to all sandboxes".into(),
+                "drops the switches set here".into(),
             ),
+            SandboxSkillRow::MakeReadonly => (
+                "Make read-only".into(),
+                "rebuilds it with the shared skills read-only".into(),
+            ),
+            SandboxSkillRow::Import => self.skill_view(&SkillRow::Import),
+            SandboxSkillRow::AddRepo => self.skill_view(&SkillRow::AddRepo),
             SandboxSkillRow::RepoSkills => (
                 crate::compat::SKILL_REPOS_ROW.to_string(),
                 "for this sandbox".into(),
@@ -8100,8 +8252,8 @@ impl App {
                 };
                 let own = match self.switches.own(sandbox, skill) {
                     Some(_) => format!(
-                        "This switch is this sandbox's own: for all sandboxes it is {all}. \
-                         Switching it back follows all sandboxes again."
+                        "This switch is set here: for all sandboxes it is {all}. Switch it back \
+                         to follow all sandboxes again."
                     ),
                     None => format!(
                         "It follows the switch for all sandboxes ({all}, in Skills, K) until \
@@ -8124,6 +8276,14 @@ impl App {
             SandboxSkillRow::Reset => vec![
                 "Every skill then follows its switch for all sandboxes again (Skills, K).".into(),
             ],
+            SandboxSkillRow::MakeReadonly => vec![
+                "Rebuilds the sandbox with the shared skills read-only: its agent can then no \
+                 longer change the skills that other sandboxes load, and the switches apply. Asks \
+                 first, as every rebuild does."
+                    .into(),
+            ],
+            SandboxSkillRow::Import => self.skill_notes(&SkillRow::Import),
+            SandboxSkillRow::AddRepo => self.skill_notes(&SkillRow::AddRepo),
             SandboxSkillRow::RepoSkills => vec![
                 "Picks skills of the repos `aisbx skill-repo` configured for this sandbox. \
                  Deprecated: add the skills to the store instead and switch them on here."
@@ -8152,17 +8312,88 @@ impl App {
                     .to_string()
             }
             Some(model::Skills::Known(sbx::SkillsMode::Readwrite)) => {
-                "This sandbox mounts the store read-write: it gets every store skill, and the \
-                 switches do not apply."
+                "This sandbox mounts the store read-write: its agent can change the skills that \
+                 every other sandbox loads, and the switches do not apply. Make read-only rebuilds \
+                 it with read-only access."
                     .to_string()
             }
             Some(_) if self.skills.as_ref().is_none_or(|s| s.skills.is_empty()) => {
-                "The shared store holds no skill yet: add or import skills in Skills (K)."
+                "The shared store holds no skill yet: add a Git repository's skills below, then \
+                 switch on the ones this sandbox gets."
                     .to_string()
             }
             Some(_) => SANDBOX_SKILLS_INTRO.to_string(),
         };
         vec![text]
+    }
+
+    /// What the details pane says of a sandbox's skills: the store skills its agent gets (the
+    /// first few by name), how many the store holds, and where to change that. `None` for a
+    /// backend that mounts no store.
+    pub fn skills_summary(&self, sb: &Sandbox) -> Option<SkillsSummary> {
+        let summary = |value: String, gloss: String, fix| SkillsSummary {
+            value,
+            gloss,
+            warn: false,
+            fix,
+        };
+        let change = Some((Action::SandboxSkills, "Change"));
+        let store = Some((Action::Skills, "Add skills"));
+        let all = self.skills.as_ref().map(|s| s.skills.len());
+        let mode = match sb.skills? {
+            model::Skills::Known(sbx::SkillsMode::Off) => {
+                let gloss = crate::create::skills_gloss(sbx::SkillsMode::Off);
+                return Some(summary("off".into(), gloss.into(), None));
+            }
+            model::Skills::Known(sbx::SkillsMode::Readwrite) => {
+                let gloss = "⚠ read-write: its agent can change them for every sandbox";
+                let value = match all {
+                    Some(n) => format!("all {}", plural(n, "shared skill", "shared skills")),
+                    None => "every shared skill".into(),
+                };
+                return Some(SkillsSummary {
+                    warn: true,
+                    ..summary(value, gloss.into(), change)
+                });
+            }
+            mode => mode,
+        };
+        if self.switches_error.is_some() {
+            let gloss = "the skill switches cannot be read".into();
+            return Some(summary(
+                "unknown".into(),
+                gloss,
+                Some((Action::Skills, "Open")),
+            ));
+        }
+        let Some(n) = all else {
+            let gloss = match mode {
+                model::Skills::Unrecorded => "created outside aisbx",
+                _ => crate::create::skills_gloss(sbx::SkillsMode::Readonly),
+            };
+            return Some(summary("read-only".into(), gloss.into(), change));
+        };
+        if n == 0 {
+            let gloss = "the shared store holds no skill yet".into();
+            return Some(summary("none yet".into(), gloss, store));
+        }
+        let on: Vec<String> = (self.skill_sources().into_iter())
+            .flat_map(|(_, skills)| skills)
+            .filter(|skill| self.switches.is_on(&sb.name, skill))
+            .collect();
+        let value = match on.len() {
+            0 => "none switched on".to_string(),
+            k if k <= SKILLS_NAMED => on.join(", "),
+            k => format!("{} +{}", on[..SKILLS_NAMED].join(", "), k - SKILLS_NAMED),
+        };
+        let gloss = match on.len() {
+            0 => format!(
+                "{} to pick from",
+                plural(n, "shared skill", "shared skills")
+            ),
+            k => format!("{k} of {}", plural(n, "shared skill", "shared skills")),
+        };
+        Some(summary(value, gloss, change))
     }
 
     fn sandbox_skills_key(&mut self, key: KeyEvent) {
@@ -8192,11 +8423,20 @@ impl App {
                 }
                 SandboxSkillRow::ApplyNow => self.apply_store_skills_now(&sandbox),
                 SandboxSkillRow::Reset => self.reset_store_skills(&sandbox),
+                SandboxSkillRow::MakeReadonly => self.make_skills_readonly(&sandbox),
+                SandboxSkillRow::Import => self.action_import_skills(),
+                SandboxSkillRow::AddRepo => self.ask(Ask::AddSkills, String::new(), String::new()),
                 SandboxSkillRow::RepoSkills => {
                     self.open_repo_skills(RepoScope::Sandbox(sandbox.clone()))
                 }
                 SandboxSkillRow::Close => self.screen = Screen::List,
             },
+            KeyCode::Char('i') if rows.contains(&SandboxSkillRow::Import) => {
+                self.action_import_skills()
+            }
+            KeyCode::Char('a') if rows.contains(&SandboxSkillRow::AddRepo) => {
+                self.ask(Ask::AddSkills, String::new(), String::new())
+            }
             KeyCode::F(5) => self.refresh(),
             KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => self.refresh(),
             _ => {}
@@ -8220,6 +8460,24 @@ impl App {
             fallback: None,
             fallback_hint: None,
         });
+    }
+
+    /// *Make read-only*: the rebuild that mounts the shared skills read-only, behind the rebuild's
+    /// confirmation.
+    fn make_skills_readonly(&mut self, name: &str) {
+        let addons = self.addons_of(name);
+        let readonly = Some(sbx::SkillsMode::Readonly);
+        let plan = self.recreate_plan(name, &addons, None, None, readonly);
+        let body = vec![format!(
+            "{} gets the shared skills read-only in place of read-write.",
+            self.sandbox_label(name)
+        )];
+        let confirm =
+            plan.and_then(|plan| self.rebuild_confirm(name, plan, "Make read-only", body));
+        match confirm {
+            Some(c) => self.modal = Some(Modal::Confirm(c)),
+            None => self.set_error(self.rebuild_refusal_text(name)),
+        }
     }
 
     /// *Follow all sandboxes*: drop the sandbox's own switches.
@@ -8577,11 +8835,10 @@ impl App {
         }
         let tracked = self.switches.repos.len();
         let mut body = vec![
-            "Brings the skills added from Git in step with their repositories: new skills of a"
+            "Brings the skills added from Git in step with their repositories: new skills come in,"
                 .into(),
-            "repository added whole come in (off until you switch them on), changed skills are"
+            "changed skills are replaced, and skills the repository deleted leave the store."
                 .into(),
-            "replaced, and skills the repository deleted leave the store.".into(),
             String::new(),
             match tracked {
                 0 => "No repository was added here yet: only `sbx skills update` runs.".into(),
@@ -8753,27 +9010,29 @@ impl App {
             KeyCode::End | KeyCode::Char('G') => form.focus = n - 1,
             KeyCode::Enter | KeyCode::Char(' ') => match row {
                 SettingsRow::Setting(i) => self.toggle_setting(i),
-                SettingsRow::SkillsDefault => self.step_skills_default(true),
+                SettingsRow::SkillsDefault => self.step_skills_default(),
                 SettingsRow::Close => self.screen = Screen::List,
             },
-            KeyCode::Right if row == SettingsRow::SkillsDefault => self.step_skills_default(true),
-            KeyCode::Left if row == SettingsRow::SkillsDefault => self.step_skills_default(false),
+            KeyCode::Left | KeyCode::Right if row == SettingsRow::SkillsDefault => {
+                self.step_skills_default()
+            }
+            KeyCode::Char('w') if row == SettingsRow::SkillsDefault => {
+                self.ask_skills_readwrite_default()
+            }
             KeyCode::F(5) => form.read(),
             KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => form.read(),
             _ => {}
         }
     }
 
-    /// ↵, → or ← on the skills row: the next or the previous mode, tightest first, wrapping.
-    fn step_skills_default(&mut self, forward: bool) {
+    /// ↵, → or ← on the skills row: off and read-only swap, read-write goes back to read-only
+    /// ([`sbx::SkillsMode::toggled`]). Read-write is [`App::ask_skills_readwrite_default`].
+    fn step_skills_default(&mut self) {
         let Screen::Settings(form) = &self.screen else {
             return;
         };
         match form.skills_mode() {
-            Some(mode) => self.set_skills_default(match forward {
-                true => mode.next(),
-                false => mode.prev(),
-            }),
+            Some(mode) => self.set_skills_default(mode.toggled()),
             None => self.set_error(format!(
                 "sbx's {SKILLS_DEFAULT_LABEL} could not be read — F5 reads it again"
             )),
@@ -8783,14 +9042,53 @@ impl App {
     /// Make `mode` the skills default: one `sbx settings set`, then read the settings back. The
     /// next refresh hands it to the create wizard.
     fn set_skills_default(&mut self, mode: sbx::SkillsMode) {
+        if let Some(job) = self.skills_default_job(mode) {
+            self.start_job(job);
+        }
+    }
+
+    /// `w` on the settings screen's skills default, or a click on its *read-write*: the
+    /// confirmation in front of read-write for every new sandbox that does not choose.
+    pub fn ask_skills_readwrite_default(&mut self) {
         let Screen::Settings(form) = &self.screen else {
             return;
         };
-        if form.skills_mode() == Some(mode) {
+        if form.skills_mode().is_none() {
+            self.set_error(format!(
+                "sbx's {SKILLS_DEFAULT_LABEL} could not be read — F5 reads it again"
+            ));
             return;
         }
+        let Some(job) = self.skills_default_job(sbx::SkillsMode::Readwrite) else {
+            return;
+        };
+        let mut body = vec![
+            "Every new sandbox that does not choose then gets read-write: aisbx up without \
+             --skills, and a plain sbx create. The create wizard still starts read-only."
+                .to_string(),
+        ];
+        body.extend(READWRITE_RISK.map(String::from));
+        self.modal = Some(Modal::Confirm(Confirm {
+            title: "Read-write skills for new sandboxes".into(),
+            body,
+            danger: true,
+            confirm_label: ALLOW_READWRITE.into(),
+            yes: false,
+            job,
+        }));
+    }
+
+    /// The job that makes `mode` the skills default; `None` off the settings screen or where it
+    /// is the default already.
+    fn skills_default_job(&self, mode: sbx::SkillsMode) -> Option<PendingJob> {
+        let Screen::Settings(form) = &self.screen else {
+            return None;
+        };
+        if form.skills_mode() == Some(mode) {
+            return None;
+        }
         let key = sbx::SKILLS_DEFAULT_MODE;
-        self.start_job(PendingJob {
+        Some(PendingJob {
             title: format!(
                 "Making {} the skills default",
                 crate::create::skills_mode_name(mode)
@@ -8805,7 +9103,7 @@ impl App {
             },
             fallback: None,
             fallback_hint: None,
-        });
+        })
     }
 
     /// Turn setting `i` the other way: one `sbx settings set`, then read the settings back.
@@ -10521,6 +10819,7 @@ impl App {
             None,
             &sb.models,
             None,
+            None,
             Some(&target),
         ) else {
             return ConnPlan::Refuse(self.rebuild_refusal(name).to_string());
@@ -11279,18 +11578,19 @@ impl App {
         addons: &[String],
         models: Option<&Overrides>,
     ) -> Option<PendingJob> {
-        self.recreate_plan(name, addons, models, None)
+        self.recreate_plan(name, addons, models, None, None)
             .map(|p| p.job)
     }
 
     /// [`App::recreate_job`], with the sandbox's backend and token kept, and — where the caller
-    /// says so — its detached mode changed. `keep_running: None` keeps whatever it has.
+    /// says so — its detached mode or its skills mode changed. `None` keeps whatever it has.
     fn recreate_plan(
         &self,
         name: &str,
         addons: &[String],
         models: Option<&Overrides>,
         keep_running: Option<bool>,
+        skills: Option<sbx::SkillsMode>,
     ) -> Option<RebuildPlan> {
         let sb = self.sandboxes.iter().find(|s| s.name == name)?;
         let backend = sb.backend.clone()?;
@@ -11303,6 +11603,7 @@ impl App {
             token.as_deref(),
             &models,
             keep_running,
+            skills,
             None,
         )
     }
@@ -11317,7 +11618,7 @@ impl App {
         token: Option<&str>,
         models: &Overrides,
     ) -> Option<PendingJob> {
-        self.rebuild_plan(name, backend, addons, token, models, None, None)
+        self.rebuild_plan(name, backend, addons, token, models, None, None, None)
             .map(|p| p.job)
     }
 
@@ -11456,8 +11757,9 @@ impl App {
     }
 
     /// Everything a rebuild does, and what the confirmation in front of it has to say about it.
-    /// `target`: the LiteLLM connection an `A` move rebuilds onto; `None` keeps the sandbox's.
-    /// `None` when a blocker refuses the rebuild.
+    /// `skills`: the skills mode it changes to; `None` keeps the sandbox's. `target`: the LiteLLM
+    /// connection an `A` move rebuilds onto; `None` keeps the sandbox's. `None` when a blocker
+    /// refuses the rebuild.
     #[allow(clippy::too_many_arguments)]
     fn rebuild_plan(
         &self,
@@ -11467,6 +11769,7 @@ impl App {
         token: Option<&str>,
         models: &Overrides,
         keep_running: Option<bool>,
+        skills: Option<sbx::SkillsMode>,
         target: Option<&crate::litellm::Connection>,
     ) -> Option<RebuildPlan> {
         // A move is wanted when the own connection is gone, so only the other blockers apply.
@@ -11550,7 +11853,8 @@ impl App {
         };
         // Repeat the ports and the skills mode; an unrecorded mode passes no `--skills`.
         let ports = sbx::republish_specs(&sb.ports, sb.clone);
-        let skills = sb.skills.and_then(model::Skills::mode);
+        let new_skills = skills;
+        let skills = new_skills.or_else(|| sb.skills.and_then(model::Skills::mode));
         // A failed read means no rules, not a failed rebuild.
         let rules = sbx::policy_rules(name).unwrap_or_default();
         let deny_network = sbx::deny_specs(&rules, name);
@@ -11642,6 +11946,7 @@ impl App {
                         )
                         .collect(),
                     stage_mount,
+                    skills_mode: new_skills.map(|mode| (name.to_string(), mode)),
                     ..Default::default()
                 },
                 fallback: None,
@@ -11651,6 +11956,7 @@ impl App {
             readded,
             approved,
             keep_running: keep,
+            skills: new_skills,
             mount_notes,
         })
     }
@@ -11677,7 +11983,7 @@ impl App {
         title: &str,
         body: Vec<String>,
     ) -> Option<Confirm> {
-        let plan = self.recreate_plan(name, addons, models, keep_running)?;
+        let plan = self.recreate_plan(name, addons, models, keep_running, None)?;
         self.rebuild_confirm(name, plan, title, body)
     }
 
@@ -11775,21 +12081,30 @@ impl App {
                     .into(),
             );
         }
-        match sb.skills {
-            Some(model::Skills::Known(mode)) => body.push(format!(
+        let mode_words = |mode: sbx::SkillsMode| match mode {
+            sbx::SkillsMode::Off => "off",
+            sbx::SkillsMode::Readonly => "read-only",
+            sbx::SkillsMode::Readwrite => "read-write",
+        };
+        match (plan.skills, sb.skills) {
+            (Some(sbx::SkillsMode::Readonly), _) => body.push(
+                "The shared skills come back read-only: its agent can no longer change the skills \
+                 that other sandboxes load."
+                    .into(),
+            ),
+            (Some(mode), _) => {
+                body.push(format!("The shared skills come back {}.", mode_words(mode)))
+            }
+            (None, Some(model::Skills::Known(mode))) => body.push(format!(
                 "The shared skills come back {}, as now.",
-                match mode {
-                    sbx::SkillsMode::Off => "off",
-                    sbx::SkillsMode::Readonly => "read-only",
-                    sbx::SkillsMode::Readwrite => "read-write",
-                }
+                mode_words(mode)
             )),
-            Some(model::Skills::Unrecorded) => body.push(
+            (None, Some(model::Skills::Unrecorded)) => body.push(
                 "How this sandbox gets the shared skills was never recorded, so it gets the \
                  default for new sandboxes (read-only unless you changed it)."
                     .into(),
             ),
-            None => {}
+            (None, None) => {}
         }
         // A limit sbx does not report becomes aisbx's default, which changes the sandbox: say so.
         let cpus_text = |n: u32| format!("{n} CPU{}", if n == 1 { "" } else { "s" });
@@ -12986,7 +13301,7 @@ mod tests {
         };
         let start = skills(&app);
         press(&mut app, 'l');
-        assert_eq!(skills(&app), start.next());
+        assert_eq!(skills(&app), start.toggled());
         press(&mut app, 'h');
         assert_eq!(skills(&app), start);
 
@@ -14757,8 +15072,8 @@ mod tests {
             vec![
                 SkillRow::Skill("frontend-design".into()),
                 SkillRow::Skill("pdf".into()),
-                SkillRow::Import,
                 SkillRow::AddRepo,
+                SkillRow::Import,
                 SkillRow::Update,
                 SkillRow::AutoUpdate,
                 SkillRow::Close,
@@ -14775,8 +15090,8 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                SkillRow::Import,
                 SkillRow::AddRepo,
+                SkillRow::Import,
                 SkillRow::AutoUpdate,
                 SkillRow::RepoSkills,
                 SkillRow::Close
@@ -17028,7 +17343,8 @@ mod tests {
         );
         assert_eq!(
             app.skill_view(&SkillRow::AutoUpdate).1,
-            "the skills added from Git, every 24 hours"
+            "",
+            "the name says how often"
         );
 
         app.start_due_skill_update();
@@ -17212,7 +17528,9 @@ mod tests {
         );
         app.apply_post(&pending.post);
         app.apply_post(&PostJob {
-            record_origins: Some(OriginRecord::Import),
+            record_origins: Some(OriginRecord::Import {
+                before: vec!["web".into()],
+            }),
             ..Default::default()
         });
         assert!(
@@ -17310,6 +17628,8 @@ mod tests {
                 SandboxSkillRow::Skill("docx".into()),
                 SandboxSkillRow::Skill("pdf".into()),
                 SandboxSkillRow::ApplyNow,
+                SandboxSkillRow::AddRepo,
+                SandboxSkillRow::Import,
                 SandboxSkillRow::Close,
             ]
         );
@@ -17328,9 +17648,31 @@ mod tests {
         assert!(app.switches.global("pdf"), "the switch for all stays");
         assert_eq!(
             app.sandbox_skill_view(SB, &pdf).1,
-            "own · on for all sandboxes"
+            "set here · on for all sandboxes"
         );
         assert!(app.sandbox_skill_rows(SB).contains(&SandboxSkillRow::Reset));
+
+        // The store's two ways in are here too: a repository's skills, this host's skills.
+        app.on_key(KeyEvent::from(KeyCode::Char('a')));
+        let Some(Modal::Prompt(prompt)) = &app.modal else {
+            panic!("a asks for the repository")
+        };
+        assert!(matches!(prompt.ask, Ask::AddSkills));
+        app.modal = None;
+        focus_sandbox_skill(&mut app, &SandboxSkillRow::Import);
+        app.on_key(KeyEvent::from(KeyCode::Enter));
+        let asked = matches!(&app.modal, Some(Modal::Confirm(c)) if c.title.starts_with("Import"));
+        let none_here = (app.status.as_ref())
+            .is_some_and(|(m, _, _)| m.starts_with("no agent skill directories"));
+        assert!(asked || none_here, "{:?}", app.status);
+        app.modal = None;
+        assert!(matches!(app.screen, Screen::SandboxSkills(_)), "it stays");
+        let notes = app.sandbox_skill_notes(SB, &SandboxSkillRow::AddRepo);
+        assert_eq!(notes, app.skill_notes(&SkillRow::AddRepo));
+        assert!(
+            !notes.iter().any(|n| n.contains("switched off")),
+            "{notes:?}"
+        );
 
         // Apply now runs the start's link step as a job, with the sandbox's own choice.
         focus_sandbox_skill(&mut app, &SandboxSkillRow::ApplyNow);
@@ -17352,6 +17694,125 @@ mod tests {
         assert_eq!(app.sandbox_skill_switch(SB, &pdf), Some(true));
         app.on_key(KeyEvent::from(KeyCode::Esc));
         assert!(matches!(app.screen, Screen::List));
+    }
+
+    #[test]
+    fn the_details_say_which_skills_the_agent_gets_and_where_to_change_that() {
+        let sample = |name: &str, mode: Option<model::Skills>| {
+            let mut sb = model::sample(name, Some("claude-anthropic"), &[]);
+            sb.skills = mode;
+            sb
+        };
+        let known = |mode| Some(model::Skills::Known(mode));
+        let sandboxes = vec![
+            sample("ro", known(sbx::SkillsMode::Readonly)),
+            sample("rw", known(sbx::SkillsMode::Readwrite)),
+            sample("off", known(sbx::SkillsMode::Off)),
+            sample("old", Some(model::Skills::Unrecorded)),
+            sample("bare", None),
+        ];
+        let mut app = App::for_test(Catalog::load().unwrap(), sandboxes);
+        let of = |app: &App, name: &str| {
+            let sb = (app.sandboxes.iter()).find(|s| s.name == name).unwrap();
+            app.skills_summary(sb)
+        };
+        let row = |app: &App, name: &str| {
+            let s = of(app, name).expect("a skills row");
+            (s.value, s.gloss, s.fix)
+        };
+        let text = |value: &str, gloss: &str| (value.to_string(), gloss.to_string());
+        let change = Some((Action::SandboxSkills, "Change"));
+        let open = Some((Action::Skills, "Open"));
+        assert_eq!(of(&app, "bare"), None, "no store, no row");
+
+        app.skills = None;
+        let (value, _, fix) = row(&app, "ro");
+        assert_eq!((value.as_str(), fix), ("read-only", change), "not read yet");
+        assert_eq!(row(&app, "old").1, "created outside aisbx");
+
+        app.skills = Some(store(&[]));
+        let (value, gloss, fix) = row(&app, "ro");
+        assert_eq!(
+            (value, gloss),
+            text("none yet", "the shared store holds no skill yet")
+        );
+        assert_eq!(fix, Some((Action::Skills, "Add skills")), "K adds some");
+
+        app.skills = Some(store(&["e", "d", "c", "b", "a"]));
+        let (value, gloss, fix) = row(&app, "ro");
+        assert_eq!(
+            (value, gloss),
+            text("none switched on", "5 shared skills to pick from")
+        );
+        assert_eq!(fix, change);
+        app.switches.set(store_skills::Scope::All, "b", true);
+        app.switches
+            .set(store_skills::Scope::Sandbox("ro"), "a", true);
+        let (value, gloss, _) = row(&app, "ro");
+        assert_eq!((value, gloss), text("a, b", "2 of 5 shared skills"));
+        assert_eq!(row(&app, "old").0, "b", "the switch for all sandboxes");
+        for skill in ["c", "d", "e"] {
+            app.switches.set(store_skills::Scope::All, skill, true);
+        }
+        assert_eq!(row(&app, "ro").0, "a, b, c +2", "past three, counted");
+
+        let (value, gloss, fix) = row(&app, "rw");
+        assert_eq!((value.as_str(), fix), ("all 5 shared skills", change));
+        assert!(gloss.starts_with("⚠ read-write"), "{gloss}");
+        assert!(of(&app, "rw").unwrap().warn, "a warning");
+        assert!(!of(&app, "ro").unwrap().warn);
+        let (value, gloss, fix) = row(&app, "off");
+        assert_eq!(
+            (value, gloss),
+            text("off", "the agent gets none of the shared skills")
+        );
+        assert_eq!(fix, None, "nothing here changes it");
+
+        app.switches_error = Some("bad".into());
+        let (value, _, fix) = row(&app, "ro");
+        assert_eq!((value.as_str(), fix), ("unknown", open));
+    }
+
+    #[test]
+    fn an_import_or_an_add_names_its_new_skills_and_leaves_them_off() {
+        let mut app = App::for_test(Catalog::load().unwrap(), Vec::new());
+        app.skills = Some(store(&["web"]));
+        for before in [vec!["web".to_string()], Vec::new()] {
+            app.apply_post(&PostJob {
+                record_origins: Some(OriginRecord::Import { before }),
+                ..Default::default()
+            });
+        }
+        app.skills = Some(store(&["web", "pdf"]));
+        app.record_pending_origins();
+        let status = |app: &App| app.status.clone().map(|(m, err, _)| (m, err));
+        assert_eq!(
+            status(&app),
+            Some(("2 new skills in the store: pdf, web".to_string(), false)),
+            "once each, from every record"
+        );
+        assert!(!app.switches.global("pdf"), "the rule stays: off");
+
+        app.apply_post(&PostJob {
+            record_origins: Some(OriginRecord::Added {
+                repo: "o/r".into(),
+                before: vec!["pdf".into(), "web".into()],
+            }),
+            ..Default::default()
+        });
+        app.skills = Some(store(&["a", "b", "c", "d", "pdf", "web"]));
+        app.record_pending_origins();
+        let (message, _) = status(&app).unwrap();
+        assert_eq!(message, "4 new skills in the store: a, b, c +1");
+        app.apply_post(&PostJob {
+            record_origins: Some(OriginRecord::Import {
+                before: vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            }),
+            ..Default::default()
+        });
+        app.skills = Some(store(&["a", "b", "c", "d"]));
+        app.record_pending_origins();
+        assert_eq!(status(&app).unwrap().0, "no new skills in the store");
     }
 
     #[test]
@@ -17536,16 +17997,31 @@ mod tests {
         unrecorded.skills = Some(model::Skills::Unrecorded);
         let mut app = App::for_test(Catalog::load().unwrap(), vec![off, rw, foreign, unrecorded]);
         app.skills = Some(store(&["pdf"]));
-        for (name, says) in [
-            ("claude-anthropic-off", "created with skills off"),
-            ("claude-anthropic-rw", "read-write"),
-            ("shell-lab", "mounts no shared skills store"),
+        let add = [
+            SandboxSkillRow::AddRepo,
+            SandboxSkillRow::Import,
+            SandboxSkillRow::Close,
+        ];
+        let read_write = [
+            SandboxSkillRow::MakeReadonly,
+            SandboxSkillRow::AddRepo,
+            SandboxSkillRow::Import,
+            SandboxSkillRow::Close,
+        ];
+        for (name, says, rows) in [
+            (
+                "claude-anthropic-off",
+                "created with skills off",
+                &[SandboxSkillRow::Close][..],
+            ),
+            ("claude-anthropic-rw", "read-write", &read_write[..]),
+            (
+                "shell-lab",
+                "mounts no shared skills store",
+                &[SandboxSkillRow::Close][..],
+            ),
         ] {
-            assert_eq!(
-                app.sandbox_skill_rows(name),
-                [SandboxSkillRow::Close],
-                "{name}"
-            );
+            assert_eq!(app.sandbox_skill_rows(name), rows, "{name}");
             assert!(app.sandbox_skills_intro(name)[0].contains(says), "{name}");
             assert_eq!(app.store_link_step(name), None, "{name}");
         }
@@ -17563,10 +18039,7 @@ mod tests {
             None,
             "unreadable: no step"
         );
-        assert_eq!(
-            app.sandbox_skill_rows("claude-anthropic-old"),
-            [SandboxSkillRow::Close]
-        );
+        assert_eq!(app.sandbox_skill_rows("claude-anthropic-old"), add);
     }
 
     #[test]
@@ -17590,10 +18063,16 @@ mod tests {
             .position(|r| *r == CreateRow::SkillsFold)
             .expect("the fold row");
         assert_eq!(
-            rows[at + 1..at + 3],
-            [CreateRow::StoreSkill(0), CreateRow::StoreSkill(1)]
+            rows[at + 1..at + 4],
+            [
+                CreateRow::Skills,
+                CreateRow::StoreSkill(0),
+                CreateRow::StoreSkill(1)
+            ],
+            "the mode first, then a switch per skill"
         );
         assert!(!form.row_shown(CreateRow::StoreSkill(0)), "folded at first");
+        assert!(!form.row_shown(CreateRow::Skills), "the mode too");
         assert_eq!(form.workspace.store_skills, ["docx", "pdf"]);
         assert!(
             !form.store_skill_on(0) && form.store_skill_on(1),
@@ -17611,16 +18090,33 @@ mod tests {
         let form = form.clone();
         let review = form.review(&app);
         let shared = (review.answers.iter())
-            .find(|a| a.label == "Shared skills")
+            .find(|a| a.label == "Skills")
             .expect("the review names them");
         assert_eq!(shared.value, "docx");
+        assert_eq!(
+            form.fold_summary(&app, CreateRow::SkillsFold).as_deref(),
+            Some("1 of 2 on · 2 set here")
+        );
 
-        // Read-write or off: no switch is offered, and none is registered.
+        // Read-write or off: no switch is offered, and none is registered; the fold keeps the mode.
         let Screen::Create(form) = &mut app.screen else {
             unreachable!()
         };
-        form.workspace.skills = sbx::SkillsMode::Readwrite;
-        assert!(!form.rows(&catalog).contains(&CreateRow::SkillsFold));
+        for mode in [sbx::SkillsMode::Readwrite, sbx::SkillsMode::Off] {
+            form.workspace.skills = mode;
+            let rows = form.rows(&catalog);
+            assert!(rows.contains(&CreateRow::SkillsFold), "{mode:?}");
+            assert!(rows.contains(&CreateRow::Skills), "{mode:?}");
+            assert!(!rows.contains(&CreateRow::StoreSkill(0)), "{mode:?}");
+        }
+        let form = form.clone();
+        assert_eq!(
+            form.fold_summary(&app, CreateRow::SkillsFold).as_deref(),
+            Some("off · the agent gets none of the shared skills")
+        );
+        let Screen::Create(form) = &mut app.screen else {
+            unreachable!()
+        };
         form.workspace.skills = sbx::SkillsMode::Readonly;
 
         wizard_on(&mut app, CreateStep::Review, WizardRow::CreateStart);
@@ -17641,6 +18137,159 @@ mod tests {
             )],
             "the first session gets exactly the form's choice"
         );
+    }
+
+    #[test]
+    fn the_skills_fold_holds_the_mode_and_says_where_skills_come_from() {
+        let mut app = App::for_test(Catalog::load().unwrap(), Vec::new());
+        app.skills = Some(store(&[]));
+        app.skills_default = sbx::SkillsMode::Readonly;
+        app.open_create();
+        let catalog = Arc::clone(&app.catalog);
+        let Screen::Create(form) = &mut app.screen else {
+            panic!("the create form is open")
+        };
+        assert!(form.skills_offered(&catalog));
+        let rows = form.rows(&catalog);
+        let at = (rows.iter())
+            .position(|r| *r == CreateRow::SkillsFold)
+            .expect("the fold, also over an empty store");
+        assert_eq!(rows[at + 1], CreateRow::Skills, "the mode under it");
+        assert!(!rows.contains(&CreateRow::StoreSkill(0)));
+        let form = form.clone();
+        assert_eq!(
+            form.fold_summary(&app, CreateRow::SkillsFold).as_deref(),
+            Some(crate::create::NO_STORE_SKILLS)
+        );
+        let help = form
+            .help(&app, WizardRow::Field(CreateRow::SkillsFold))
+            .text;
+        assert!(
+            help.contains("add skills on Skills (K) after the create"),
+            "{help}"
+        );
+        assert!(!help.contains("  ") && !help.contains('\\'), "{help}");
+        let Screen::Create(form) = &mut app.screen else {
+            unreachable!()
+        };
+        form.workspace.skills = sbx::SkillsMode::Readwrite;
+        let form = form.clone();
+        assert_eq!(
+            form.fold_summary(&app, CreateRow::SkillsFold).as_deref(),
+            Some("read-write · the agent gets and changes every shared skill")
+        );
+        let help = form
+            .help(&app, WizardRow::Field(CreateRow::SkillsFold))
+            .text;
+        assert!(
+            help.starts_with("Which skills of the shared store"),
+            "{help}"
+        );
+        assert!(!help.contains("  ") && !help.contains('\\'), "{help}");
+    }
+
+    #[test]
+    fn the_wizard_never_starts_read_write() {
+        let mut app = App::for_test(Catalog::load().unwrap(), Vec::new());
+        app.skills_default = sbx::SkillsMode::Readwrite;
+        app.open_create();
+        let Screen::Create(form) = &app.screen else {
+            panic!("the create form is open")
+        };
+        assert_eq!(
+            form.workspace.skills,
+            sbx::SkillsMode::Readonly,
+            "not the host's read-write"
+        );
+        let help = form.help(&app, WizardRow::Field(CreateRow::Skills)).text;
+        for says in [
+            "Read-write is picked on its own, after a warning.",
+            "This host's default is read-write; the wizard starts read-only.",
+        ] {
+            assert!(help.contains(says), "{help}");
+        }
+        assert!(!help.contains("  ") && !help.contains('\\'), "{help}");
+        let review = form.review(&app);
+        let access = (review.answers.iter())
+            .find(|a| a.label == "Skills access")
+            .expect("reviewed");
+        assert_eq!((access.value.as_str(), access.default), ("read-only", true));
+
+        // Remembered answers that had read-write open on read-only, and say so; off stays off.
+        app.skills_default = sbx::SkillsMode::Readonly;
+        let mut defaults = crate::state::CreateDefaults {
+            backend: "claude-anthropic".into(),
+            skills: Some(sbx::SkillsMode::Readwrite),
+            ..Default::default()
+        };
+        app.apply_create_defaults(&defaults);
+        let skills = |app: &App| match &app.screen {
+            Screen::Create(form) => form.workspace.skills,
+            _ => unreachable!("the create form is open"),
+        };
+        let said = |app: &App| app.status.as_ref().map(|(m, _, _)| m.clone());
+        assert_eq!(skills(&app), sbx::SkillsMode::Readonly);
+        assert_eq!(
+            said(&app).as_deref(),
+            Some(crate::create::PREFILLED_READ_ONLY)
+        );
+        defaults.skills = Some(sbx::SkillsMode::Off);
+        app.apply_create_defaults(&defaults);
+        assert_eq!(skills(&app), sbx::SkillsMode::Off);
+        assert_eq!(said(&app).as_deref(), Some(crate::create::PREFILLED));
+    }
+
+    #[test]
+    fn make_read_only_rebuilds_a_read_write_sandbox_read_only_and_records_it() {
+        let mut sb = model::sample(SB, Some("claude-anthropic"), &[]);
+        sb.workspace = PathBuf::from("/proj");
+        sb.skills = Some(model::Skills::Known(sbx::SkillsMode::Readwrite));
+        let mut app = App::for_test(Catalog::load().unwrap(), vec![sb]);
+        app.skills = Some(store(&["pdf"]));
+        let intro = app.skills_intro().join(" ");
+        assert!(intro.contains("Make read-only on its skills"), "{intro}");
+        app.on_key(KeyEvent::from(KeyCode::Char('i')));
+        assert_eq!(app.sandbox_skill_rows(SB)[0], SandboxSkillRow::MakeReadonly);
+        assert!(app.sandbox_skills_intro(SB)[0]
+            .ends_with("Make read-only rebuilds it with read-only access."));
+        focus_sandbox_skill(&mut app, &SandboxSkillRow::MakeReadonly);
+        app.on_key(KeyEvent::from(KeyCode::Enter));
+        let Some(Modal::Confirm(confirm)) = app.modal.take() else {
+            panic!("a rebuild asks first: {:?}", app.status)
+        };
+        assert_eq!(
+            (confirm.title.as_str(), confirm.confirm_label.as_str()),
+            ("Make read-only", "Rebuild")
+        );
+        let says = "The shared skills come back read-only: its agent can no longer change";
+        assert!(
+            confirm.body.iter().any(|l| l.starts_with(says)),
+            "{:?}",
+            confirm.body
+        );
+        let create = (confirm.job.steps.iter())
+            .map(|s| s.argv.join(" "))
+            .find(|line| line.starts_with("sbx create"))
+            .expect("a create");
+        assert!(create.contains("--skills readonly"), "{create}");
+        assert_eq!(
+            confirm.job.post.skills_mode,
+            Some((SB.to_string(), sbx::SkillsMode::Readonly))
+        );
+        // A plain rebuild keeps the mode, and records nothing new.
+        let plan = app
+            .recreate_plan(SB, &[], None, None, None)
+            .expect("a plan");
+        assert_eq!(plan.job.post.skills_mode, None);
+        assert_eq!(plan.skills, None);
+        let create = (plan.job.steps.iter())
+            .map(|s| s.argv.join(" "))
+            .find(|line| line.starts_with("sbx create"))
+            .expect("a create");
+        assert!(create.contains("--skills readwrite"), "{create}");
+
+        app.apply_post(&confirm.job.post);
+        assert_eq!(app.registry.skills(SB), Some(sbx::SkillsMode::Readonly));
     }
 
     #[test]
@@ -18937,18 +19586,16 @@ mod tests {
             .iter()
             .take_while(|n| model::is_host_folder_kit(n))
             .count();
-        for kit in [
-            "host-gradle",
-            "host-maven",
-            "host-npm",
-            "host-pip",
-            "host-skills",
-        ] {
+        for kit in ["host-gradle", "host-maven", "host-npm", "host-pip"] {
             assert!(
                 names[..hosts].contains(&kit),
                 "{kit} is a host cache: {names:?}"
             );
         }
+        assert!(
+            !names.contains(&"host-skills"),
+            "deprecated, and not on this sandbox: {names:?}"
+        );
         assert!(
             names[hosts..].iter().all(|n| !model::is_host_folder_kit(n)),
             "one block of host caches, then the rest: {names:?}"
@@ -18979,6 +19626,78 @@ mod tests {
             form.rows(&app.catalog)[form.focus],
             KitsRow::Addon(i) if app.catalog.addons[i].kit.name == names[0]
         ));
+    }
+
+    #[test]
+    fn a_deprecated_kit_is_offered_only_to_a_sandbox_that_has_it() {
+        let with = model::sample("with", Some("claude-anthropic"), &["host-skills", "jdk25"]);
+        let without = model::sample("without", Some("claude-anthropic"), &["jdk25"]);
+        let mut app = App::for_test(Catalog::load().unwrap(), vec![with, without]);
+        let catalog = Arc::clone(&app.catalog);
+        let at = (catalog.addons.iter())
+            .position(|a| a.kit.name == "host-skills")
+            .expect("the kit stays shipped");
+        assert!(catalog.addons[at].kit.deprecated());
+
+        let editor_rows = |app: &mut App, name: &str| {
+            app.open_kits(name);
+            let Screen::Kits(form) = &app.screen else {
+                panic!("the editor is open");
+            };
+            form.rows(&app.catalog)
+        };
+        let rows = editor_rows(&mut app, "with");
+        assert!(rows.contains(&KitsRow::Addon(at)), "removable where it is");
+        let Screen::Kits(form) = &app.screen else {
+            unreachable!()
+        };
+        let help = form.help(&catalog, KitsRow::Addon(at)).text;
+        assert!(
+            help.starts_with("On this sandbox now. Removing it rebuilds the sandbox. Deprecated:"),
+            "{help}"
+        );
+        assert!(!editor_rows(&mut app, "without").contains(&KitsRow::Addon(at)));
+
+        app.screen = Screen::List;
+        app.open_create();
+        let Screen::Create(form) = &app.screen else {
+            panic!("the create form is open")
+        };
+        assert!(!form.addon_order(&catalog).contains(&at), "never offered");
+
+        // A create's saved answers that had it open the next form without it, and say so.
+        let defaults = crate::state::CreateDefaults {
+            backend: "claude-anthropic".into(),
+            addons: [(
+                "claude-anthropic".to_string(),
+                vec!["host-skills".to_string(), "jdk25".to_string()],
+            )]
+            .into(),
+            ..Default::default()
+        };
+        app.apply_create_defaults(&defaults);
+        let Screen::Create(form) = &app.screen else {
+            panic!("the create form is open")
+        };
+        assert!(!form.kits.addons[at], "not ticked");
+        let jdk = (catalog.addons.iter())
+            .position(|a| a.kit.name == "jdk25")
+            .unwrap();
+        assert!(form.kits.addons[jdk], "the rest of the answers stay");
+        let (message, error, _) = app.status.clone().expect("a status line");
+        assert!(!error);
+        assert_eq!(
+            Some(message.as_str()),
+            crate::compat::host_skills_prefill(&["host-skills".to_string()])
+        );
+        app.apply_create_defaults(&crate::state::CreateDefaults {
+            backend: "claude-anthropic".into(),
+            ..Default::default()
+        });
+        assert_eq!(
+            app.status.as_ref().map(|(m, _, _)| m.as_str()),
+            Some(crate::create::PREFILLED)
+        );
     }
 
     #[test]
@@ -20262,7 +20981,7 @@ mod action_tests {
     }
 
     #[test]
-    fn the_skills_default_walks_its_three_modes_one_job_each() {
+    fn the_skills_default_walks_off_and_read_only_and_asks_before_read_write() {
         let mut app = app();
         app.on_key(KeyEvent::from(KeyCode::Char('T')));
         let skills_row = SETTINGS.len();
@@ -20289,18 +21008,50 @@ mod action_tests {
         assert!(job(&app).is_none());
         assert!(said(&app).is_some_and(|(text, error)| error && text.contains("F5")));
 
-        // ↵ and → walk forward, ← back, tightest first and wrapping.
+        // ↵, space, → and ← swap off and read-only; from read-write they go back to read-only.
         for (from, key, to) in [
-            ("readonly", KeyCode::Enter, "readwrite"),
-            ("readonly", KeyCode::Right, "readwrite"),
-            ("readwrite", KeyCode::Char(' '), "off"),
-            ("readonly", KeyCode::Left, "off"),
-            ("off", KeyCode::Left, "readwrite"),
+            ("readonly", KeyCode::Enter, "off"),
+            ("readonly", KeyCode::Right, "off"),
+            ("off", KeyCode::Left, "readonly"),
+            ("off", KeyCode::Char(' '), "readonly"),
+            ("readwrite", KeyCode::Right, "readonly"),
+            ("readwrite", KeyCode::Left, "readonly"),
         ] {
             at(&mut app, from);
             app.on_key(KeyEvent::from(key));
             assert_eq!(job(&app), Some(set(to)), "{key:?} from {from}");
         }
+
+        // Read-write only behind a red confirmation, by `w` or a click; No sets nothing.
+        let asked = |app: &App| match &app.modal {
+            Some(Modal::Confirm(c)) => Some((
+                c.danger,
+                c.confirm_label.clone(),
+                c.job.steps[0].argv.clone(),
+            )),
+            _ => None,
+        };
+        let readwrite = Some((true, ALLOW_READWRITE.to_string(), set("readwrite")));
+        at(&mut app, "readonly");
+        app.on_key(KeyEvent::from(KeyCode::Char('w')));
+        assert_eq!(asked(&app), readwrite, "w asks first");
+        app.confirm_answer(false);
+        assert!(
+            app.modal.is_none() && job(&app).is_none(),
+            "No sets nothing"
+        );
+        at(&mut app, "off");
+        app.click(Hit::FormChoice(skills_row, 2));
+        assert_eq!(asked(&app), readwrite, "a click asks first");
+        app.confirm_answer(true);
+        assert_eq!(
+            job(&app),
+            Some(set("readwrite")),
+            "Allow read-write sets it"
+        );
+        at(&mut app, "readwrite");
+        app.on_key(KeyEvent::from(KeyCode::Char('w')));
+        assert!(app.modal.is_none(), "already read-write: nothing to ask");
 
         // A click on a mode sets it; one on the current mode does nothing.
         at(&mut app, "readonly");
@@ -21362,7 +22113,7 @@ mod form_decision_tests {
                 ("Label", CreateStep::Workspace, false),
                 ("Starts in", CreateStep::Workspace, true),
                 ("Clone mode", CreateStep::Workspace, true),
-                ("Skills", CreateStep::Workspace, true),
+                ("Skills access", CreateStep::Workspace, true),
             ],
             "the seldom used answers have no line while they are the form's defaults"
         );
@@ -21422,8 +22173,8 @@ mod form_decision_tests {
                 f.workspace.start_dir = Some("sub".into())
             }),
             ("Clone mode", |f, _| f.workspace.clone = true),
-            ("Skills", |f, _| {
-                f.workspace.skills = f.workspace.skills.next()
+            ("Skills access", |f, _| {
+                f.workspace.skills = f.workspace.skills.toggled()
             }),
             ("Label", |f, _| f.workspace.name = TextInput::new("mine")),
         ];
@@ -21689,25 +22440,65 @@ mod screen_decision_tests {
             app.skill_view(&SkillRow::Skill("pdf".into())),
             ("pdf".to_string(), String::new())
         );
-        assert_eq!(
-            app.skill_view(&SkillRow::AddRepo).0,
-            "Add from a Git repository"
-        );
+        let (add, add_meta) = app.skill_view(&SkillRow::AddRepo);
+        assert_eq!(add, "Add from a Git repository");
+        assert!(add_meta.starts_with("recommended"), "{add_meta}");
+        let (import, import_meta) = app.skill_view(&SkillRow::Import);
+        assert_eq!(import, "Import this host's skills");
+        assert!(import_meta.starts_with("not recommended"), "{import_meta}");
+        let rows = app.skill_rows();
+        let at = |row: SkillRow| rows.iter().position(|r| *r == row).unwrap();
+        assert!(at(SkillRow::AddRepo) < at(SkillRow::Import), "{rows:?}");
+        assert_eq!(app.skill_view(&SkillRow::Update).0, "Update now");
         let notes = app.skill_notes(&SkillRow::Skill("pdf".into()));
         assert!(
-            notes[0].starts_with("When on, every sandbox gets pdf"),
+            notes[0].starts_with("On: every sandbox gets pdf"),
             "{notes:?}"
         );
-        assert!(notes[0].contains("Remove deletes it"), "{notes:?}");
-        assert!(notes[1].contains("not recorded"), "{notes:?}");
-        assert!(app.skill_notes(&SkillRow::Update)[0].contains("0 sandboxes here"));
-        assert!(app.skill_notes(&SkillRow::AutoUpdate)[0].starts_with("When on, the dashboard"));
+        assert!(notes[0].contains("d removes it"), "{notes:?}");
+        assert_eq!(notes.len(), 1, "no line for an unknown origin: {notes:?}");
+        assert!(app.skill_notes(&SkillRow::Update)[0].contains("as the daily update does"));
+        assert!(app.skill_notes(&SkillRow::AutoUpdate)[0].starts_with("On: once a day"));
         assert!(app.skill_notes(&SkillRow::Close).is_empty());
-        assert_eq!(
-            app.skill_heading(&SkillRow::Update),
-            Some(("Change the store".to_string(), String::new()))
-        );
+        let heading = |title: &str, gloss: &str| Some((title.to_string(), gloss.to_string()));
+        let add = heading("Add skills", "");
+        assert_eq!(app.skill_heading(&SkillRow::Import), add);
+        assert_eq!(app.skill_heading(&SkillRow::AddRepo), add);
+        let updates = heading("Updates", "of the skills added from Git");
+        assert_eq!(app.skill_heading(&SkillRow::Update), updates);
+        assert_eq!(app.skill_heading(&SkillRow::AutoUpdate), updates);
         assert_eq!(app.skill_heading(&SkillRow::Close), None);
+    }
+
+    #[test]
+    fn the_skills_screen_says_to_switch_on_only_what_every_sandbox_needs() {
+        let app = App::for_test(Catalog::load().unwrap(), Vec::new());
+        assert_eq!(app.skills_intro(), vec![SKILLS_INTRO.to_string()]);
+        for says in [
+            "every sandbox needs",
+            "most of them off",
+            "when you create it",
+            "(i)",
+        ] {
+            assert!(SKILLS_INTRO.contains(says), "{says}");
+        }
+        let mut texts = app.skills_intro();
+        for row in app.skill_rows() {
+            texts.extend(app.skill_notes(&row));
+            let (title, meta) = app.skill_view(&row);
+            texts.extend([title, meta]);
+            texts.extend(app.skill_heading(&row).map(|(t, g)| format!("{t} {g}")));
+        }
+        for text in &texts {
+            for noise in [
+                "switched off",
+                "come in switched",
+                "off until",
+                "from repositories",
+            ] {
+                assert!(!text.contains(noise), "{noise}: {text}");
+            }
+        }
     }
 }
 

@@ -312,8 +312,7 @@ fn g2_opencode_options() {
     walk_to(&mut app, CreateStep::Workspace);
     type_into(&mut app, CreateRow::Name, "My box");
     tick(&mut app, CreateRow::Clone);
-    // readonly → readwrite → off.
-    tick(&mut app, CreateRow::Skills);
+    // readonly → off.
     tick(&mut app, CreateRow::Skills);
     type_into(&mut app, CreateRow::Ports, "8080:3000, 5173");
     type_into(&mut app, CreateRow::DenyNetwork, "api.example.com");
@@ -1186,13 +1185,32 @@ fn a_click_on_a_choice_picks_that_value() {
     app.litellm_root = crate::testkit::litellm_root_with(&[crate::testkit::acme(), beta]);
     app.open_create();
     walk_to(&mut app, CreateStep::Workspace);
+    let mode = WizardRow::Field(CreateRow::Skills);
+    assert!(
+        !form(&app).wizard_rows(&app.catalog).contains(&mode),
+        "folded under skills at first"
+    );
+    enter(&mut app, WizardRow::Field(CreateRow::SkillsFold));
     let rows = form(&app).wizard_rows(&app.catalog);
     let skills = rows
         .iter()
-        .position(|r| *r == WizardRow::Field(CreateRow::Skills))
+        .position(|r| *r == mode)
         .expect("the skills row");
     assert_eq!(form(&app).choices(CreateRow::Skills).len(), 3);
+    app.click(crate::app::Hit::FormChoice(skills, 0));
+    assert_eq!(form(&app).workspace.skills, sbx::SkillsMode::Off);
+    // Read-write: a red confirmation first; No keeps the mode, Allow read-write sets it.
     app.click(crate::app::Hit::FormChoice(skills, 2));
+    let Some(crate::app::Modal::Confirm(confirm)) = &app.modal else {
+        panic!("read-write asks first")
+    };
+    assert!(confirm.danger && confirm.confirm_label == crate::app::ALLOW_READWRITE);
+    assert!(confirm.job.steps.is_empty(), "it changes the form only");
+    app.confirm_answer(false);
+    assert_eq!(form(&app).workspace.skills, sbx::SkillsMode::Off);
+    app.click(crate::app::Hit::FormChoice(skills, 2));
+    app.confirm_answer(true);
+    assert!(app.modal.is_none(), "no job window");
     assert_eq!(form(&app).workspace.skills, sbx::SkillsMode::Readwrite);
     assert_eq!(form(&app).chosen(CreateRow::Skills), Some(2));
     assert_eq!(focused(&app), WizardRow::Field(CreateRow::Skills));

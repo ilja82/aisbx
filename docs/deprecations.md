@@ -21,6 +21,23 @@ gets a section here: its id, the old way, the replacement, your step and the ais
 The commands keep working. `aisbx skill-repo` and `aisbx skill` print one warning on stderr per run; stdout does not
 change. The pre-start sync of the picks warns nothing.
 
+### `host-skills`
+
+| | |
+| --- | --- |
+| Old way | The `host-skills` addon: the host's `~/.agents/skills` and `~/.claude/skills`, mounted read-only and linked into the agent's skills folders. |
+| Replacement | The sbx skills store: import your skills on `K` (*Import this host's skills*, or `sbx skills import`), then switch them on for all sandboxes on `K`, or for one sandbox on `i` ([Switches](skills.md#switches)). |
+| Your step | Press `K`, choose *Import this host's skills* and switch on the skills you want. Then press `e` on each sandbox that has `host-skills`, untick it and apply: that is a rebuild. In scripts, drop `--kit host-skills` from `aisbx up` and switch skills on with `aisbx skills on --global SKILL`. |
+| Deprecated in | 0.54.1.2 |
+
+Sandboxes that have the kit keep working: aisbx links the host's skills before each start, and a rebuild keeps the
+kit. The create wizard no longer offers it, and the kits editor (`e`) lists it only on a sandbox that has it. Such a
+sandbox says so in its details, and shows `⟳ update ready` once, because the kit's description now says it is
+deprecated. `aisbx up --kit host-skills` still works and prints one warning on stderr; stdout does not change.
+
+The store holds a copy of each skill, not the host folder: an edit to a skill on the host reaches the sandboxes when
+you import it again.
+
 ### `mcp-default`
 
 | | |

@@ -220,7 +220,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, caps: theme::Caps) ->
                 };
                 hints.push(("A", label, KeyCode::Char('A')));
             }
-            hints.push(("i", "sandbox skills", KeyCode::Char('i')));
+            hints.push(("i", "skills", KeyCode::Char('i')));
             hints.extend(HOST_HINTS);
             if app.can_prune() {
                 hints.push(("P", "prune", KeyCode::Char('P')));
@@ -265,6 +265,11 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, caps: theme::Caps) ->
                     ("↑↓", "move", KeyCode::Down),
                     ("←→", "pick", KeyCode::Right),
                     ("↵", "next", KeyCode::Enter),
+                ],
+                Some(WizardRow::Field(CreateRow::Skills)) => vec![
+                    ("↑↓", "move", KeyCode::Down),
+                    ("←→", "off / read-only", KeyCode::Right),
+                    ("w", "read-write…", KeyCode::Char('w')),
                 ],
                 Some(WizardRow::Field(CreateRow::Folder(_))) => vec![
                     ("↑↓", "move", KeyCode::Down),
@@ -397,8 +402,8 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, caps: theme::Caps) ->
             ("↑↓", "move", KeyCode::Down),
             ("space", "switch", KeyCode::Char(' ')),
             ("↵", "activate", KeyCode::Enter),
-            ("i", "import", KeyCode::Char('i')),
             ("a", "add repo", KeyCode::Char('a')),
+            ("i", "import", KeyCode::Char('i')),
             ("u", "update", KeyCode::Char('u')),
             ("d", "remove", KeyCode::Char('d')),
             ("esc", "back", KeyCode::Esc),
@@ -409,12 +414,20 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, caps: theme::Caps) ->
             ("↵", "activate", KeyCode::Enter),
             ("esc", "back", KeyCode::Esc),
         ],
-        Screen::SandboxSkills(_) => vec![
-            ("↑↓", "move", KeyCode::Down),
-            ("space", "switch", KeyCode::Char(' ')),
-            ("↵", "activate", KeyCode::Enter),
-            ("esc", "back", KeyCode::Esc),
-        ],
+        Screen::SandboxSkills(ref form) => {
+            let mut hints = vec![
+                ("↑↓", "move", KeyCode::Down),
+                ("space", "switch", KeyCode::Char(' ')),
+                ("↵", "activate", KeyCode::Enter),
+            ];
+            let rows = app.sandbox_skill_rows(&form.sandbox);
+            if rows.contains(&crate::app::SandboxSkillRow::Import) {
+                hints.push(("a", "add repo", KeyCode::Char('a')));
+                hints.push(("i", "import", KeyCode::Char('i')));
+            }
+            hints.push(("esc", "back", KeyCode::Esc));
+            hints
+        }
         Screen::SandboxMcp(_) => vec![
             ("↑↓", "move", KeyCode::Down),
             ("space", "load / unload", KeyCode::Char(' ')),
@@ -431,11 +444,17 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, caps: theme::Caps) ->
             ("d", "dismiss", KeyCode::Char('d')),
             ("esc", "back", KeyCode::Esc),
         ],
-        Screen::Settings(_) => vec![
-            ("↑↓", "move", KeyCode::Down),
-            ("↵", "change", KeyCode::Enter),
-            ("esc", "back", KeyCode::Esc),
-        ],
+        Screen::Settings(ref form) => {
+            let mut hints = vec![
+                ("↑↓", "move", KeyCode::Down),
+                ("↵", "change", KeyCode::Enter),
+            ];
+            if form.rows().get(form.focus) == Some(&crate::app::SettingsRow::SkillsDefault) {
+                hints.push(("w", "read-write…", KeyCode::Char('w')));
+            }
+            hints.push(("esc", "back", KeyCode::Esc));
+            hints
+        }
         // Left/right walks the tree here, not the button line, so it is named before Enter.
         Screen::StartDir(_) => vec![
             ("←→", "out / in", KeyCode::Right),
@@ -579,7 +598,7 @@ fn draw_hints(
 /// The host-wide screens, on the list's footer whatever row the cursor is on.
 const HOST_HINTS: [(&str, &str, KeyCode); 4] = [
     ("S", "secrets", KeyCode::Char('S')),
-    ("K", "skills", KeyCode::Char('K')),
+    ("K", "all skills", KeyCode::Char('K')),
     ("F", "folders", KeyCode::Char('F')),
     ("T", "settings", KeyCode::Char('T')),
 ];
@@ -587,7 +606,7 @@ const HOST_HINTS: [(&str, &str, KeyCode); 4] = [
 /// The list's hints in the order they give way on a narrow footer: host-wide and rare keys first,
 /// the session keys last. `↵`, `y` and `?` are not in it, so they always show.
 const LIST_DROP: &[&str] = &[
-    "q", "a", "/", "F", "r", "P", "K", "S", "T", "i", "b", "p", "w", "A", "o", "R", "e", "d", "s",
+    "q", "a", "/", "F", "r", "P", "K", "S", "T", "b", "p", "w", "A", "i", "o", "R", "e", "d", "s",
     "n", "x",
 ];
 
@@ -1889,9 +1908,10 @@ mod tests {
         show_step(&mut app, CreateStep::Kits);
         let screen = super::tests_support::render_at(&mut app, 110, 40);
         assert!(
-            screen.contains("Host skills"),
+            screen.contains("Host pip"),
             "every addon row is on screen with the buttons: {screen}"
         );
+        assert!(!screen.contains("host-skills"), "deprecated: {screen}");
         assert!(screen.contains("headroom"), "{screen}");
         assert!(screen.contains("[ Next ]"), "{screen}");
 
@@ -3004,7 +3024,7 @@ mod tests {
         };
         let focus = |app: &mut App, i: usize| focus_row(app, CreateRow::Addon(i));
 
-        for name in ["host-gradle", "host-pip", "host-skills"] {
+        for name in ["host-gradle", "host-pip"] {
             let i = index(name);
             let row = focus(&mut app, i);
             app.on_key(KeyEvent::from(KeyCode::Char(' ')));
@@ -3042,26 +3062,16 @@ mod tests {
             screen.contains("· found "),
             "the folder found is named: {screen}"
         );
-        assert!(screen.contains("[-] host-skills"), "{screen}");
+        assert!(!screen.contains("host-skills"), "deprecated: {screen}");
         assert!(screen.contains("[-] host-pip"), "{screen}");
         assert!(screen.contains("[ ] host-npm"), "{screen}");
-        let skills_note = match &app.screen {
-            Screen::Create(form) => form.kits.host[index("host-skills")]
-                .as_ref()
-                .unwrap()
-                .reason("host-skills"),
-            _ => unreachable!(),
-        };
-        assert!(
-            skills_note.contains("skills from the sbx store are still shared"),
-            "{skills_note}"
-        );
 
         // The skills-mode row does not depend on any of it.
         focus_row(&mut app, CreateRow::Skills);
         let mut seen = Vec::new();
-        for _ in 0..3 {
-            app.on_key(KeyEvent::from(KeyCode::Right));
+        for code in [KeyCode::Right, KeyCode::Right, KeyCode::Char('w')] {
+            app.on_key(KeyEvent::from(code));
+            app.confirm_answer(true);
             if let Screen::Create(form) = &app.screen {
                 seen.push(form.workspace.skills);
             }
@@ -3814,16 +3824,19 @@ mod tests {
         let screen = super::tests_support::render_at(&mut app, 110, 40);
         assert!(screen.contains("Host caches"), "{screen}");
         assert!(screen.contains("[-] host-gradle"), "greyed: {screen}");
-        assert!(screen.contains("[-] host-skills"), "greyed: {screen}");
+        assert!(!screen.contains("host-skills"), "deprecated: {screen}");
 
         if let Screen::Create(form) = &mut app.screen {
             form.wizard_goto(&catalog, CreateStep::Workspace).unwrap();
         }
         let screen = super::tests_support::render_at(&mut app, 110, 40);
-        assert!(screen.contains("share skills"), "{screen}");
         assert!(
-            wizard_rows(&app).contains(&WizardRow::Field(CreateRow::Skills)),
-            "the skills row is offered"
+            line_with(&screen, " skills ").contains(crate::create::NO_STORE_SKILLS),
+            "an empty store says where skills come from: {screen}"
+        );
+        assert!(
+            wizard_rows(&app).contains(&WizardRow::Field(CreateRow::SkillsFold)),
+            "the skills fold is offered"
         );
     }
 
@@ -3871,26 +3884,32 @@ mod tests {
                 }
                 form.wizard_set_step(&catalog, CreateStep::Workspace);
                 let offered = form.skills_offered(&catalog);
-                let skills = WizardRow::Field(CreateRow::Skills);
+                let fold = WizardRow::Field(CreateRow::SkillsFold);
                 let name = &catalog.backends[backend].kit.name;
                 let case = format!("{name}, {account:?}, {state}");
-                let listed = form.wizard_rows(&catalog).contains(&skills);
+                let listed = form.wizard_rows(&catalog).contains(&fold);
                 assert_eq!(listed, offered, "{case}");
                 if !offered {
                     continue;
                 }
-                let screen = super::tests_support::render_at(&mut app, 110, 40);
-                assert!(screen.contains("share skills"), "{case}: {screen}");
                 focus_row(&mut app, CreateRow::Skills);
+                let screen = super::tests_support::render_at(&mut app, 110, 40);
+                assert!(
+                    line_with(&screen, " access ").contains("‹ "),
+                    "{case}: {screen}"
+                );
                 let mode = |app: &App| match &app.screen {
                     Screen::Create(form) => form.workspace.skills,
                     _ => unreachable!("the create form is open"),
                 };
                 let mut seen = Vec::new();
-                for code in [KeyCode::Char(' '), KeyCode::Right, KeyCode::Right] {
+                for code in [KeyCode::Char(' '), KeyCode::Right] {
                     app.on_key(KeyEvent::from(code));
                     seen.push(mode(&app));
                 }
+                app.on_key(KeyEvent::from(KeyCode::Char('w')));
+                app.confirm_answer(true);
+                seen.push(mode(&app));
                 seen.sort_by_key(|m| m.flag());
                 assert_eq!(
                     seen,
@@ -3903,7 +3922,7 @@ mod tests {
                 );
                 let before = mode(&app);
                 app.on_key(KeyEvent::from(KeyCode::Left));
-                assert_eq!(mode(&app), before.prev(), "{case}");
+                assert_eq!(mode(&app), before.toggled(), "{case}");
             }
         }
     }
@@ -4053,7 +4072,7 @@ mod tests {
                 "label  ",
                 "starts in",
                 "clone mode",
-                "share skills",
+                "skills  ",
                 "more options",
             ];
             let first = rows_at(&buffer_at(&mut app, width, height), &labels);
@@ -4242,7 +4261,7 @@ mod tests {
             .catalog
             .addons
             .iter()
-            .filter(|a| a.create_time_only())
+            .filter(|a| a.create_time_only() && !a.kit.deprecated())
             .count();
         assert_eq!(
             marked.len(),
@@ -4307,7 +4326,7 @@ mod tests {
             .into_iter()
             .filter(|(_, y)| column_of(&buffer, *y, "] ").is_some())
             .collect();
-        let create_time = app.catalog.addons.iter();
+        let create_time = app.catalog.addons.iter().filter(|a| !a.kit.deprecated());
         let create_time = create_time.filter(|a| a.create_time_only()).count();
         assert_eq!(marked.len(), create_time, "one per create-time kit");
         for (x, y) in &marked {
@@ -4387,7 +4406,10 @@ mod tests {
         };
         let (hosts, others) = (line("Host caches"), line("Additional kits"));
         assert!(hosts < others, "the host caches come first");
-        for addon in app.catalog.addons.iter() {
+        let offered: Vec<&crate::kits::Addon> = (app.catalog.addons.iter())
+            .filter(|a| !a.kit.deprecated())
+            .collect();
+        for addon in &offered {
             let at = line(&format!("] {} ", addon.kit.name));
             match model::is_host_folder_kit(&addon.kit.name) {
                 true => {
@@ -4407,7 +4429,7 @@ mod tests {
         }
         // ↓ from the first row walks the rows down the screen.
         let mut ys = Vec::new();
-        for _ in 0..app.catalog.addons.len() {
+        for _ in 0..offered.len() {
             let buffer = buffer_at(&mut app, 110, 40);
             ys.push(lines_with(&buffer, "›").first().map(|(_, y)| *y).unwrap());
             app.on_key(KeyCode::Down.into());
@@ -4612,9 +4634,9 @@ mod tests {
                     "connect",
                     "start folder",
                     "account",
-                    "sandbox skills",
-                    "secrets",
                     "skills",
+                    "secrets",
+                    "all skills",
                     "folders",
                     "settings",
                     "prune",
@@ -4638,8 +4660,13 @@ mod tests {
                 }
             }
         }
-        // Wide enough, nothing gives way.
+        // A sandbox's skills stay in reach at 110 columns: rarer keys give way first.
         app.select(0);
+        let screen = super::tests_support::render_at(&mut app, 110, 30);
+        let footer = screen.lines().last().unwrap();
+        assert!(footer.contains("i skills"), "{footer}");
+        assert!(!footer.contains("w start folder"), "{footer}");
+        // Wide enough, nothing gives way.
         let screen = super::tests_support::render_at(&mut app, 240, 30);
         assert!(screen.lines().last().unwrap().contains("q quit"));
         assert!(screen.lines().last().unwrap().contains("/ find"));
@@ -5074,6 +5101,23 @@ mod tests {
             "{screen}"
         );
         assert!(!line_with(&screen, "Import this host's skills").contains("○ off"));
+        assert!(
+            line_with(&screen, "Add from a Git repository").contains("recommended"),
+            "{screen}"
+        );
+        assert!(
+            line_with(&screen, "Import this host's skills").contains("not recommended"),
+            "{screen}"
+        );
+        assert!(at("Add from a Git repository") < at("Import this host's skills"));
+        assert!(screen.contains("Update now"), "{screen}");
+        for gone in ["Store:", "Shared with", "None of them", "switched off"] {
+            assert!(!screen.contains(gone), "{gone}: {screen}");
+        }
+        assert!(
+            screen.contains("only the skills that every sandbox needs"),
+            "{screen}"
+        );
         assert!(!screen.contains("Repo skills"), "none in use: {screen}");
         let switch_at = line_with(&screen, " docx ").find("○ off").unwrap();
         assert!(
@@ -5100,16 +5144,121 @@ mod tests {
         assert!(screen.contains("Skills · "), "{screen}");
         let pdf = line_with(&screen, " pdf ");
         assert!(
-            pdf.contains("own · on for all sandboxes") && pdf.contains("○ off"),
+            pdf.contains("set here · on for all sandboxes") && pdf.contains("○ off"),
             "{screen}"
         );
         assert!(line_with(&screen, " web ").contains("○ off"), "{screen}");
-        assert!(screen.contains("Follow all sandboxes"), "{screen}");
+        assert!(screen.contains("Reset to all sandboxes"), "{screen}");
         assert!(screen.contains("space switch"), "{screen}");
+        // The store's ways in, under their heading, with their keys in the footer.
+        assert_eq!(
+            line_with(&screen, "Add skills").trim_matches(['"', ' ']),
+            "Add skills"
+        );
+        let at = |text: &str| {
+            screen
+                .find(text)
+                .unwrap_or_else(|| panic!("{text}:\n{screen}"))
+        };
+        assert!(
+            at("Add from a Git repository") < at("Import this host's skills"),
+            "{screen}"
+        );
+        assert!(at("a add repo") < at("i import"), "{screen}");
         app.on_key(KeyEvent::from(KeyCode::Char(' ')));
         let screen = super::tests_support::render_at(&mut app, 110, 40);
-        assert!(line_with(&screen, " web ").contains("own · off for all sandboxes"));
+        assert!(line_with(&screen, " web ").contains("set here · off for all sandboxes"));
         assert!(line_with(&screen, " web ").contains("● on"), "{screen}");
+    }
+
+    #[test]
+    fn the_overview_says_which_skills_the_agent_gets_and_which_key_changes_them() {
+        let mut app = app_with(populated());
+        app.cursor = 0;
+        app.skills = Some(crate::sbx::SkillsStore::default());
+        let screen = super::tests_support::render_at(&mut app, 110, 40);
+        let row = line_with(&screen, "     skills  ");
+        assert!(
+            row.contains("none yet   the shared store holds no skill yet — press K"),
+            "{screen}"
+        );
+        switched_store(&mut app);
+        let sb = app.selected().expect("a sandbox").name.clone();
+        let own = aisbx_core::store_skills::Scope::Sandbox(&sb);
+        app.switches.set(own, "web", true);
+        let screen = super::tests_support::render_at(&mut app, 110, 40);
+        let row = line_with(&screen, "     skills  ");
+        assert!(
+            row.contains("web   1 of 4 shared skills — press i"),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn a_read_write_sandbox_warns_in_the_overview() {
+        let mut app = app_with(populated());
+        app.cursor = 0;
+        switched_store(&mut app);
+        let sb = app.selected().expect("a sandbox").name.clone();
+        let at = (app.sandboxes.iter()).position(|s| s.name == sb).unwrap();
+        let rw = crate::model::Skills::Known(crate::sbx::SkillsMode::Readwrite);
+        app.sandboxes[at].skills = Some(rw);
+        let buffer = buffer_at(&mut app, 110, 40);
+        let (x, y) = lines_with(&buffer, "⚠ read-write")[0];
+        assert_eq!(buffer[(x, y)].fg, theme::WARN, "in the warning colour");
+        let row = line_of(&buffer, y);
+        assert!(
+            row.contains("all 4 shared skills   ⚠ read-write") && row.contains("press i"),
+            "{row}"
+        );
+    }
+
+    #[test]
+    fn read_write_has_a_key_of_its_own_in_the_footer() {
+        let mut app = app_with(populated());
+        app.open_create();
+        focus_row(&mut app, CreateRow::Skills);
+        let screen = super::tests_support::render_at(&mut app, 110, 40);
+        let footer = screen.lines().last().unwrap();
+        assert!(
+            footer.contains("←→ off / read-only") && footer.contains("w read-write…"),
+            "{footer}"
+        );
+        app.screen = Screen::List;
+        app.on_key(KeyEvent::from(KeyCode::Char('T')));
+        let skills_row = crate::app::SETTINGS.len();
+        let footer_at = |app: &mut App, focus: usize| {
+            if let Screen::Settings(form) = &mut app.screen {
+                form.skills = Some(aisbx_core::testkit::skills_default("readonly"));
+                form.focus = focus;
+            }
+            let screen = super::tests_support::render_at(app, 110, 40);
+            screen.lines().last().unwrap().to_string()
+        };
+        assert!(footer_at(&mut app, skills_row).contains("w read-write…"));
+        assert!(
+            !footer_at(&mut app, 0).contains("read-write"),
+            "on its row only"
+        );
+    }
+
+    #[test]
+    fn a_sandbox_with_the_deprecated_host_skills_kit_says_so_in_the_overview() {
+        let mut app = app_with(populated());
+        app.cursor = 0;
+        let screen = super::tests_support::render_at(&mut app, 110, 40);
+        assert!(!screen.contains("is deprecated"), "{screen}");
+        app.sandboxes[0].addons.push("host-skills".into());
+        let screen = super::tests_support::render_at(&mut app, 110, 40);
+        let warning = line_with(&screen, "⚠ kits");
+        assert!(
+            warning.contains("host-skills is deprecated: import your skills on Skills"),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("K opens Skills, e the kits."),
+            "the keys that act on it: {screen}"
+        );
     }
 
     #[test]

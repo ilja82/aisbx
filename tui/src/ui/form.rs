@@ -717,22 +717,24 @@ fn workspace_rows(
     }
 
     if form.skills_offered(catalog) {
-        out.row(
-            skills_spans(form.workspace.skills, out.width as usize),
-            focused == Some(CreateRow::Skills),
-            row_index(CreateRow::Skills),
-        );
-    }
-    if form.store_skills_offered(catalog) {
         let open = form.wizard.skills_open;
         out.row(
-            wizard::fold_spans(app, form, CreateRow::SkillsFold, "shared skills", open),
+            wizard::fold_spans(app, form, CreateRow::SkillsFold, "skills", open),
             focused == Some(CreateRow::SkillsFold),
             row_index(CreateRow::SkillsFold),
         );
         if open {
+            out.row(
+                skills_spans(form.workspace.skills, out.width as usize),
+                focused == Some(CreateRow::Skills),
+                row_index(CreateRow::Skills),
+            );
+        }
+        if open && form.store_skills_offered(catalog) {
             for (i, skill) in form.workspace.store_skills.iter().enumerate() {
-                let own = form.store_skill_own(i).then_some(Marker::Quiet("own"));
+                let own = form
+                    .store_skill_own(i)
+                    .then_some(Marker::Quiet(crate::app::SET_HERE));
                 out.row(
                     addon_spans(
                         skill,
@@ -1353,14 +1355,6 @@ pub(super) fn render_skills(frame: &mut Frame, app: &App, area: Rect) -> Hits {
     let known = app.skills.is_some();
 
     let mut out = Lines::new(area);
-    match app.skills_store_path() {
-        Some(store) => out.note(format!("Store: {}", model::tilde(&store))),
-        None => out.note("Store: not reported by sbx"),
-    }
-    out.note(crate::app::skills_shared_line(app.skills_sharers()));
-    for line in app.skills_trust_lines() {
-        out.note(line);
-    }
     for line in app.skills_intro() {
         out.para(line);
     }
@@ -1381,12 +1375,12 @@ pub(super) fn render_skills(frame: &mut Frame, app: &App, area: Rect) -> Hits {
         if heading != section {
             out.blank();
             // An empty store has no skill rows to put a heading over, so it is said.
-            if matches!(row, SkillRow::Import) && skills == 0 {
+            if matches!(row, SkillRow::AddRepo) && skills == 0 {
                 out.section("Skills in the store");
                 out.note(if known {
-                    "  nothing in the store yet — import this host's, or add from a repository"
+                    format!("  {}", crate::app::NO_STORE_SKILLS_YET)
                 } else {
-                    "  …"
+                    "  …".to_string()
                 });
                 out.blank();
             }
@@ -1404,7 +1398,7 @@ pub(super) fn render_skills(frame: &mut Frame, app: &App, area: Rect) -> Hits {
         out.explain_lines(focus == i, name, &app.skill_notes(row));
     }
     let buttons = [("Close", focus == close, Look::Plain, close)];
-    framed(frame, area, "Shared agent skills", out, &buttons)
+    framed(frame, area, crate::app::SKILLS_TITLE, out, &buttons)
 }
 
 /// A heading and its muted gloss on one line, both owned: a skills heading is built per frame.
@@ -2479,40 +2473,19 @@ fn current_spans(current: &Auth, users: usize) -> Vec<Span<'static>> {
 /// The shared-skills row: a tick box in the columns of the Options above it, plus the mode, when
 /// there is one, in the gloss column in the accent colour.
 fn skills_spans(mode: SkillsMode, width: usize) -> Vec<Span<'static>> {
-    // No "off": the empty box says it.
     let gloss = crate::create::skills_gloss(mode);
-    let value = match mode {
-        SkillsMode::Off => "",
-        _ => crate::create::skills_mode_name(mode),
-    };
-    const MODE: usize = 12;
-    let value = match value.is_empty() {
-        true => String::new(),
-        false => format!("{value:<MODE$}"),
-    };
-    let used = 5 + 14 + value.chars().count();
-    vec![
-        Span::styled(
-            if mode == SkillsMode::Off {
-                " [ ] "
-            } else {
-                " [x] "
-            },
-            Style::default().fg(theme::ACCENT),
-        ),
-        Span::styled(
-            format!("{:<14}", "share skills"),
-            match mode {
-                SkillsMode::Off => Style::default(),
-                _ => Style::default().bold(),
-            },
-        ),
-        Span::styled(value, Style::default().fg(theme::ACCENT)),
-        Span::styled(
-            super::clip(gloss, width.saturating_sub(used)),
-            theme::muted(),
-        ),
-    ]
+    let value = format!("‹ {} ›", crate::create::skills_mode_name(mode));
+    let used = 5 + 14 + value.chars().count() + 3;
+    field_row_spans(
+        "access",
+        vec![
+            Span::styled(value, Style::default().fg(theme::ACCENT)),
+            Span::styled(
+                format!("   {}", super::clip(gloss, width.saturating_sub(used))),
+                theme::muted(),
+            ),
+        ],
+    )
 }
 
 /// A field on the create wizard's Workspace step: its label, muted, in the column the option rows'

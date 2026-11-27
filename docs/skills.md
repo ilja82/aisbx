@@ -2,16 +2,29 @@
 
 [← Back to the README](../README.md)
 
-Give the agents your skills: the sbx skills store, a switch per skill for all sandboxes, and each sandbox's own
-switches.
+Skills teach an agent how to do a task, for example how to fill in a PDF form or how your team reviews code. A
+skill is a folder with a `SKILL.md` file. aisbx gives your skills to the agents in the sandboxes.
 
-aisbx gives skills to a sandbox in three ways:
+## Quick start
 
-- the sbx skills store, below: one store on the host, and a switch per skill that decides which sandboxes get it;
-- the [`host-skills`](addons.md#host-skills-read-only) addon: the host's skills folders, live and read-only, on every
-  backend;
-- [skill repositories](#skill-repositories-aisbx-skill-repo): Git repositories that aisbx mirrors. **Deprecated:**
-  add those skills to the store instead ([Deprecations](deprecations.md#skill-repos)).
+1. Press `K` (**Skills** in `aisbx-ui`).
+2. Choose *Add from a Git repository* for a repository such as `anthropics/skills` (recommended: the skills then
+   update daily). *Import this host's skills* copies your own skills (`~/.claude/skills`, `~/.agents/skills`, ...),
+   but they do not update.
+3. Switch on only the skills that every sandbox needs: `space` on a skill. Start with most of them off. A new skill
+   always starts off.
+4. Switch on more skills for one sandbox when you create it (the wizard's *skills*), or later with `i` on the
+   sandbox.
+
+The agent gets the change at its next start. On a running sandbox, *Apply now* on `i` links the skills at once. The
+*Overview* tab of each sandbox names the skills its agent gets: press `i` there to change them.
+
+aisbx still supports two older ways. Both are deprecated:
+
+- the [`host-skills`](addons.md#host-skills-read-only) addon: the host's skills folders, read-only. Import those
+  skills on `K` instead ([Deprecations](deprecations.md#host-skills)).
+- [skill repositories](#skill-repositories-aisbx-skill-repo): Git repositories that aisbx mirrors. Add those skills
+  to the store instead ([Deprecations](deprecations.md#skill-repos)).
 
 ## The sbx skills store
 
@@ -20,20 +33,22 @@ aisbx decides which of its skills each agent gets.
 
 ### The skills screen (`K`)
 
-Press `K` to see the store: its path, how many sandboxes share it, and its skills. The skills are grouped by where
-they came from ([Where a skill came from](#where-a-skill-came-from)). Each skill has a switch at the right:
-`● on` or `○ off`.
+Press `K` to open *Skills · all sandboxes*. Switch on here only the skills that every sandbox needs; a sandbox gets
+more skills at its creation or on `i`. The skills are grouped by where they came from
+([Where a skill came from](#where-a-skill-came-from)).
+Each skill has a switch at the right: `● on` or `○ off`. Under the skills are *Add skills* and *Updates*.
 
 | Key | Does |
 | --- | --- |
 | `space` or `↵` | switches the skill under the cursor on or off for all sandboxes |
-| `i` | imports your skill folders (`~/.agents/skills`, `~/.claude/skills`, `~/.config/opencode/skills`, ...) |
-| `a` | adds every skill of a Git repository, such as `anthropics/skills`, and keeps it in step ([Updates](#updates)) |
-| `u` | updates the skills that `a` added (*Update from repositories*) |
+| `a` | adds every skill of a Git repository, such as `anthropics/skills`, and keeps it in step ([Updates](#updates)). Recommended |
+| `i` | imports your skill folders (`~/.agents/skills`, `~/.claude/skills`, `~/.config/opencode/skills`, ...). Not recommended: they do not update |
+| `u` | updates the skills that `a` added now (*Update now*), as the daily update does |
 | `d` | removes a skill |
 
 The same screen has the *Update daily* switch ([Updates](#updates)). An import over a repository skill drops that
-skill's link to its repository.
+skill's link to its repository. After an import or an add, the status line names the skills that are new to the
+store; they are off until you switch them on.
 
 Without the dashboard, use `sbx skills import`, `sbx skills add <repo> --skill <name>`, `sbx skills update` and
 `sbx skills ls`, and [`aisbx skills`](headless.md#aisbx-skills) for the switches.
@@ -49,13 +64,13 @@ Every skill starts off: no sandbox gets it until you switch it on.
 Each sandbox can switch single skills the other way:
 
 - Press `i` on a sandbox to see the store's skills and the sandbox's switches. A switch that differs from the
-  switch for all sandboxes is marked *own*.
-- Switch it back to follow the switch for all sandboxes again. *Follow all sandboxes* drops every own switch of the
-  sandbox.
+  switch for all sandboxes is marked *set here*.
+- Switch it back to follow the switch for all sandboxes again. *Reset to all sandboxes* drops every switch set here.
 - On a running sandbox, *Apply now* links the switched-on skills at once. Otherwise the change arrives at the next
   start.
-- In the create wizard, the *shared skills* fold under *share skills* sets the new sandbox's switches. It starts on
-  the switches for all sandboxes.
+- `i` has *Add from a Git repository* and *Import this host's skills* too (keys `a` and `i`), as on `K`.
+- In the create wizard, the *Skills* fold on the *Workspace and options* step sets the new sandbox's switches. It
+  starts on the switches for all sandboxes. While the store holds no skill, the fold says so.
 
 A rebuild keeps a sandbox's switches. Deleting the sandbox with `d` or `aisbx rm` drops them. The switches are in
 `store-skills.json` in the aisbx state folder (`~/.local/state/aisbx`; on Windows `%LOCALAPPDATA%\aisbx\state`).
@@ -106,7 +121,7 @@ When it runs:
 
 - **Update daily** (on by default): while the dashboard runs, once every 24 hours. Switch it off on `K`, or with
   `aisbx skills auto-update off`.
-- *Update from repositories* (`u`) runs it at once, then `sbx skills update` for skills added with plain `sbx`.
+- *Update now* (`u`) runs it at once, then `sbx skills update` for skills added with plain `sbx`.
 - `aisbx skills update` runs it from a script ([`aisbx skills`](headless.md#aisbx-skills)).
 
 Each update reports what changed: on the status line, and under *Update daily* on `K` (*last update 2 hours ago:
@@ -119,10 +134,10 @@ import it again.
 
 ### Share modes
 
-Choose the mode on the create wizard's *share skills* row. It starts on the host's `skills.defaultMode`, which you
-change on the settings screen (`T`, *skills default*) or with `sbx settings set skills.defaultMode <mode>`. The
-default also applies to `aisbx up` and a plain `sbx create` without `--skills`. You cannot change a sandbox's mode
-after creation; a rebuild keeps it.
+Choose the mode on the *access* row of the create wizard's *Skills* fold. It starts on the host's
+`skills.defaultMode`, which you change on the settings screen (`T`, *skills default*) or with
+`sbx settings set skills.defaultMode <mode>`. The default also applies to `aisbx up` and a plain `sbx create` without
+`--skills`. A rebuild keeps a sandbox's mode.
 
 | Mode | The sandbox |
 | --- | --- |
@@ -130,7 +145,16 @@ after creation; a rebuild keeps it.
 | `readwrite` | reads every shared skill, and can change the skills that every other sharing sandbox loads |
 | `off` | gets no store |
 
-**`readwrite` puts every sharing sandbox behind one trust boundary.**
+**`readwrite` puts every sharing sandbox behind one trust boundary.** A read-write agent can change the skills that
+every other sandbox loads, and a skill holds scripts that agents run. So aisbx gives read-write only when you ask for
+it on purpose:
+
+- In the wizard and on `T`, `space`, `↵` and the arrows switch only between off and read-only. Read-write is `w` on
+  the row (in `aisbx-ui`, a click on *Read-write*), and a red confirmation names the risk first.
+- The wizard never starts on read-write: not from your last sandbox's answers, and not from a read-write host
+  default.
+- `aisbx up --skills readwrite`, or a read-write host default, prints a warning on stderr.
+- A sandbox that is read-write says so in its details. *Make read-only* on its skills (`i`) rebuilds it read-only.
 
 ### Which backends get the store
 

@@ -917,8 +917,11 @@ impl Catalog {
 pub const HEADLESS_ONLY: [&str; 1] = ["pkg-cache"];
 
 /// The addon that links the host's skills into the sandbox before every session aisbx starts
-/// ([`crate::skill_source::SkillSource::HostFolder`]).
+/// ([`crate::skill_source::SkillSource::HostFolder`]). Deprecated: `compat::host_skills_warning`.
 pub const HOST_SKILLS: &str = "host-skills";
+
+/// How a shipped kit's description starts once the kit is deprecated ([`Kit::deprecated`]).
+pub const DEPRECATED: &str = "Deprecated:";
 
 impl Kit {
     /// Read one kit directory. Also the check that a *generated* kit — the wiring for a named
@@ -933,6 +936,12 @@ impl Kit {
     pub fn user_note(&self) -> Option<String> {
         self.user
             .then(|| format!("Your own kit, from {}.", self.dir.display()))
+    }
+
+    /// A shipped kit that a newer way replaced: its description starts with [`DEPRECATED`]. The
+    /// dashboard offers it only to a sandbox that has it; `aisbx up --kit` still takes it.
+    pub fn deprecated(&self) -> bool {
+        !self.user && self.description.starts_with(DEPRECATED)
     }
 
     /// The description's first sentence, its period kept: what a form has room for.
@@ -1364,6 +1373,40 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(descriptor_path(&dir), descriptor).unwrap();
         dir
+    }
+
+    #[test]
+    fn only_host_skills_is_deprecated_and_a_user_kit_never_is() {
+        let mut catalog = Catalog::load().unwrap();
+        let deprecated: Vec<&str> = (catalog.backends.iter().map(|b| &b.kit))
+            .chain(catalog.all_addons().map(|a| &a.kit))
+            .filter(|k| k.deprecated())
+            .map(|k| k.name.as_str())
+            .collect();
+        assert_eq!(deprecated, [HOST_SKILLS]);
+        let kit = &catalog.addon(HOST_SKILLS).unwrap().kit;
+        assert_eq!(
+            kit.first_sentence(),
+            "Deprecated: use the shared skills store instead (Skills, K, in aisbx).",
+            "the kits editor's help names the replacement"
+        );
+        assert!(
+            kit.changes[0].starts_with(DEPRECATED),
+            "the update note says it too: {:?}",
+            kit.changes
+        );
+        let root = crate::testkit::scratch("deprecated-user-kit");
+        let dir = root.join("user-old-tools");
+        fs::create_dir_all(&dir).unwrap();
+        let descriptor = "schemaVersion: \"3\"\nkind: mixin\ndescription: \"Deprecated: use x.\"\n";
+        fs::write(descriptor_path(&dir), descriptor).unwrap();
+        catalog.add_user_kits(&root);
+        let user = &catalog.addon("user-old-tools").unwrap().kit;
+        assert!(user.user && user.description.starts_with(DEPRECATED));
+        assert!(
+            !user.deprecated(),
+            "the dashboard never hides the user's own kit"
+        );
     }
 
     #[test]

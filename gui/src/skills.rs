@@ -2,10 +2,11 @@
 //! picker. Core decides the rows and every decision drawn; nothing here reads a file or calls
 //! sbx.
 
-use aisbx_core::app::{skills_shared_line, App, Hit, SandboxSkillRow, Screen, SkillRow};
+use aisbx_core::app::{
+    App, Hit, SandboxSkillRow, Screen, SkillRow, NO_STORE_SKILLS_YET, SKILLS_TITLE,
+};
 use aisbx_core::compat;
 use aisbx_core::input::{KeyCode, KeyEvent};
-use aisbx_core::model;
 use aisbx_core::repo_skills_ui::{RepoScope, RepoSkillRow, RepoSkillsForm};
 use eframe::egui;
 
@@ -26,12 +27,16 @@ pub fn row_actions(row: &SkillRow) -> Vec<(&'static str, KeyCode, Look)> {
     }
 }
 
-/// What a row of a sandbox's skills page can do, as its buttons: *Apply now*, the reset and the
-/// repo skills picker run by ↵. A skill's switch is Space ([`App::sandbox_skill_switch`]).
+/// What a row of a sandbox's skills page can do, as its buttons: *Apply now*, the reset, the two
+/// ways to add skills and the repo skills picker run by ↵. A skill's switch is Space
+/// ([`App::sandbox_skill_switch`]).
 pub fn sandbox_row_actions(row: &SandboxSkillRow) -> Vec<(&'static str, KeyCode, Look)> {
     match row {
         SandboxSkillRow::ApplyNow => vec![("Apply", KeyCode::Enter, Look::Plain)],
         SandboxSkillRow::Reset => vec![("Reset", KeyCode::Enter, Look::Plain)],
+        SandboxSkillRow::MakeReadonly => vec![("Make read-only", KeyCode::Enter, Look::Plain)],
+        SandboxSkillRow::Import => vec![("Import…", KeyCode::Enter, Look::Plain)],
+        SandboxSkillRow::AddRepo => vec![("Add…", KeyCode::Enter, Look::Plain)],
         SandboxSkillRow::RepoSkills => vec![("Open", KeyCode::Enter, Look::Plain)],
         SandboxSkillRow::Skill(_) | SandboxSkillRow::Close => Vec::new(),
     }
@@ -134,33 +139,20 @@ pub fn show_store(ui: &mut egui::Ui, app: &mut App) {
     let known = view.skills.is_some();
     let close = form::index_of(&rows, SkillRow::Close);
     let groups = groups(rows.iter().map(|r| view.skill_heading(r)).collect());
-    let store = match view.skills_store_path() {
-        Some(store) => format!("The store: {}.", model::tilde(&store)),
-        None => "sbx does not report where the store is.".to_string(),
-    };
-    let facts = [store, skills_shared_line(view.skills_sharers())]
-        .into_iter()
-        .chain(view.skills_trust_lines())
-        .collect::<Vec<_>>()
-        .join(" ");
-    let subtitle = format!("{facts}\n{}", view.skills_intro().join(" "));
+    let subtitle = view.skills_intro().join("\n");
     let mut asked = None;
 
     page::bar(ui, "skills", |ui| {
         list.buttons(ui, &[("Close", close, false)]);
     });
-    page::body(ui, "skills", "Shared agent skills", &subtitle, |ui| {
+    page::body(ui, "skills", SKILLS_TITLE, &subtitle, |ui| {
         let weak = ui.visuals().weak_text_color();
         if !known {
             page::paragraph(ui, "Reading `sbx skills ls`…", weak);
         }
         if known && !rows.iter().any(|r| matches!(r, SkillRow::Skill(_))) {
             page::heading(ui, "Skills in the store", "");
-            page::paragraph(
-                ui,
-                "Nothing in the store yet — import this host's, or add from a repository.",
-                weak,
-            );
+            page::paragraph(ui, NO_STORE_SKILLS_YET, weak);
         }
         for ((title, gloss), items) in &groups {
             page::heading(ui, title, gloss);

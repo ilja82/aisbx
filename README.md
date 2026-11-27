@@ -47,14 +47,14 @@ aisbx builds on these sbx features. It does not replace them.
   ([Local inference engines](docs/local.md)).
 - **Two Anthropic accounts at once**, through named setup tokens
   ([Two Anthropic accounts](docs/accounts.md#two-anthropic-accounts-at-once)).
-- **Addons** that stack onto every backend: JDK, Rust, read-only host caches, host skills, RTK and more
+- **Addons** that stack onto every backend: JDK, Rust, read-only host caches, RTK and more
   ([Addons](#addons)).
 - **Tight allow-lists:** each kit opens only the hosts its agent needs, and turns the agents' telemetry off
   ([Telemetry](docs/network.md#telemetry-and-non-essential-traffic)).
 - **Credential bindings set for you:** without a binding, sbx silently withholds a credential. aisbx adds it before
   each create, rebuild or start ([Credentials](docs/accounts.md#credentials)).
-- **Skill switches:** switch each skill of the sbx store on or off for all sandboxes, and per sandbox, grouped by
-  where the skills came from ([Switches](docs/skills.md#switches)).
+- **Skills for the agents:** import your own skills or a Git repository's (`K`), then switch each one on for all
+  sandboxes, or for one sandbox (`i`) ([Shared agent skills](docs/skills.md#quick-start)).
 - **A dashboard** in the terminal (`aisbx`) and as a desktop window (`aisbx-ui`): many sandboxes per project, a
   create wizard, approvals, rebuilds that keep your settings, and update detection ([The aisbx dashboard](docs/dashboard.md)).
 - **Headless commands** for scripts and CI, and `aisbx step`, one sandboxed unit of work per process with a
@@ -225,7 +225,8 @@ To start it again later, select it and press `↵`, or click **Start**.
 
 ![The aisbx dashboard in ~/my-project: two sandboxes of this folder and two of another folder, the selected Claude Code sandbox running with one network request waiting for approval, its Overview tab below and the keys in the footer.](docs/images/tui-list.png)
 
-The keys you use most: `n` new, `↵` start, `x` shell, `e` kits, `y` approvals, `s` stop, `d` delete, `?` every key.
+The keys you use most: `n` new, `↵` start, `x` shell, `e` kits, `i` skills, `y` approvals, `s` stop, `d` delete,
+`?` every key.
 [Common tasks](docs/dashboard.md#common-tasks) lists more.
 
 ### In the window: `aisbx-ui`
@@ -284,7 +285,7 @@ Pick addons in the create wizard or with `e`. [Stackable kits](docs/addons.md) d
 | `host-gradle`, `host-maven`  | [the host's Gradle and Maven caches](docs/addons.md#host-mavengradle-caches-read-only), read-only |
 | `host-gradle-properties`     | [the host's `~/.gradle/gradle.properties`](docs/addons.md#host-gradle-properties-file), copied; opt-in, may hold secrets |
 | `host-npm`, `host-pip`       | [the host's npm, pip and uv caches](docs/addons.md#host-npmpipuv-caches-read-only), read-only |
-| `host-skills`                | [the host's own skills](docs/addons.md#host-skills-read-only), read-only and live |
+| `host-skills`                | deprecated: [the host's own skills](docs/addons.md#host-skills-read-only); import them on `K` instead ([Deprecations](docs/deprecations.md#host-skills)) |
 | `web`                        | [access to every host](docs/addons.md#web-access-websearch--webfetch), for WebFetch and web search |
 | `remote-dev`                 | the hosts that [VS Code, Cursor and JetBrains](docs/sandboxes.md#editor-and-app-integrations-vs-code-intellij-claude-desktop) need to install their server |
 | `rtk`                        | the [RTK](docs/addons.md#rtk-token-reducer) token reducer                  |

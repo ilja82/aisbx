@@ -139,7 +139,9 @@ The Overview opens with a map of what the agent can reach, drawn on a dotted fie
   means.
 
 Under the map, the Overview groups its facts under *Agent*, *Workspace*, *Lifecycle* and *Build*. Each value has its
-explanation beside it. The name, the state and a waiting request are in the head, not here.
+explanation beside it. The name, the state and a waiting request are in the head, not here. A row about something you
+can change has its button: *Skills*, for example, names the skills the agent gets and has *Change* (or *Add skills*
+while the store holds none).
 
 ## The other tabs
 
@@ -207,8 +209,8 @@ centred column under the page's title, with its buttons along the window's foot.
 
 - The account forms and the connection dialog use the wizard's tiles, radios and input boxes.
 - The pages that list things show every item with its own buttons: *Allow* and *Dismiss* on a request; *Edit*,
-  *Replace*, *Store*, *Delete* or *Sign out* on a secret; *Remove* on a skill; *New LiteLLM connection* on `S`. A
-  skill on `K` and `i` and an MCP server on `t` have a switch at the right edge.
+  *Replace*, *Store*, *Delete* or *Sign out* on a secret; *Remove* on a skill; *Import…* and *Add…* on `K` and `i`;
+  *New LiteLLM connection* on `S`. A skill on `K` and `i` and an MCP server on `t` have a switch at the right edge.
 - A click on an item selects it and shows what core says about it under it. The keys work as in `aisbx`.
 - Tokens and keys show as dots.
 

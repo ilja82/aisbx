@@ -38,7 +38,7 @@ Pick the kits in the create wizard (`n`, or **New sandbox**). You can add an *ad
 | `host-maven` | stackable mixin | the host's Maven repository and wrapper dists, read-only |
 | `host-npm` | stackable mixin | the host's npm cache, read-only, through a sandbox-local overlay |
 | `host-pip` | stackable mixin | the host's pip and uv caches, read-only, through sandbox-local overlays |
-| `host-skills` | stackable mixin | the host's own skills (`~/.agents/skills`, `~/.claude/skills`), read-only and live |
+| `host-skills` | stackable mixin, deprecated | the host's own skills (`~/.agents/skills`, `~/.claude/skills`), read-only and live; import them on `K` instead ([Deprecations](deprecations.md#host-skills)) |
 | `pkg-cache` | stackable mixin, headless only | installs npm/pip/uv/cargo dependencies offline from a cache the caller mounted read-only |
 | `web` | stackable mixin | full web egress for the agents' fetch and search tools |
 | `remote-dev` | stackable mixin | lets VS Code / Cursor / JetBrains install their server inside |

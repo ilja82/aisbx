@@ -553,8 +553,8 @@ impl CreateForm {
     pub fn pick_choice(&mut self, row: CreateRow, value: usize) -> bool {
         match row {
             CreateRow::Skills => match SKILLS_MODES.get(value) {
+                Some(crate::sbx::SkillsMode::Readwrite) | None => return false,
                 Some(mode) => self.workspace.skills = *mode,
-                None => return false,
             },
             CreateRow::LitellmConn => {
                 let saved = self.connection.connections.len();
@@ -669,6 +669,7 @@ impl CreateForm {
                 Some(wanted) => {
                     wanted.contains(&addon.kit.name)
                         && !crate::model::HOST_FILE_KITS.contains(&addon.kit.name.as_str())
+                        && !addon.kit.deprecated()
                         && !self.addon_unavailable(i)
                 }
                 None => Some(i) == status_line,
@@ -678,7 +679,7 @@ impl CreateForm {
         let ws = &mut self.workspace;
         ws.clone = defaults.clone;
         ws.git_guard = defaults.git_guard;
-        ws.skills = defaults.skills.unwrap_or(skills_default);
+        ws.skills = defaults.skills.unwrap_or(skills_default).safe();
         ws.ports.set(&defaults.ports);
         ws.deny_network.set(&defaults.deny_network);
         ws.no_mcp = crate::sbx::is_no_mcp(&defaults.mcp);
@@ -890,6 +891,14 @@ pub const DRAFT_BACK: &str = "your unfinished answers are back";
 
 /// What the status line says when New opens on the last create's answers.
 pub const PREFILLED: &str = "prefilled with the settings of your last sandbox";
+
+/// What the status line says when the last create's answers had read-write skills, which the
+/// next form does not take over.
+pub const PREFILLED_READ_ONLY: &str = "prefilled with the settings of your last sandbox, with the \
+     shared skills read-only: read-write is picked per sandbox, after a warning";
+
+/// What the wizard's skills fold says while the shared store holds no skill.
+pub const NO_STORE_SKILLS: &str = "none in the store yet: add skills on Skills (K)";
 
 /// The last value of the LiteLLM connection row: a connection made together with the sandbox.
 pub const NEW_CONNECTION: &str = "new connection…";
@@ -1374,11 +1383,6 @@ impl CreateForm {
                 !ws.git_guard,
             );
         }
-        if self.skills_offered(catalog) {
-            let skills = skills_mode_name(ws.skills);
-            let default = ws.skills == app.skills_default;
-            answer(CreateStep::Workspace, "Skills", skills.into(), default);
-        }
         if self.store_skills_offered(catalog) {
             let on = self.store_skills_on();
             let own = (0..ws.store_skills.len()).any(|i| self.store_skill_own(i));
@@ -1386,7 +1390,17 @@ impl CreateForm {
                 true => "none".to_string(),
                 false => on.join(", "),
             };
-            answer(CreateStep::Workspace, "Shared skills", value, !own);
+            answer(CreateStep::Workspace, "Skills", value, !own);
+        }
+        if self.skills_offered(catalog) {
+            let skills = skills_mode_name(ws.skills);
+            let default = ws.skills == app.skills_default.safe();
+            answer(
+                CreateStep::Workspace,
+                "Skills access",
+                skills.into(),
+                default,
+            );
         }
         if status_line.is_some() && !self.status_line_on(catalog) {
             answer(CreateStep::Workspace, "Status line", "off".into(), false);
@@ -1903,9 +1917,7 @@ impl CreateForm {
                     CreateRow::StoreSkill(i) => self.toggle_store_skill(i),
                     CreateRow::Clone => self.workspace.clone = !self.workspace.clone,
                     CreateRow::GitGuard => self.workspace.git_guard = !self.workspace.git_guard,
-                    // Three values, so space walks them rather than flipping one — off →
-                    // readonly → readwrite → off, tightest first.
-                    CreateRow::Skills => self.workspace.skills = self.workspace.skills.next(),
+                    CreateRow::Skills => self.workspace.skills = self.workspace.skills.toggled(),
                     // A folder is not a toggle: space opens the picker, the same as ↵.
                     CreateRow::StartDir => return FieldEffect::OpenStartDir,
                     CreateRow::AuthOauth => self.connection.account = AccountChoice::Login,
@@ -1966,7 +1978,7 @@ impl CreateForm {
                 }
                 CreateRow::Clone => self.workspace.clone = !self.workspace.clone,
                 CreateRow::GitGuard => self.workspace.git_guard = !self.workspace.git_guard,
-                CreateRow::Skills => self.workspace.skills = self.workspace.skills.next(),
+                CreateRow::Skills => self.workspace.skills = self.workspace.skills.toggled(),
                 CreateRow::LitellmConn => match self.connection.litellm {
                     Some(_) => return FieldEffect::Next,
                     None => opened = true,
@@ -2027,14 +2039,10 @@ impl CreateForm {
                 | CreateRow::AdvancedFold
                 | CreateRow::SkillsFold => {}
             },
-            // The skills mode is the one answer here that is a small enum rather than a tick, so
-            // ←→ pick between its values.
             KeyCode::Left | KeyCode::Right if row == CreateRow::Skills => {
-                self.workspace.skills = match key.code {
-                    KeyCode::Right => self.workspace.skills.next(),
-                    _ => self.workspace.skills.prev(),
-                };
+                self.workspace.skills = self.workspace.skills.toggled();
             }
+            KeyCode::Char('w') if row == CreateRow::Skills => return FieldEffect::AskReadwrite,
             // So is the connection: ←→ walk the host's connections.
             KeyCode::Left | KeyCode::Right if row == CreateRow::LitellmConn => {
                 self.cycle_litellm(key.code == KeyCode::Right);
@@ -2089,13 +2097,25 @@ impl CreateForm {
                 }
             }
             CreateRow::SkillsFold => {
-                let on = self.store_skills_on();
-                let own = (0..ws.store_skills.len())
-                    .filter(|i| self.store_skill_own(*i))
-                    .count();
-                parts.push(format!("{} of {} on", on.len(), ws.store_skills.len()));
-                if own > 0 {
-                    parts.push(format!("{own} own"));
+                let readonly = ws.skills == crate::sbx::SkillsMode::Readonly;
+                match self.store_skills_offered(catalog) {
+                    true => {
+                        let on = self.store_skills_on();
+                        let own = (0..ws.store_skills.len())
+                            .filter(|i| self.store_skill_own(*i))
+                            .count();
+                        parts.push(format!("{} of {} on", on.len(), ws.store_skills.len()));
+                        if own > 0 {
+                            parts.push(format!("{own} {}", crate::app::SET_HERE));
+                        }
+                    }
+                    false if readonly && ws.store_skills.is_empty() => {
+                        parts.push(NO_STORE_SKILLS.to_string())
+                    }
+                    false => parts.push(skills_gloss(ws.skills).to_string()),
+                }
+                if !readonly {
+                    parts.insert(0, skills_mode_name(ws.skills).to_string());
                 }
             }
             CreateRow::AdvancedFold => {
@@ -2339,7 +2359,7 @@ pub fn field_gloss(row: CreateRow) -> &'static str {
         CreateRow::FilesFold => "for your review",
         CreateRow::AdvancedFold => "status line, ports, blocked hosts, MCP servers",
         CreateRow::StatusLine => "sandbox, model, context and usage under Claude Code's prompt",
-        CreateRow::SkillsFold => "which shared skills this sandbox gets",
+        CreateRow::SkillsFold => "which skills the agent gets",
         CreateRow::Ports => "for example 8080:3000",
         CreateRow::DenyNetwork => "for example api.example.com",
         CreateRow::McpNone => "the agent gets no MCP servers",
@@ -2672,15 +2692,34 @@ impl CreateForm {
                     }
                     crate::sbx::SkillsMode::Off => "The agent gets none of the shared skills.",
                 };
+                let host = match app.skills_default {
+                    crate::sbx::SkillsMode::Readwrite => {
+                        " This host's default is read-write; the wizard starts read-only."
+                    }
+                    _ => "",
+                };
                 Help::new(
-                    "share skills",
-                    format!("{text} Changing this later rebuilds the sandbox."),
+                    "access",
+                    format!(
+                        "{text} Read-write is picked on its own, after a warning.{host} Changing \
+                         this later rebuilds the sandbox."
+                    ),
                 )
             }
             CreateRow::SkillsFold => Help::new(
                 "skills",
-                "Which skills of the shared store this sandbox gets. Each starts as Skills (K) \
-                 switches it for all sandboxes; a switch you change here is this sandbox's own.",
+                match (ws.skills, ws.store_skills.is_empty()) {
+                    (crate::sbx::SkillsMode::Readonly, true) => {
+                        "Skills teach the agent how to do a task. The shared store holds none \
+                         yet: add skills on Skills (K) after the create, then switch on the ones \
+                         this sandbox gets (Sandbox skills, i)."
+                    }
+                    _ => {
+                        "Which skills of the shared store the agent gets, and its access to them. \
+                         Each skill starts as Skills (K) switches it for all sandboxes; a switch \
+                         you change here is set here."
+                    }
+                },
             ),
             CreateRow::StoreSkill(i) => {
                 let Some(skill) = ws.store_skills.get(i) else {
@@ -2691,7 +2730,7 @@ impl CreateForm {
                     false => "off",
                 };
                 let own = match self.store_skill_own(i) {
-                    true => format!(" This switch is this sandbox's own; for all sandboxes it is {all}."),
+                    true => format!(" This switch is set here; for all sandboxes it is {all}."),
                     false => format!(" For all sandboxes it is {all} too."),
                 };
                 Help::new(
@@ -2786,6 +2825,9 @@ pub enum FieldEffect {
     ResetConfig(usize),
     /// Open a picker for one more host folder, which comes back as [`CreateRow::Folder`].
     PickFolder,
+    /// Read-write access to the shared skills, which only a confirmation sets
+    /// ([`crate::app::App::ask_skills_readwrite`]).
+    AskReadwrite,
 }
 
 #[cfg(test)]
@@ -3297,14 +3339,27 @@ mod tests {
         assert!(!f.workspace.no_mcp);
         f.field_key(&catalog, CreateRow::Mcp(0), space);
 
-        // The skills mode walks on space and on ←→; on any other row ←→ is the wizard's.
+        // Space, ↵ and ←→ swap off and read-only; read-write is `w`, behind a confirmation. On
+        // any other row ←→ is the wizard's.
+        use crate::sbx::SkillsMode;
         let start = f.workspace.skills;
-        f.field_key(&catalog, CreateRow::Skills, key(KeyCode::Right));
-        assert_eq!(f.workspace.skills, start.next());
-        f.field_key(&catalog, CreateRow::Skills, key(KeyCode::Left));
+        assert_eq!(start, SkillsMode::Readonly);
+        for code in [
+            KeyCode::Right,
+            KeyCode::Left,
+            KeyCode::Enter,
+            KeyCode::Char(' '),
+        ] {
+            f.field_key(&catalog, CreateRow::Skills, key(code));
+            assert_eq!(f.workspace.skills, SkillsMode::Off, "{code:?}");
+            f.field_key(&catalog, CreateRow::Skills, key(code));
+            assert_eq!(f.workspace.skills, start, "{code:?}");
+        }
+        let w = f.field_key(&catalog, CreateRow::Skills, key(KeyCode::Char('w')));
+        assert_eq!(w, FieldEffect::AskReadwrite);
+        assert_eq!(f.workspace.skills, start, "only the confirmation sets it");
+        assert!(!f.pick_choice(CreateRow::Skills, 2), "nor a pick");
         assert_eq!(f.workspace.skills, start);
-        f.field_key(&catalog, CreateRow::Skills, space);
-        assert_eq!(f.workspace.skills, start.next());
         let right = f.field_key(&catalog, CreateRow::Clone, key(KeyCode::Right));
         assert_eq!(right, FieldEffect::Ignored);
 

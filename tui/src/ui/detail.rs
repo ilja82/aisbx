@@ -13,7 +13,7 @@ use ratatui::Frame;
 use super::{bordered, clip, Hits};
 use crate::app::{App, Hit};
 use crate::insight::{self, short_time, Kind, Note, PieceKind, SourceTone, Tab};
-use crate::model::{self, Auth, FolderRelation, Lifecycle, Sandbox, Skills};
+use crate::model::{self, Auth, FolderRelation, Lifecycle, Sandbox};
 use crate::sbx::{Approval, LogHost, PolicyRule};
 use crate::state;
 use crate::stats;
@@ -496,22 +496,21 @@ fn overview_parts(sb: &Sandbox, app: &App) -> (Vec<Line<'static>>, Vec<Line<'sta
         ));
     }
 
-    if let Some(skills) = sb.skills {
+    if let Some(skills) = app.skills_summary(sb) {
+        let key = match skills.fix.map(|(action, _)| action.key().code) {
+            Some(crate::input::KeyCode::Char(c)) => format!(" — press {c}"),
+            _ => String::new(),
+        };
+        let gloss_style = match skills.warn {
+            true => theme::warn(),
+            false => theme::muted(),
+        };
         lines.push(field(
             "skills",
-            match skills {
-                Skills::Known(mode) => vec![
-                    Span::raw(crate::create::skills_mode_name(mode)),
-                    Span::styled(
-                        format!("   {}", crate::create::skills_gloss(mode)),
-                        theme::muted(),
-                    ),
-                ],
-                Skills::Unrecorded => vec![
-                    Span::raw("shared"),
-                    Span::styled("   created outside aisbx", theme::muted()),
-                ],
-            },
+            vec![
+                Span::raw(skills.value),
+                Span::styled(format!("   {}{key}", skills.gloss), gloss_style),
+            ],
         ));
     }
 
@@ -1253,6 +1252,15 @@ fn host_line(host: &LogHost, blocked: bool) -> Line<'static> {
 
 fn warnings(sb: &Sandbox) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
+    if let Some(note) = crate::compat::host_skills_note(&sb.addons) {
+        lines.push(field(
+            "⚠ kits",
+            vec![Span::styled(
+                format!("{note} K opens Skills, e the kits."),
+                theme::warn(),
+            )],
+        ));
+    }
     if let Some(dir) = &sb.other_checkout {
         lines.push(field(
             "⚠ kits",
@@ -1319,6 +1327,7 @@ fn notes(notes: &[Note]) -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Skills;
     use crate::sbx::SkillsMode;
     use crate::stats::Sample;
 

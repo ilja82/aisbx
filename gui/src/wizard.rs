@@ -1298,37 +1298,15 @@ fn workspace_step(ui: &mut egui::Ui, at: &mut Draw<'_, '_>) {
         at.take(response, row);
     }
     if form.skills_offered(catalog) {
-        let row = WizardRow::Field(CreateRow::Skills);
-        let index = at.index(row);
-        let options: Vec<String> = form
-            .choices(CreateRow::Skills)
-            .iter()
-            .map(|o| sentence(o))
-            .collect();
-        let gloss = sentence(create::skills_gloss(ws.skills));
-        let focused = at.focused(row);
-        let mut picked = None;
-        let response = controls::labelled(ui, "Share skills", &gloss, None, |ui| {
-            let (response, clicked) = controls::segmented(
-                ui,
-                "skills",
-                &options,
-                form.chosen(CreateRow::Skills),
-                focused,
-            );
-            picked = clicked;
-            response
-        });
-        at.take(response, row);
-        if let Some(value) = picked {
-            at.list.choose(index, value);
-        }
-    }
-    if form.store_skills_offered(catalog) {
         let open = form.wizard.skills_open;
-        fold(ui, at, CreateRow::SkillsFold, SHARED_SKILLS, open);
+        fold(ui, at, CreateRow::SkillsFold, SKILLS, open);
         if open {
-            nested(ui, |ui| store_skills(ui, at));
+            nested(ui, |ui| {
+                skills_access(ui, at);
+                if form.store_skills_offered(catalog) {
+                    store_skills(ui, at);
+                }
+            });
         }
     }
 
@@ -1343,13 +1321,44 @@ fn workspace_step(ui: &mut egui::Ui, at: &mut Draw<'_, '_>) {
 /// The title of [`CreateRow::StatusLine`] under *More options*.
 pub const STATUS_LINE: &str = "Status line";
 
-/// The title of the Workspace step's fold over the shared store's skills, and the badge of a skill
-/// whose switch is the new sandbox's own.
-pub const SHARED_SKILLS: &str = "Shared skills";
-pub const OWN: &str = "Own";
+/// The title of the Workspace step's fold over the skills mode and the shared store's skills, and
+/// the badge of a skill whose switch is set for the new sandbox alone.
+pub const SKILLS: &str = "Skills";
+pub const OWN: &str = "Set here";
 
-/// Under the *Shared skills* fold: a tick per skill of the shared store, ticked where the new
-/// sandbox gets it, with [`OWN`] where its switch differs from the one for all sandboxes.
+/// First under the *Skills* fold: the skills mode as a segmented control, the agent's access to
+/// the shared store.
+fn skills_access(ui: &mut egui::Ui, at: &mut Draw<'_, '_>) {
+    let form = at.form;
+    let row = WizardRow::Field(CreateRow::Skills);
+    let index = at.index(row);
+    let options: Vec<String> = form
+        .choices(CreateRow::Skills)
+        .iter()
+        .map(|o| sentence(o))
+        .collect();
+    let gloss = sentence(create::skills_gloss(form.workspace.skills));
+    let focused = at.focused(row);
+    let mut picked = None;
+    let response = controls::labelled(ui, "Access", &gloss, None, |ui| {
+        let (response, clicked) = controls::segmented(
+            ui,
+            "skills",
+            &options,
+            form.chosen(CreateRow::Skills),
+            focused,
+        );
+        picked = clicked;
+        response
+    });
+    at.take(response, row);
+    if let Some(value) = picked {
+        at.list.choose(index, value);
+    }
+}
+
+/// Under the *Skills* fold: a tick per skill of the shared store, ticked where the new sandbox
+/// gets it, with [`OWN`] where its switch differs from the one for all sandboxes.
 fn store_skills(ui: &mut egui::Ui, at: &mut Draw<'_, '_>) {
     let form = at.form;
     let dark = dark(ui);
